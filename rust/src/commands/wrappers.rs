@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::embedded;
 use crate::util;
@@ -8,7 +8,63 @@ fn args_to_strings(args: &[String]) -> Vec<String> {
 }
 
 pub fn run_init(args: &[String]) -> Result<(), String> {
-    embedded::run_bundled_script("init.sh", &args_to_strings(args), "workspace", &[])
+    // Modern project model: `eco init <dir>` makes that directory the project
+    // root (the only directory eco scans — no `*_core` naming, no sibling
+    // discovery). It scaffolds a minimal ecompose.yml + the gitignored
+    // .eco/state.json + .gitignore, then git-inits the project.
+    let dir_arg = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| ".".to_string());
+    let dir = Path::new(&dir_arg);
+    if dir.exists() && !dir.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let project = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+    let project = if project.is_empty() { "project".to_string() } else { project };
+
+    let ecompose_path = dir.join("ecompose.yml");
+    if !ecompose_path.is_file() {
+        let ecompose = format!("project: {project}\n\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n\n");
+        std::fs::write(&ecompose_path, ecompose).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+    }
+
+    // .eco/state.json — the gitignored estate binding + registry.
+    crate::commands::lxs::write_estate_state(dir, &project, "")?;
+
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.is_file() {
+        std::fs::write(&gitignore, ".eco/\ntarget/\nnode_modules/\ndist/\n.next/\n.env\n").map_err(|e| format!("write .gitignore: {e}"))?;
+    }
+
+    if !dir.join(".git").exists() {
+        crate::util::run_command("git", &["init".to_string(), "-b".to_string(), "main".to_string()], dir)?;
+        crate::util::run_command("git", &["add".to_string(), "-A".to_string()], dir)?;
+        crate::util::run_command(
+            "git",
+            &[
+                "-c".to_string(),
+                "user.name=Eco Creator".to_string(),
+                "-c".to_string(),
+                "user.email=dev@getecosphere.com".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "chore: eco init project".to_string(),
+            ],
+            dir,
+        )?;
+    }
+
+    println!("[eco] Initialized project {project} in {}/", dir.display());
+    println!("  ecompose.yml      the manifest (project root = the only scanned dir)");
+    println!("  .eco/state.json   gitignored estate binding + registry");
+    println!("\nNext:");
+    println!("  cd {dir_arg}");
+    println!("  eco lxs add <name>    compose a registry LXS (binary)");
+    println!("  cd <your-domain> && eco lxs add .   register a source LXS");
+    println!("  eco up --remote       build locally + ship to the target");
+    Ok(())
 }
 
 pub fn run_configure(args: &[String]) -> Result<(), String> {

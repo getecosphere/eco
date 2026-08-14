@@ -17,7 +17,6 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
         "configure" => commands::wrappers::run_configure(rest),
         "show" => commands::show::run_show(rest),
         "tree" => commands::wrappers::run_tree(rest),
-
         "startproject" => commands::startproject::run_startproject(rest),
         "adopt" => commands::adopt::run_adopt(rest),
         "clearstarterproject" => commands::clearstarterproject::run_clear_starter_project(rest),
@@ -29,12 +28,10 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
         "update" => commands::wrappers::run_update(rest),
         "up" => commands::up::run_up(rest),
         "expose" => commands::up::run_expose(rest),
-        "webhook-clean" => commands::webhook_clean::run_webhook_clean(rest),
         "git" => commands::wrappers::run_git(rest),
         "ct" => commands::ct::run_ct(rest),
         "db" => commands::db::run_db(rest),
         "dev" => commands::wrappers::run_dev(rest),
-
         "rust" => commands::rust_cmd::run_rust(rest),
         "lxs" => commands::lxs::run_lxs(rest),
         "stress" => commands::stress::run_stress(rest),

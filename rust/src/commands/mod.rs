@@ -10,7 +10,6 @@ pub mod proxy;
 pub mod prox;
 pub mod ports;
 pub mod up;
-pub mod webhook_clean;
 pub mod ct;
 pub mod db;
 pub mod rust_cmd;

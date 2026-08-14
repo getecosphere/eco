@@ -2,6 +2,7 @@ use crate::cloudflare;
 use crate::ecompose;
 use crate::embedded;
 use crate::github;
+use crate::repos;
 use crate::util;
 use rand::Rng;
 use sha2::Digest;
@@ -579,6 +580,12 @@ fn is_self_domain(domain: &str, project: &str, project_dir: &str) -> bool {
 async fn _noop() {}
 
 fn resolve_domain_git(domain: &str, project: &str, content: &str) -> Result<Option<(String, String)>, String> {
+    if let Ok(Some(repo)) = repos::find_repo_by_name(domain) {
+        if !repo.git.is_empty() {
+            let branch = if repo.branch.is_empty() { "main".to_string() } else { repo.branch.clone() };
+            return Ok(Some((repo.git, branch)));
+        }
+    }
     if domain == format!("{project}_composition") {
         let composition = ecompose::parse_composition(content);
         if let Some(git) = composition.get("git") {
@@ -660,7 +667,7 @@ fn resolve_deploy_github_repos_for_project(
         let (git, repo_branch) = resolve_domain_git(domain, project, content)?
             .ok_or_else(|| {
                 format!(
-                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml)"
+                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml, and no git source)"
                 )
             })?;
         let coords = github::parse_github_repo_coordinates(&git)?;
@@ -2688,7 +2695,7 @@ fn ensure_local_domain_repos(
         let (git, repo_branch) = resolve_domain_git(domain, project, content)?
             .ok_or_else(|| {
                 format!(
-                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml)"
+                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml, and no git source)"
                 )
             })?;
         if target_path.exists() {
@@ -3142,7 +3149,7 @@ fn provision_estate(
         let (git, repo_branch) = resolve_domain_git(domain, &deployment.project, &deployment.content)?
             .ok_or_else(|| {
                 format!(
-                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml)"
+                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml, and no git source)"
                 )
             })?;
         repo_clone_steps.push((
@@ -3732,7 +3739,10 @@ fn provision_estate(
 // at once.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REMOTE_SOURCE_SKIP: [&str; 9] = [".env", ".env.local", ".git", "node_modules", "target", ".next", ".cache", ".eco", "dist"];
+const REMOTE_SOURCE_SKIP: [&str; 14] = [
+    ".env", ".env.local", ".git", "node_modules", "target", ".next", ".cache", ".eco", "dist",
+    "docs", "build", "static", ".svelte-kit", "data-snapshots",
+];
 
 fn skip_none(_: &str) -> bool {
     false
@@ -3745,7 +3755,26 @@ fn should_skip_remote_source(name: &str) -> bool {
     REMOTE_SOURCE_SKIP.contains(&name) || (name.starts_with(".env.") && name.ends_with(".local")) || name.ends_with(".log")
 }
 
-fn copy_tree_excluding(src: &Path, dst: &Path, skip: fn(&str) -> bool) -> Result<(), String> {
+// Best-effort gitignore awareness: read a dir's `.gitignore` and return the
+// top-level entry names it ignores (comments, blanks and nested paths skipped).
+// The remote payload ship skips gitignored content — "if it's gitignored, we
+// don't ship it" — so a user who accidentally keeps large non-runtime files in
+// the estate can gitignore them and they stop going to the CT.
+fn load_gitignore_names(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(dir.join(".gitignore")) {
+        for line in content.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') || t.contains('/') {
+                continue;
+            }
+            names.push(t.trim_end_matches('/').to_string());
+        }
+    }
+    names
+}
+
+fn copy_tree_excluding(src: &Path, dst: &Path, skip: &dyn Fn(&str) -> bool) -> Result<(), String> {
     if !src.is_dir() {
         return Ok(());
     }
@@ -4104,7 +4133,7 @@ fn skip_build_sync(name: &str) -> bool {
 fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
     if builder_is_host() {
         std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-        return copy_tree_excluding(local_dir, Path::new(dest), skip_build_sync);
+        return copy_tree_excluding(local_dir, Path::new(dest), &(skip_build_sync as fn(&str) -> bool));
     }
     let tar_path = std::env::temp_dir().join(format!("eco-builder-sync-{}.tar.gz", std::process::id()));
     let _ = std::fs::remove_file(&tar_path);
@@ -4141,7 +4170,7 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
 // single linux-x64 binary when the build produced a server entry.
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
-    let subdirs = ["dist", "build", ".next", "output"];
+    let subdirs = ["dist", "build", ".next", "output", "app/dist", "app/.next", "app/build"];
     let mut included: Vec<String> = Vec::new();
     for sub in subdirs {
         let path = Path::new(build_dir).join(sub);
@@ -4160,7 +4189,7 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
     }
     if builder_is_host() {
         for sub in &included {
-            copy_tree_excluding(&Path::new(build_dir).join(sub), &artifact_dir.join(sub), skip_none)?;
+            copy_tree_excluding(&Path::new(build_dir).join(sub), &artifact_dir.join(sub), &(skip_none as fn(&str) -> bool))?;
         }
     } else {
         let remote_tar = format!("/tmp/eco-builder-artifact-{}.tar.gz", std::process::id());
@@ -4180,7 +4209,22 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
     // binary so the CT needs no node_modules. The build output's server entry
     // imports runtime deps from node_modules, so the compile runs where npm ci
     // ran (the build dir), not in the copied artifact.
+    //
+    // SvelteKit adapter-node builds (build/index.js + build/client) are the
+    // exception: the node server serves client assets from disk relative to
+    // its entry, and `bun build --compile` embeds only the server, so the
+    // binary looks for the client in its embedded $bunfs/root/client, never
+    // finds it, and 404s every /_app/immutable/* asset. Ship the build/ tree
+    // as-is and let the CT run `node build/index.js` instead.
     if builder_is_host() && util::command_on_path("bun") {
+        let sveltekit_client = Path::new(build_dir).join("build").join("client");
+        if builder_is_host() && sveltekit_client.is_dir() {
+            print_step(&format!(
+                "SvelteKit adapter-node build ({}), skipping bun-compile — served via `node build/index.js`",
+                sveltekit_client.display()
+            ));
+            return Ok(());
+        }
         let server_entry = ["build/index.js", "build/server.js", "build/index.mjs", "build/index.cjs"]
             .iter()
             .map(|p| Path::new(build_dir).join(p))
@@ -4339,7 +4383,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
         print_step(&format!("remote deploy plan for {}{} (dry-run)", deployment.project, if staging { " (staging)" } else { "" }));
         if staging {
-            print_step(&format!("target CT: {} (staging footprint)", staging_config.get("ct").cloned().unwrap_or_default()));
+            print_step(&format!("target CT: {} (staging.getecosphere.com style footprint)", staging_config.get("ct").cloned().unwrap_or_default()));
         }
         print_step(&format!("agent: {base}"));
         print_step("cross-toolchain: x86_64-unknown-linux-musl via cargo-zigbuild");
@@ -4408,9 +4452,20 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 print_step(&format!("Staging has no .env for {} yet — using production .env for the build", service.name));
             }
         }
+        let is_frontend = frontend_targets.iter().any(|(s, _, _)| s.name == service.name);
         if let Some(text) = env_text {
             for line in text.lines() {
                 if let Some((key, value)) = parse_env_line(line) {
+                    // Security boundary: frontend builds only ever receive the
+                    // public build-time subset (PUBLIC_* / VITE_* /
+                    // NEXT_PUBLIC_*) — those are sent to the browser anyway and
+                    // must be inlined. Secrets in the prod .env (DB URIs, JWT,
+                    // API keys) never reach a frontend build. Rust builds get
+                    // the full env in memory for compile-time metadata only; the
+                    // binary reads its env at runtime from the CT.
+                    if is_frontend && !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
+                        continue;
+                    }
                     if !build_env.iter().any(|(existing, _)| existing == &key) {
                         build_env.push((key, value));
                     }
@@ -4425,12 +4480,15 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // source imports (e.g. a freshly renamed PUBLIC_STORAGE_URL) even on a
         // first deploy where the CT .env was generated from an older example.
         // Empty values fall back to the code's defaults; CT-provided values win.
-        let is_frontend = frontend_targets.iter().any(|(s, _, _)| s.name == service.name);
+        // Same PUBLIC_*-only filter as above.
         if is_frontend {
             let example_path = dir.join(".env.example");
             if let Ok(text) = std::fs::read_to_string(&example_path) {
                 for line in text.lines() {
                     if let Some((key, value)) = parse_env_line(line) {
+                        if !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
+                            continue;
+                        }
                         if !build_env.iter().any(|(existing, _)| existing == &key) {
                             build_env.push((key, value));
                         }
@@ -4540,7 +4598,12 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     std::fs::create_dir_all(&payload_dir).map_err(|e| e.to_string())?;
     let result = (|| -> Result<(), String> {
         let source_dir = payload_dir.join("source");
-        copy_tree_excluding(&deployment.project_dir, &source_dir, should_skip_remote_source)?;
+        // Ship only the source the CT needs (git-tracked content minus the
+        // fixed skip list) — gitignored files never ship. The built binaries
+        // and frontend dist travel as the artifacts below.
+        let project_ignored = load_gitignore_names(&deployment.project_dir);
+        let source_skip = |name: &str| should_skip_remote_source(name) || project_ignored.iter().any(|g| g == name);
+        copy_tree_excluding(&deployment.project_dir, &source_dir, &source_skip)?;
         let domains: Vec<String> = deployment
             .services
             .iter()
@@ -4556,7 +4619,11 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             }
             let domain_dir = estate_root.join(&domain);
             if domain_dir.is_dir() {
-                copy_tree_excluding(&domain_dir, &source_dir.join(&domain), should_skip_remote_source)?;
+                let domain_ignored = load_gitignore_names(&domain_dir);
+                let domain_skip = |name: &str| {
+                    should_skip_remote_source(name) || project_ignored.iter().any(|g| g == name) || domain_ignored.iter().any(|g| g == name)
+                };
+                copy_tree_excluding(&domain_dir, &source_dir.join(&domain), &domain_skip)?;
             }
         }
         let artifacts_dir = payload_dir.join("artifacts");
@@ -4567,7 +4634,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         for (service_name, artifact_dir) in &frontend_artifacts {
             let dest = artifacts_dir.join(service_name);
             std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-            copy_tree_excluding(artifact_dir, &dest, skip_none)?;
+            copy_tree_excluding(artifact_dir, &dest, &(skip_none as fn(&str) -> bool))?;
         }
         std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
@@ -4586,6 +4653,21 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             ],
             &util::current_dir(),
         )?;
+        // Payload size cap — the pricing hook. The shipped source must be the
+        // git-tracked estate source + build artifacts only; large non-runtime
+        // content (docs, data, uploads) that isn't gitignored blows past this
+        // and is rejected rather than silently shipped to the CT.
+        const MAX_PAYLOAD_MB: u64 = 300;
+        let tar_meta = std::fs::metadata(&tar_path).map_err(|e| format!("read payload size: {e}"))?;
+        let mb = tar_meta.len() / (1024 * 1024);
+        if tar_meta.len() > MAX_PAYLOAD_MB * 1024 * 1024 {
+            return Err(format!(
+                "remote deploy payload is {mb} MB — over the {MAX_PAYLOAD_MB} MB cap. \
+The shipped source includes large files that don't belong in a deploy; add them to \
+.gitignore (gitignored files are never shipped) or move them out of the estate. \
+Larger payloads are a paid-plan limit."
+            ));
+        }
         let bytes = std::fs::read(&tar_path).map_err(|e| format!("read payload: {e}"))?;
         let project_segment = project_path_segment(&deployment.project);
         // When ECO_SSH is set (e.g. root@100.85.173.92), ship the payload over
@@ -4809,7 +4891,13 @@ pub fn agent_read_service_env(project: &str, service_name: &str, staging: bool) 
         .iter()
         .find(|s| s.name == service_name)
         .ok_or_else(|| format!("service not found: {service_name}"))?;
-    let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), "");
+    // The staged estate source is flattened to /opt/projects/<project>, so a
+    // service path beginning with the estate core repo name (e.g.
+    // `assessment_core/frontend`) must strip it — otherwise the CT-side .env
+    // is never found on flattened estates and frontend builds bake empty
+    // PUBLIC_* values.
+    let estate_core = estate_core_name(&deployment.content);
+    let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
     let env_path = format!("{service_dir}/.env");
     let output = pct_exec_capture(
         &ctid,
@@ -4847,7 +4935,7 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
         let host_project = Path::new("/opt/projects").join(project);
         let _ = std::fs::remove_dir_all(&host_project);
         std::fs::create_dir_all(&host_project).map_err(|e| format!("stage /opt/projects: {e}"))?;
-        copy_tree_excluding(&source_dir, &host_project, skip_none)?;
+        copy_tree_excluding(&source_dir, &host_project, &(skip_none as fn(&str) -> bool))?;
         let cwd = util::current_dir();
         let project_path = host_project.display().to_string();
         let deployment = load_project_deployment(&project_path, &cwd)?;
@@ -4885,34 +4973,18 @@ fn install_lxs_services(ctid: &str, deployment: &ProjectDeployment) -> Result<Ve
     if lxs_services.is_empty() {
         return Ok(Vec::new());
     }
-    // LXS is resolved from the remote registry, not repos.json: fast-forward
-    // the local registry clone before resolving so estates install the
-    // current published versions even if nobody remembered to `git pull`.
-    crate::commands::lxs::ensure_registry_synced()?;
-    let registry = crate::commands::lxs::registry_root()?;
-    if !registry.is_dir() {
-        return Err(format!(
-            "services declare lxs: refs but the LXS registry is not available at {} (set ECO_LXS_REGISTRY)",
-            registry.display()
-        ));
-    }
+    // LXS is resolved from the registry ADDRESS (no local clone): `eco lxs add`
+    // wrote the `lxs:` refs, and `eco up` fetches each binary straight from the
+    // registry (the estate's `.eco/state.json` registry, official by default)
+    // into the local cache, then ships it.
+    let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir).map(|s| s.registry).filter(|r| !r.is_empty());
     let mut installed = Vec::new();
     for service in lxs_services {
-        let (name, version) = crate::commands::lxs::parse_lxs_ref(&service.lxs)?;
-        let manifest = crate::commands::lxs::load_manifest(&registry.join(&name).join(&version).join("lxs.yml"))?;
-        let artifact = manifest
-            .artifacts
-            .get("linux/amd64")
-            .ok_or_else(|| format!("{name}@{version} has no linux/amd64 artifact (targets: {:?})", manifest.targets))?;
-        let src = registry.join(&name).join(&version).join(&artifact.path);
-        if !src.is_file() {
-            return Err(format!("LXS artifact missing: {}", src.display()));
+        let (manifest, version, local_bin) = crate::commands::lxs::fetch_lxs_to_cache(&service.lxs, "linux/amd64", state_registry.as_deref())?;
+        let name = manifest.name.clone();
+        if name.is_empty() {
+            return Err(format!("LXS {} has no name in its manifest", service.lxs));
         }
-        let tmp = std::env::temp_dir().join(format!("eco-lxs-{}-{}", name, std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-        let local_bin = tmp.join(&name);
-        std::fs::copy(&src, &local_bin).map_err(|e| format!("copy {}: {e}", src.display()))?;
 
         let target_dir = format!("{}/target/release", deployment.ct_project_root);
         pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
@@ -4978,7 +5050,6 @@ fn install_lxs_services(ctid: &str, deployment: &ProjectDeployment) -> Result<Ve
 
         print_step(&format!("[CT {ctid}] Installed LXS {}@{} as service {}", name, version, service.name));
         installed.push(service.name.clone());
-        let _ = std::fs::remove_dir_all(&tmp);
     }
     Ok(installed)
 }

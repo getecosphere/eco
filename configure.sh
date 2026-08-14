@@ -2063,6 +2063,12 @@ discover_services() {
   # Scope this scan to the active project root. In production multiple
   # projects share /opt/projects, so scanning PROJECT_ROOT would rediscover
   # another estate's domains (and legacy flat-layout directories) as ours.
+  #
+  # ECO_INIT=1, or a `.eco/state.json` marker (a project bootstrapped by
+  # `eco init`), disables the sibling scan entirely: the project root is the
+  # only scanned directory and every service must be declared in ecompose.yml
+  # — no guessing, no flattening, no duplicate discovery.
+  if [[ "${ECO_INIT:-}" != "1" && ! -f "$PROJECT_DIR/.eco/state.json" ]]; then
   for sibling_dir in "$PROJECT_DIR"/*/; do
     sibling_dir="${sibling_dir%/}"
     local sibling
@@ -2088,6 +2094,7 @@ discover_services() {
     $already_declared && continue
     _scan_dir "$sibling_dir" "$sibling"
   done
+  fi
 }
 
 # ─── Single-binary mode ────────────────────────────────────────────────────
@@ -2937,6 +2944,18 @@ configure_envs() {
     # Configure the service
     set_env "$env_file" "$port_var" "$port"
 
+    # Some backends (e.g. the notifications domain) bind the port they read
+    # from `PORT` in their own .env.example, while the registry row for a
+    # backend service lives under `SERVER_PORT`. If the service declares
+    # PORT= and it differs from the registry env var, mirror the registry
+    # port there too so the app binds the assigned port instead of a stale
+    # global one (8090). Two estates composing the same domain would otherwise
+    # collide on that port. Frontends already use PORT as their registry var
+    # (port_var == PORT), so they are untouched by this mirror.
+    if [[ "$port_var" != "PORT" ]] && grep -qE "^PORT=" "$env_file" 2>/dev/null; then
+      set_env "$env_file" "PORT" "$port"
+    fi
+
     # A declared mongodb@ runtime always gets an estate-local URI, even when
     # the domain predates Eco and has no MONGODB_URI line in .env.example.
     # Explicit unmanaged URIs remain untouched for services without that
@@ -3480,13 +3499,24 @@ VITESTART
         args=""
         interpreter="bash"
       else
-        script_path="$(command -v npm)"
-        interpreter=""
-        if [[ "$type" == "vite" || "$type" == "astro" || "$type" == "nuxt" ]]; then
-          args="${args} -- --host 0.0.0.0 --port ${port}"
-        elif [[ "$type" == "nextjs" ]]; then
-          args="${args} -- --hostname 0.0.0.0 --port ${port}"
-          ensure_next_allowed_dev_origins "$dir" || true
+        # SvelteKit adapter-node (and vite-plugin-node) builds ship a
+        # self-contained server (build/index.js) that serves its own client
+        # assets from build/client. Run it directly with node — no npm
+        # wrapper, no node_modules needed, and the client dir resolves
+        # relative to the entry.
+        if [[ "$type" == "node" && -f "$dir/build/index.js" ]]; then
+          script_path="$(command -v node)"
+          args="build/index.js"
+          interpreter=""
+        else
+          script_path="$(command -v npm)"
+          interpreter=""
+          if [[ "$type" == "vite" || "$type" == "astro" || "$type" == "nuxt" ]]; then
+            args="${args} -- --host 0.0.0.0 --port ${port}"
+          elif [[ "$type" == "nextjs" ]]; then
+            args="${args} -- --hostname 0.0.0.0 --port ${port}"
+            ensure_next_allowed_dev_origins "$dir" || true
+          fi
         fi
       fi
     elif [[ "$script" == "bash" ]]; then

@@ -1,6 +1,6 @@
 [package]
 name = "eco"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Private CLI for Ecology DDD orchestration (Rust port of the Node implementation)"
 license = "UNLICENSED"
