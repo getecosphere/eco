@@ -348,8 +348,14 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
 
         if req.method == "GET" && segments.len() == 4 && segments[0] == "v1" && segments[1] == "estates" && segments[3] == "deploy-status" {
             let project = segments[2];
-            let status = crate::runtime::account::latest_deploy_status_for_project(project);
-            let _ = stream.write_all(&json_response(200, &serde_json::json!({"project": project, "status": status})));
+            let deploy_id: Option<i64> = req.url.split('?').nth(1).and_then(|q| {
+                q.split('&').find(|kv| kv.starts_with("id=")).and_then(|kv| kv[3..].parse().ok())
+            });
+            let status = match deploy_id {
+                Some(id) => crate::runtime::account::deploy_status_by_id(id),
+                None => crate::runtime::account::latest_deploy_status_for_project(project),
+            };
+            let _ = stream.write_all(&json_response(200, &serde_json::json!({"project": project, "deploy_id": deploy_id, "status": status})));
             continue;
         }
 
@@ -397,18 +403,30 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
                 let deploy_project = project.to_string();
                 let deploy_staging = staging;
                 let deploy_payload = payload_path.clone();
+                let deploy_id = crate::runtime::account::record_deploy_running(&token, &deploy_project, 0);
                 std::thread::spawn(move || {
                     let bytes = match std::fs::read(&deploy_payload) {
                         Ok(b) => b,
                         Err(_) => return,
                     };
                     let size_mb = (bytes.len() / (1024 * 1024)) as u64;
-                    match crate::commands::up::agent_handle_deploy(&deploy_project, &bytes, deploy_staging) {
-                        Ok(_) => crate::runtime::account::record_deploy(&token, &deploy_project, "success", size_mb),
-                        Err(_) => crate::runtime::account::record_deploy(&token, &deploy_project, "failed", size_mb),
+                    if let Some(id) = deploy_id {
+                        crate::runtime::account::update_deploy_status(id, "running");
+                        match crate::commands::up::agent_handle_deploy(&deploy_project, &bytes, deploy_staging) {
+                            Ok(_) => crate::runtime::account::update_deploy_status(id, "success"),
+                            Err(e) => {
+                                eprintln!("[eco-agent] async deploy of {} failed: {}", deploy_project, e);
+                                crate::runtime::account::update_deploy_status(id, "failed");
+                            }
+                        }
+                    } else {
+                        match crate::commands::up::agent_handle_deploy(&deploy_project, &bytes, deploy_staging) {
+                            Ok(_) => crate::runtime::account::record_deploy(&token, &deploy_project, "success", size_mb),
+                            Err(_) => crate::runtime::account::record_deploy(&token, &deploy_project, "failed", size_mb),
+                        }
                     }
                 });
-                let _ = stream.write_all(&json_response(202, &serde_json::json!({"ok": true, "deploy_started": true, "project": project})));
+                let _ = stream.write_all(&json_response(202, &serde_json::json!({"ok": true, "deploy_started": true, "project": project, "deploy_id": deploy_id})));
             } else {
                 let _ = stream.write_all(&json_response(202, &serde_json::json!({"ok": true, "part": part, "total": total})));
             }

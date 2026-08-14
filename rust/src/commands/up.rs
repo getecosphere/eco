@@ -1141,7 +1141,7 @@ fn build_rust_migration_plan(services: &[ecompose::Service], _ct_workspace_root:
         .map(|service| {
             let service_dir = resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core);
             format!(
-                "if [ -d {} ]; then\n  cd {}\n  set -a; . ./.env; set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    if command -v cargo >/dev/null 2>&1; then\n      cargo install sqlx-cli --no-default-features --features postgres,rustls\n      sqlx_bin=\"$(command -v sqlx)\"\n    else\n      echo \"[eco up] sqlx is unavailable and this CT has no Cargo — assuming the database is already migrated (re-deploy of a live estate); skipping.\" >&2\n      exit 0\n    fi\n  fi\n  \"$sqlx_bin\" migrate run --source migrations\nfi",
+                "if [ -d {} ]; then\n  cd {}\n  find migrations -maxdepth 1 -name '._*' -delete 2>/dev/null || true\n  set -a; . ./.env; set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    if command -v cargo >/dev/null 2>&1; then\n      cargo install sqlx-cli --no-default-features --features postgres,rustls\n      sqlx_bin=\"$(command -v sqlx)\"\n    else\n      echo \"[eco up] sqlx is unavailable and this CT has no Cargo — assuming the database is already migrated (re-deploy of a live estate); skipping.\" >&2\n      exit 0\n    fi\n  fi\n  \"$sqlx_bin\" migrate run --source migrations\nfi",
                 shell_single_quote(&format!("{service_dir}/migrations")),
                 shell_single_quote(&service_dir)
             )
@@ -3810,7 +3810,10 @@ fn skip_none(_: &str) -> bool {
 // is a committed contract file configure.sh reads on the CT to normalize env
 // (JWT_SECRET, CORS, feature flags) and must be shipped.
 fn should_skip_remote_source(name: &str) -> bool {
-    REMOTE_SOURCE_SKIP.contains(&name) || (name.starts_with(".env.") && name.ends_with(".local")) || name.ends_with(".log")
+    REMOTE_SOURCE_SKIP.contains(&name)
+        || name.starts_with("._")
+        || (name.starts_with(".env.") && name.ends_with(".local"))
+        || name.ends_with(".log")
 }
 
 // Best-effort gitignore awareness: read a dir's `.gitignore` and return the
@@ -4814,10 +4817,22 @@ Larger payloads are a paid-plan limit."
                     summary = resp;
                 }
                 // The agent deploys asynchronously after the last chunk; poll
-                // until the deploy reaches a final state (the tunnel would time
-                // out if we waited on the synchronous response).
+                // the specific deploy by id until it reaches a final state
+                // (the tunnel would time out if we waited synchronously).
+                let mut deploy_id: Option<String> = None;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&summary) {
+                    deploy_id = v.get("deploy_id").and_then(|d| match d {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    });
+                }
                 print_step("deploy started — waiting for completion…");
-                let status_url = format!("{base}/v1/estates/{project_segment}/deploy-status{}", deploy_query);
+                let id_query = match &deploy_id {
+                    Some(id) => format!("{}id={id}", if deploy_query.is_empty() { "?" } else { "&" }),
+                    None => deploy_query.to_string(),
+                };
+                let status_url = format!("{base}/v1/estates/{project_segment}/deploy-status{id_query}");
                 let mut final_status = "pending".to_string();
                 for _ in 0..200 {
                     std::thread::sleep(std::time::Duration::from_secs(3));

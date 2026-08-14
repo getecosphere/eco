@@ -199,6 +199,39 @@ pub fn record_deploy(bearer: &str, project: &str, status: &str, size_mb: u64) {
     }
 }
 
+pub fn record_deploy_running(bearer: &str, project: &str, size_mb: u64) -> Option<i64> {
+    let account = account_for_key(bearer)?;
+    let conn = open_db_full().ok()?;
+    conn.execute(
+        "INSERT INTO deploys (email, project, status, size_mb, created_at) VALUES (?1,?2,'running',?3,?4)",
+        rusqlite::params![account.email, project, size_mb as i64, crate::commands::lxs::now_rfc3339()],
+    )
+    .ok()?;
+    conn.last_insert_rowid().into()
+}
+
+pub fn update_deploy_status(id: i64, status: &str) {
+    if let Ok(conn) = open_db_full() {
+        let _ = conn.execute(
+            "UPDATE deploys SET status = ?1 WHERE id = ?2",
+            rusqlite::params![status, id],
+        );
+    }
+}
+
+pub fn deploy_status_by_id(id: i64) -> String {
+    if let Ok(conn) = open_db_full() {
+        if let Ok(mut stmt) = conn.prepare("SELECT status FROM deploys WHERE id = ?1") {
+            if let Ok(mut rows) = stmt.query_map(rusqlite::params![id], |r| r.get::<_, String>(0)) {
+                if let Some(Ok(status)) = rows.next() {
+                    return status;
+                }
+            }
+        }
+    }
+    "pending".to_string()
+}
+
 pub fn latest_deploy_status_for_project(project: &str) -> String {
     if let Ok(conn) = open_db_full() {
         if let Ok(mut stmt) = conn.prepare("SELECT status FROM deploys WHERE project = ?1 ORDER BY id DESC LIMIT 1") {
