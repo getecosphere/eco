@@ -18,17 +18,19 @@ DIST_DIR="$SCRIPT_DIR/dist"
 VERSION="$(grep '^version' "$RUST_DIR/Cargo.toml" | head -n1 | awk -F'"' '{print $2}')"
 ZIG_VERSION="0.13.0"
 
-# Targets: host (macOS) stays native; Linux uses static musl so install.sh
-# works on any distro without glibc matching; Windows uses GNU.
+# Targets: host (macOS) stays native; the other macOS arch is cross-built via
+# zig; Linux uses static musl so install.sh works on any distro without glibc
+# matching; Windows uses GNU.
+HOST_TARGET="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
 LINUX_TARGET="x86_64-unknown-linux-musl"
 WINDOWS_TARGET="x86_64-pc-windows-gnu"
-HOST_TARGET="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+APPLE_OTHER_TARGET="$(if [[ "$HOST_TARGET" == aarch64-apple-darwin ]]; then printf 'x86_64-apple-darwin'; else printf 'aarch64-apple-darwin'; fi)"
 
 log() { printf '\033[1;36m[build-release]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[build-release]\033[0m %s\n' "$*"; }
 
 ensure_rustup_targets() {
-  for t in "$HOST_TARGET" "$LINUX_TARGET" "$WINDOWS_TARGET"; do
+  for t in "$HOST_TARGET" "$LINUX_TARGET" "$WINDOWS_TARGET" "$APPLE_OTHER_TARGET"; do
     if ! rustup target list --installed | grep -qx "$t"; then
       log "installing rustup target $t"
       rustup target add "$t"
@@ -105,6 +107,7 @@ main() {
   build_host
   build_target "$LINUX_TARGET"
   build_target "$WINDOWS_TARGET"
+  build_target "$APPLE_OTHER_TARGET"
   log "release $VERSION built:"
   (cd "$DIST_DIR" && du -sh */eco* 2>/dev/null || true)
 }
