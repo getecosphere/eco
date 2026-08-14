@@ -619,9 +619,9 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
         vec!["add".to_string(), format!("{name}/{version}")],
         vec![
             "-c".to_string(),
-            "user.name=Eco Creator".to_string(),
+            "user.name=Eko SW".to_string(),
             "-c".to_string(),
-            "user.email=dev@getecosphere.com".to_string(),
+            "user.email=swdev.bali@gmail.com".to_string(),
             "commit".to_string(),
             "-m".to_string(),
             format!("publish {name}@{version}"),
@@ -1132,9 +1132,9 @@ eco lxs add <name>@<version>             # pin a specific version
             "git",
             &[
                 "-c".to_string(),
-                "user.name=Eco Creator".to_string(),
+                "user.name=Eko SW".to_string(),
                 "-c".to_string(),
-                "user.email=dev@getecosphere.com".to_string(),
+                "user.email=swdev.bali@gmail.com".to_string(),
                 "commit".to_string(),
                 "-m".to_string(),
                 "chore: init LXS registry".to_string(),
@@ -1638,7 +1638,7 @@ jobs:
     if !skip_git {
         run_command("git", &["init".to_string(), "-b".to_string(), "main".to_string()], dir)?;
         run_command("git", &["add".to_string(), "-A".to_string()], dir)?;
-        run_command("git", &["-c".to_string(), "user.name=Eco Creator".to_string(), "-c".to_string(), "user.email=dev@getecosphere.com".to_string(), "commit".to_string(), "-m".to_string(), format!("chore: scaffold {name} domain from eco lxs new template")], dir)?;
+        run_command("git", &["-c".to_string(), "user.name=Eko SW".to_string(), "-c".to_string(), "user.email=swdev.bali@gmail.com".to_string(), "commit".to_string(), "-m".to_string(), format!("chore: scaffold {name} domain from eco lxs new template")], dir)?;
     }
 
     println!("[eco lxs] Scaffolded LXS domain in {}/", dir.display());

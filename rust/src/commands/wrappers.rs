@@ -45,9 +45,9 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
             "git",
             &[
                 "-c".to_string(),
-                "user.name=Eco Creator".to_string(),
+                "user.name=Eko SW".to_string(),
                 "-c".to_string(),
-                "user.email=dev@getecosphere.com".to_string(),
+                "user.email=swdev.bali@gmail.com".to_string(),
                 "commit".to_string(),
                 "-m".to_string(),
                 "chore: eco init project".to_string(),

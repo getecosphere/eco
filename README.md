@@ -111,7 +111,7 @@ from `getecosphere/lxs-registry`.
 ### Identity rule (never break this)
 
 - **Public publishes** (`eco lxs publish`) commit as the canonical publisher:
-  `Eco Creator <dev@getecosphere.com>`. This is hardcoded in `eco lxs publish` —
+  `Eko SW <swdev.bali@gmail.com>`. This is hardcoded in `eco lxs publish` —
   do not change it.
 - Public repo history was rewritten to that identity (anonymized); the private
   `kelastanpatembok` repos keep the real author identity.
@@ -129,7 +129,7 @@ fork → improve → PR → maintainer merges → tag vX.Y.Z → CI publishes
 
 Each public domain repo has `.github/workflows/lxs-publish.yml`: on a `v*` tag,
 CI cross-compiles the LXS (musl), publishes `name@version` to the registry under
-Eco Creator, and pushes the version + tag. The `GETECOSPHERE_TOKEN` secret on
+Eko SW, and pushes the version + tag. The `GETECOSPHERE_TOKEN` secret on
 each repo authorizes the registry push.
 
 ### Publish contract (the review standard for contributions)
@@ -265,7 +265,7 @@ Community contributions keep the fork → PR → merge → `v*` tag loop; the re
 | **Database & Port Troubleshooting** — PostgreSQL setup, gateway port stability, service port collisions, high-load crash loops | [docs/database-and-ports.md](docs/database-and-ports.md) |
 | **Rust Build** — dedicated builder CT, hash-based skip, git-clean fix, release binary preference, remote dev-machine builds (`eco up --remote`) | [docs/rust.md](docs/rust.md) |
 | **Remote Deploy (eco serve agent)** — host-side HTTP agent + API keys, `eco up --remote` cross-compile on the dev machine, `.sqlx` offline requirement, `.env` handling | [docs/agent.md](docs/agent.md) |
-| **LXS Registry & Public Domains** — public `getecosphere` repos, Eco Creator identity, contribution loop + CI publish, publish contract | this page ("LXS Registry & Public Domains") |
+| **LXS Registry & Public Domains** — public `getecosphere` repos, publisher identity, contribution loop + CI publish, publish contract | this page ("LXS Registry & Public Domains") |
 | **Releasing & Installing** — cross-compile for macOS/Linux/Windows, `install.sh`, host install, eco inside a CT | [docs/releasing.md](docs/releasing.md) |
 | **Commands Reference** — GitHub API setup, `eco sendemail`, `eco update`, `eco prox clearenv`, `eco prox showports`, `eco sync` | [docs/commands-reference.md](docs/commands-reference.md) |
 | **The `rag` Domain** — reusable RAG support domain, contract, runtime, composition | [docs/rag-domain.md](docs/rag-domain.md) |
