@@ -110,7 +110,7 @@ fn update_asset_for_platform() -> Result<String, String> {
 
 pub fn run_update(_args: &[String]) -> Result<(), String> {
     let asset = update_asset_for_platform()?;
-    let url = format!("https://github.com/ecosphere-creator/eco/releases/latest/download/{asset}");
+    let url = format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
     let exe = std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
     util::println_stdout(&format!("Updating eco to the latest release ({asset})"));
 

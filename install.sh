@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # install.sh — install the eco binary via curl.
 #
-#   curl -fsSL https://github.com/ecosphere-creator/eco/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/getecosphere/eco/releases/latest/download/install.sh | sh
 #
 # Downloads the matching static binary for the caller's OS/arch from GitHub
 # Releases, installs it to /usr/local/bin (falling back to ~/.local/bin), and
@@ -14,7 +14,7 @@
 #   ECO_INSTALL_DIR      install directory (default: /usr/local/bin or ~/.local/bin)
 set -eu
 
-BASE_URL="${ECO_INSTALL_BASE:-https://github.com/ecosphere-creator/eco/releases/latest/download}"
+BASE_URL="${ECO_INSTALL_BASE:-https://github.com/getecosphere/eco/releases/latest/download}"
 VERSION="${ECO_INSTALL_VERSION:-latest}"
 TARGET="${ECO_INSTALL_TARGET:-}"
 
