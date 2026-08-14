@@ -1141,7 +1141,7 @@ fn build_rust_migration_plan(services: &[ecompose::Service], _ct_workspace_root:
         .map(|service| {
             let service_dir = resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core);
             format!(
-                "if [ -d {} ]; then\n  cd {}\n  set -a; . ./.env; set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    command -v cargo >/dev/null 2>&1 || {{ echo 'sqlx is unavailable and this CT has no Cargo; configure ECO_RUST_DEDICATED_BUILDER.' >&2; exit 1; }}\n    cargo install sqlx-cli --no-default-features --features postgres,rustls\n    sqlx_bin=\"$(command -v sqlx)\"\n  fi\n  \"$sqlx_bin\" migrate run --source migrations\nfi",
+                "if [ -d {} ]; then\n  cd {}\n  set -a; . ./.env; set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    if command -v cargo >/dev/null 2>&1; then\n      cargo install sqlx-cli --no-default-features --features postgres,rustls\n      sqlx_bin=\"$(command -v sqlx)\"\n    else\n      echo \"[eco up] sqlx is unavailable and this CT has no Cargo — assuming the database is already migrated (re-deploy of a live estate); skipping.\" >&2\n      exit 0\n    fi\n  fi\n  \"$sqlx_bin\" migrate run --source migrations\nfi",
                 shell_single_quote(&format!("{service_dir}/migrations")),
                 shell_single_quote(&service_dir)
             )
@@ -3887,7 +3887,7 @@ fn remove_stale_ct_source(ctid: &str, deployment: &ProjectDeployment) -> Result<
     let current_output = pct_exec_capture(ctid, &format!("ls -1A {}", shell_single_quote(&deployment.ct_project_root)))?;
     let preserved = [".eco", "target", "node_modules", ".eco-rust-hash", &deployment.pm2_config_filename, "Caddyfile"];
     for entry in current_output.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-        if shipped.contains(entry) || preserved.contains(&entry) {
+        if shipped.contains(entry) || preserved.contains(&entry) || entry == "ecompose.yml" || entry == "ecompose.yaml" || entry.ends_with("-ecompose.yml") {
             continue;
         }
         print_step(&format!("[CT {ctid}] Removing stale top-level source entry: {entry}"));
@@ -4226,6 +4226,19 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
 // Copies the built output back from the build location (VM or host cache) into
 // a local artifacts/<service> dir, and Bun-compiles SSR node apps into a
 // single linux-x64 binary when the build produced a server entry.
+// Trim dev/build-cache cruft from a shipped frontend artifact so the payload
+// stays small. Next.js dev builds put hundreds of MB under .next/dev (and
+// .next/cache/build) that `next start` never needs — only server/static/
+// BUILD_ID + the manifests are runtime output.
+fn trim_dev_artifact(dir: &Path, _root: &Path) {
+    for name in [".next/dev", ".next/cache", ".next/build", "node_modules/.cache", ".vite/cache"] {
+        let p = dir.join(name);
+        if p.is_dir() {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
+}
+
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
     let subdirs = ["dist", "build", ".next", "output", "app/dist", "app/.next", "app/build"];
@@ -4248,6 +4261,18 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
     if builder_is_host() {
         for sub in &included {
             copy_tree_excluding(&Path::new(build_dir).join(sub), &artifact_dir.join(sub), &(skip_none as fn(&str) -> bool))?;
+        }
+        // Trim dev/build-cache cruft from the artifact so the shipped payload
+        // stays small (Next.js dev builds put ~hundreds of MB under
+        // .next/dev, which is never needed at runtime; `next start` only needs
+        // server/static/BUILD_ID).
+        let artifact = artifact_dir.join("dist");
+        trim_dev_artifact(&artifact, &artifact_dir);
+        for sub in &included {
+            let path = artifact_dir.join(sub);
+            if path.is_dir() {
+                trim_dev_artifact(&path, &artifact_dir);
+            }
         }
     } else {
         let remote_tar = format!("/tmp/eco-builder-artifact-{}.tar.gz", std::process::id());
@@ -4768,12 +4793,60 @@ Larger payloads are a paid-plan limit."
             util::println_stdout(&summary);
         } else {
             print_step(&format!("Shipping remote deploy payload for {} to {base}", deployment.project));
-            let summary = agent_client_post(
-                &format!("{base}/v1/estates/{project_segment}/deploy{deploy_query}"),
-                &api_key,
-                &bytes,
-            )?;
-            util::println_stdout(&summary);
+            // Large payloads exceed Cloudflare's free-tier request limit
+            // (100MB), so chunk the upload (<90MB per chunk) to the
+            // deploy-upload endpoint, which reassembles + deploys.
+            const CHUNK_MB: usize = 90;
+            const CHUNK_BYTES: usize = CHUNK_MB * 1024 * 1024;
+            if bytes.len() > CHUNK_BYTES {
+                let total = bytes.len().div_ceil(CHUNK_BYTES);
+                print_step(&format!(
+                    "payload is {} MB — uploading in {total} chunks (≤{CHUNK_MB} MB each)",
+                    bytes.len() / (1024 * 1024)
+                ));
+                let mut summary = String::new();
+                for (i, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+                    let url = format!(
+                        "{base}/v1/estates/{project_segment}/deploy-upload?part={i}&total={total}{}",
+                        if deploy_query.is_empty() { String::new() } else { format!("&{}", &deploy_query[1..]) }
+                    );
+                    let resp = agent_client_post(&url, &api_key, chunk)?;
+                    summary = resp;
+                }
+                // The agent deploys asynchronously after the last chunk; poll
+                // until the deploy reaches a final state (the tunnel would time
+                // out if we waited on the synchronous response).
+                print_step("deploy started — waiting for completion…");
+                let status_url = format!("{base}/v1/estates/{project_segment}/deploy-status{}", deploy_query);
+                let mut final_status = "pending".to_string();
+                for _ in 0..200 {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    if let Ok(text) = agent_client_get(&status_url, &api_key) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(st) = v.get("status").and_then(|s| s.as_str()) {
+                                final_status = st.to_string();
+                                if st == "success" || st == "failed" {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if final_status == "success" {
+                    util::println_stdout(&format!("Remote deploy of {} completed on CT {}.", deployment.project, deployment.ctid));
+                } else if final_status == "failed" {
+                    return Err(format!("Remote deploy of {} failed on CT {}.", deployment.project, deployment.ctid));
+                } else {
+                    return Err(format!("Timed out waiting for the deploy of {} to finish.", deployment.project));
+                }
+            } else {
+                let summary = agent_client_post(
+                    &format!("{base}/v1/estates/{project_segment}/deploy{deploy_query}"),
+                    &api_key,
+                    &bytes,
+                )?;
+                util::println_stdout(&summary);
+            }
         }
         Ok(())
     })();

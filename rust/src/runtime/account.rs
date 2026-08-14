@@ -199,8 +199,20 @@ pub fn record_deploy(bearer: &str, project: &str, status: &str, size_mb: u64) {
     }
 }
 
-pub fn list_deploys(bearer: &str, limit: i64) -> Vec<DeployRecord> {
-    let Some(account) = account_for_key(bearer) else {
+pub fn latest_deploy_status_for_project(project: &str) -> String {
+    if let Ok(conn) = open_db_full() {
+        if let Ok(mut stmt) = conn.prepare("SELECT status FROM deploys WHERE project = ?1 ORDER BY id DESC LIMIT 1") {
+            if let Ok(mut rows) = stmt.query_map(rusqlite::params![project], |r| r.get::<_, String>(0)) {
+                if let Some(Ok(status)) = rows.next() {
+                    return status;
+                }
+            }
+        }
+    }
+    "pending".to_string()
+}
+
+pub fn list_deploys(bearer: &str, limit: i64) -> Vec<DeployRecord> {    let Some(account) = account_for_key(bearer) else {
         return Vec::new();
     };
     let Ok(conn) = open_db_full() else {
