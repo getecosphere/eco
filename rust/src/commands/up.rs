@@ -1,0 +1,5137 @@
+use crate::cloudflare;
+use crate::ecompose;
+use crate::embedded;
+use crate::github;
+use crate::util;
+use rand::Rng;
+use sha2::Digest;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+const FALLBACK_CT_TEMPLATE: &str = "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst";
+
+fn parse_options(args: &[String]) -> (HashMap<String, String>, Vec<String>) {
+    let mut options = HashMap::new();
+    let mut positionals = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if !arg.starts_with("--") {
+            positionals.push(arg.clone());
+            i += 1;
+            continue;
+        }
+        let key = arg[2..].to_string();
+        if key == "dry-run" || key == "staging" || key == "prod-only" {
+            options.insert(key, "true".to_string());
+            i += 1;
+            continue;
+        }
+        if let Some(value) = args.get(i + 1) {
+            if !value.starts_with("--") {
+                options.insert(key, value.clone());
+                i += 2;
+                continue;
+            }
+        }
+        options.insert(key, "true".to_string());
+        i += 1;
+    }
+    (options, positionals)
+}
+
+fn run_command_env(command: &str, args: &[String], cwd: &Path, extra: &[(String, String)]) -> Result<(), String> {
+    let mut env_map: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in extra {
+        env_map.insert(k.clone(), v.clone());
+    }
+    util::run_command_env(command, args, cwd, &env_map)
+}
+
+fn run_command(command: &str, args: &[String], cwd: &Path) -> Result<(), String> {
+    util::run_command(command, args, cwd)
+}
+
+fn run_capture(command: &str, args: &[String], cwd: &Path) -> Result<util::Captured, String> {
+    util::run_capture(command, args, cwd)
+}
+
+fn build_net0(ct: &HashMap<String, String>) -> String {
+    let mut parts = vec![
+        "name=eth0".to_string(),
+        format!("bridge={}", ct.get("bridge").cloned().unwrap_or_default()),
+        format!("ip={}", ct.get("ip").cloned().unwrap_or_else(|| "dhcp".to_string())),
+    ];
+    if let Some(gateway) = ct.get("gateway") {
+        parts.push(format!("gw={gateway}"));
+    }
+    parts.join(",")
+}
+
+fn domain_branch_overrides_from_ecompose(content: &str) -> HashMap<String, String> {
+    let mut overrides = HashMap::new();
+    let mut in_domains = false;
+    let mut block_domain = String::new();
+
+    for raw in content.split('\n') {
+        let line = raw.trim_end_matches('\r').trim_end();
+        if line.is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line == "domains:" {
+            in_domains = true;
+            continue;
+        }
+        if in_domains && line.starts_with(|c: char| !c.is_whitespace()) {
+            in_domains = false;
+            continue;
+        }
+        if !in_domains {
+            continue;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("- ") {
+            let raw_value = util::strip_quotes(rest.trim());
+            let colon = raw_value.find(':');
+            match colon {
+                Some(idx) => {
+                    let name = raw_value[..idx].trim().to_string();
+                    let after = raw_value[idx + 1..].trim().to_string();
+                    if after.is_empty() {
+                        block_domain = name;
+                    } else {
+                        block_domain = name.clone();
+                        overrides.insert(name, util::strip_quotes(&after));
+                    }
+                }
+                None => {
+                    block_domain = raw_value;
+                }
+            }
+            continue;
+        }
+        if !block_domain.is_empty() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("branch:") {
+                overrides.insert(block_domain.clone(), util::strip_quotes(rest.trim()));
+            }
+        }
+    }
+    overrides
+}
+
+fn domain_dev_flags_from_ecompose(content: &str) -> HashMap<String, String> {
+    let mut flags = HashMap::new();
+    let mut in_domains = false;
+    let mut block_domain = String::new();
+
+    for raw in content.split('\n') {
+        let line = raw.trim_end_matches('\r').trim_end();
+        if line.is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line == "domains:" {
+            in_domains = true;
+            continue;
+        }
+        if in_domains && line.starts_with(|c: char| !c.is_whitespace()) {
+            in_domains = false;
+            continue;
+        }
+        if !in_domains {
+            continue;
+        }
+        if let Some(rest) = line.trim_start().strip_prefix("- ") {
+            let raw_value = util::strip_quotes(rest.trim());
+            let colon = raw_value.find(':');
+            match colon {
+                Some(idx) => {
+                    let name = raw_value[..idx].trim().to_string();
+                    let after = raw_value[idx + 1..].trim().to_string();
+                    if after.is_empty() {
+                        block_domain = name;
+                    } else {
+                        block_domain.clear();
+                    }
+                }
+                None => {
+                    block_domain = raw_value;
+                }
+            }
+            continue;
+        }
+        if !block_domain.is_empty() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("dev:") {
+                let value = util::strip_quotes(rest.trim());
+                if value == "optional" || value == "disabled" {
+                    flags.insert(block_domain.clone(), value);
+                }
+            }
+        }
+    }
+    flags
+}
+
+fn domain_runtimes_from_services(domain: &str, services: &[ecompose::Service]) -> Vec<String> {
+    let mut runtimes = Vec::new();
+    for service in services {
+        let first = service.path.split('/').next().unwrap_or("");
+        if first == domain {
+            for token in &service.runtimes {
+                if !runtimes.contains(token) {
+                    runtimes.push(token.clone());
+                }
+            }
+        }
+    }
+    runtimes
+}
+
+// True when a domain repo must be present in the CT workspace: at least one of
+// its `path:` services is built/run from source in the CT (non-Rust). Rust
+// services ship prebuilt binaries (remote cross-compile, dedicated builder, or
+// LXS) and never need their source cloned into the CT.
+fn domain_has_ct_source(domain: &str, services: &[ecompose::Service]) -> bool {
+    services.iter().any(|s| {
+        !s.path.is_empty()
+            && s.path.split('/').next().unwrap_or("") == domain
+            && !s.runtimes.iter().any(|r| r == "rust")
+    })
+}
+
+fn repo_name_from_git_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    trimmed.rsplit('/').next().unwrap_or("").trim_end_matches(".git").to_string()
+}
+
+fn stat_exists(path: &Path) -> bool {
+    path.exists()
+}
+
+fn runtime_satisfiable(token: &str) -> bool {
+    if token != "onnxruntime" && token != "onnxruntime@1.28" {
+        return true;
+    }
+    if util::platform() == "darwin" {
+        let result = run_capture("brew", &["list".to_string(), "onnxruntime".to_string()], &util::current_dir());
+        return result.map(|r| r.code == 0).unwrap_or(false);
+    }
+    Path::new("/opt/eco-tools/libonnxruntime.so").exists()
+}
+
+fn sql_database_name_for_service(service: &ecompose::Service, project: &str) -> String {
+    if service.name == format!("{project}-backend") {
+        project.to_string()
+    } else {
+        format!("{}_{project}", service.name.replace('-', "_"))
+    }
+}
+
+fn uses_java_database_configuration(service: &ecompose::Service) -> bool {
+    service.runtimes.iter().any(|r| r == "java@17") || service.runtimes.iter().any(|r| r == "maven")
+}
+
+fn shell_single_quote(value: &str) -> String {
+    util::shell_single_quote(value)
+}
+
+fn env_upsert_command(file_path: &str, key: &str, value: &str) -> String {
+    let quoted_file = shell_single_quote(file_path);
+    let quoted_key = shell_single_quote(key);
+    let quoted_value = shell_single_quote(value);
+    format!(
+        "touch {quoted_file}\nif grep -qE \"^{key}=\" {quoted_file}; then\n  sed -i \"s|^{key}=.*|{key}={value}|\" {quoted_file}\nelse\n  printf \"%s\\n\" \"{key}={value}\" >> {quoted_file}\nfi"
+    )
+}
+
+fn env_set_if_missing_command(file_path: &str, key: &str, value: &str) -> String {
+    let quoted_file = shell_single_quote(file_path);
+    format!(
+        "touch {quoted_file}\nif ! grep -qE \"^{key}=\" {quoted_file}; then\n  printf \"%s\\n\" \"{key}={value}\" >> {quoted_file}\nfi"
+    )
+}
+
+fn build_npm_install_command(service_dir: &str) -> String {
+    [
+        format!("cd \"{service_dir}\""),
+        "if [ -f package-lock.json ]; then".to_string(),
+        "  if ! npm ci; then".to_string(),
+        "    echo '[eco up] npm ci failed, retrying with npm install --legacy-peer-deps' >&2".to_string(),
+        "    npm install --legacy-peer-deps".to_string(),
+        "  fi".to_string(),
+        "elif [ -f package.json ]; then".to_string(),
+        "  if ! npm install; then".to_string(),
+        "    echo '[eco up] npm install failed, retrying with --legacy-peer-deps' >&2".to_string(),
+        "    npm install --legacy-peer-deps".to_string(),
+        "  fi".to_string(),
+        "fi".to_string(),
+    ]
+    .join("\n")
+}
+
+/// Build every Rust service of an estate. When a dedicated builder CT is
+/// configured (ECO_RUST_DEDICATED_BUILDER), the source is tarred from the app
+/// CT, built on the builder with `cargo build --release --workspace`, and the
+/// release binaries are transferred back to the app CT's `target/release/`
+/// (the Cargo-workspace output location configure.sh points PM2 at). Without a
+/// dedicated builder, the app CT builds its own services in place.
+///
+/// Returns a single multi-line bash script (run on the host) so intermediate
+/// variables persist across steps.
+fn build_dedicated_rust_steps(
+    app_ctid: &str,
+    builder_ctid: &str,
+    project: &str,
+    ct_project_root: &str,
+    services: &[ecompose::Service],
+) -> Vec<String> {
+    let rust_services: Vec<&ecompose::Service> = services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+        .collect();
+    if rust_services.is_empty() {
+        return Vec::new();
+    }
+
+    let builder_root = format!("/opt/eco-rust-builds/{project}");
+    let project_base = ct_project_root.trim_end_matches('/').to_string();
+    let project_parent = std::path::Path::new(&project_base)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/opt/projects".to_string());
+    let mut lines: Vec<String> = vec![
+        "set -euo pipefail".to_string(),
+        format!("# [rust-builder] sync estate source from CT {app_ctid} to CT {builder_ctid}"),
+    ];
+
+    // 1. Sync the full estate source from the app CT to the builder so the
+    //    Cargo workspace manifest (generated at ctProjectRoot) sees all domains.
+    lines.push(format!(
+        "pct exec {app_ctid} -- bash -lc 'cd {} && tar --exclude=.env --exclude=*/.env --exclude=*/node_modules --exclude=*/target --exclude=.git --exclude=*/.git --exclude=.eco -cf /tmp/{project}.tar {project}'",
+        shell_single_quote(&project_parent)
+    ));
+    lines.push(format!("pct pull {app_ctid} /tmp/{project}.tar /tmp/{project}-sync.tar"));
+    lines.push(format!("pct push {builder_ctid} /tmp/{project}-sync.tar /tmp/{project}.tar"));
+    lines.push(format!(
+        "pct exec {builder_ctid} -- bash -lc 'rm -rf {} && mkdir -p /opt/eco-rust-builds && cd /opt/eco-rust-builds && tar -xf /tmp/{project}.tar && rm -f /tmp/{project}.tar'",
+        shell_single_quote(&builder_root)
+    ));
+    // 1b. The workspace Cargo.toml is generated by configure.sh, which runs
+    //     after this build on the app CT -- so it is absent from the synced
+    //     source. Write it on the builder from the declared rust members so
+    //     `cargo build --release --workspace` composes them into one target/.
+    let members: Vec<String> = rust_services
+        .iter()
+        .map(|s| format!("    \"{}\",", s.path.trim_start_matches('/')))
+        .collect();
+    let workspace_toml = format!(
+        "# Generated by eco for the dedicated Rust builder (mirrors configure.sh).\n[workspace]\nresolver = \"2\"\nmembers = [\n{}\n]\n\n[profile.release]\nopt-level = 3\nlto = true\nstrip = true\n",
+        members.join("\n")
+    );
+    lines.push(format!(
+        "pct exec {builder_ctid} -- bash -lc 'cat > {}/Cargo.toml <<\"ECO_EOF\"\n{}\nECO_EOF'",
+        shell_single_quote(&builder_root),
+        workspace_toml.trim_end()
+    ));
+    lines.push(format!(
+        "pct exec {builder_ctid} -- bash -lc 'test -f {}/Cargo.toml && echo workspace-ok'",
+        shell_single_quote(&builder_root)
+    ));
+
+    // 2. Build the whole workspace once on the builder (shared target/ dir).
+    lines.push(format!("# [rust-builder] cargo build --release --workspace on CT {builder_ctid}"));
+    lines.push(format!(
+        "pct exec {builder_ctid} -- bash -lc 'cd {} && RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH RUSTC_WRAPPER= cargo build --release --workspace'",
+        shell_single_quote(&builder_root)
+    ));
+
+    // 3. For each rust service, resolve its package name on the builder and
+    //    transfer the release binary to the app CT's workspace target/.
+    for service in &rust_services {
+        let service_rel = service.path.trim_start_matches('/');
+        let builder_manifest_dir = format!("{builder_root}/{service_rel}");
+        let label = sanitize_label(&service.name);
+        lines.push(format!("# [rust-builder] transfer artifact for {}", service.name));
+        lines.push(format!(
+            "PACKAGE=$(pct exec {builder_ctid} -- bash -c 'sed -nE \"s/^name[[:space:]]*=[[:space:]]*\\\"([^\\\"]+)\\\".*/\\1/p\" {0}/Cargo.toml | head -n1')",
+            shell_single_quote(&builder_manifest_dir)
+        ));
+        lines.push("PACKAGE=$(printf '%s' \"$PACKAGE\" | tr -d ' \\n')".to_string());
+        lines.push("if [ -n \"$PACKAGE\" ]; then".to_string());
+        lines.push(format!(
+            "  pct pull {builder_ctid} {builder_root}/target/release/$PACKAGE /tmp/{project}-{label}.bin"
+        ));
+        lines.push(format!(
+            "  pct push {app_ctid} /tmp/{project}-{label}.bin /tmp/{project}-{label}.bin"
+        ));
+        // PACKAGE is a host variable; expand it on the host and interpolate the
+        // literal value into the CT-side command so the mv targets the real name.
+        lines.push(format!(
+            "  pct exec {app_ctid} -- bash -lc \"mkdir -p {proj} && mv -f /tmp/{project}-{label}.bin {proj}/$PACKAGE && chmod 755 {proj}/$PACKAGE\"",
+            proj = util::shell_quote_double(&format!("{project_base}/target/release"))
+        ));
+        lines.push("fi".to_string());
+    }
+
+    lines
+}
+
+fn sanitize_label(label: &str) -> String {
+    label.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
+fn build_git_force_sync_command(
+    repo_path: &str,
+    branch: &str,
+    git_url: &str,
+    preserve_paths: &[String],
+    runtime_branch: bool,
+) -> String {
+    let mut clean_excludes = vec![
+        "-e .eco/".to_string(),
+        "-e .env".to_string(),
+        "-e .configure-state".to_string(),
+        "-e target/".to_string(),
+        "-e .eco-rust-hash".to_string(),
+        "-e .eco-vite-start.sh".to_string(),
+        "-e .eco-astro-preview.sh".to_string(),
+        "-e .eco-spring-boot-start.sh".to_string(),
+    ];
+    for preserved in preserve_paths {
+        clean_excludes.push(format!("-e {}", shell_single_quote(&format!("{}/", preserved.trim_end_matches('/')))));
+    }
+
+    let mut lines = vec![
+        format!("if [ -e \"{repo_path}\" ] && [ ! -d \"{repo_path}\" ]; then rm -f \"{repo_path}\"; fi"),
+        format!("mkdir -p \"{repo_path}\""),
+        format!("cd \"{repo_path}\""),
+        "repo_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)".to_string(),
+        "if [ \"$repo_git_root\" != \"$(pwd -P)\" ]; then".to_string(),
+        "  rm -rf .git".to_string(),
+        "  git init -q".to_string(),
+        "fi".to_string(),
+        format!("if git remote get-url origin >/dev/null 2>&1; then git remote set-url origin \"{git_url}\"; else git remote add origin \"{git_url}\"; fi"),
+    ];
+
+    if runtime_branch {
+        lines.push(format!("ECO_DEPLOY_REPO_BRANCH={}", shell_single_quote(branch)));
+        lines.push("if [ -n \"${ECO_DEPLOY_TRIGGER_BRANCH:-}\" ]; then".to_string());
+        lines.push("  if git ls-remote --heads origin \"${ECO_DEPLOY_TRIGGER_BRANCH}\" | grep -q \"refs/heads/${ECO_DEPLOY_TRIGGER_BRANCH}\"; then".to_string());
+        lines.push("    ECO_DEPLOY_REPO_BRANCH=\"${ECO_DEPLOY_TRIGGER_BRANCH}\"".to_string());
+        lines.push("  fi".to_string());
+        lines.push("fi".to_string());
+        lines.push("git fetch --force --prune origin \"$ECO_DEPLOY_REPO_BRANCH\"".to_string());
+        lines.push("git checkout --force -B \"$ECO_DEPLOY_REPO_BRANCH\" \"origin/$ECO_DEPLOY_REPO_BRANCH\"".to_string());
+        lines.push("git reset --hard \"origin/$ECO_DEPLOY_REPO_BRANCH\"".to_string());
+    } else {
+        lines.push(format!("git fetch --force --prune origin \"{branch}\""));
+        lines.push(format!("git checkout --force -B \"{branch}\" \"origin/{branch}\""));
+        lines.push(format!("git reset --hard \"origin/{branch}\""));
+    }
+    lines.push(format!("git clean -ffd {}", clean_excludes.join(" ")));
+    lines.join("\n")
+}
+
+fn relative_ct_service_path(service_path: &str, project: &str, project_dir: &str, estate_core: &str) -> String {
+    let mut segments: Vec<String> = service_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let project_base = Path::new(project_dir)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // The first path segment may be the project name, the project dir name, or
+    // the estate core repo name (e.g. `stuff8_core/frontend` where the estate
+    // core repo is `stuff8_core` but the project is `stuff8`). All three are
+    // flattened to the CT project root, so strip whichever matched.
+    if !segments.is_empty() && (segments[0] == project || segments[0] == project_base || (!estate_core.is_empty() && segments[0] == estate_core)) {
+        segments.remove(0);
+    }
+    segments.join("/")
+}
+
+// The estate core repo name, derived from the ecompose composition.git (e.g.
+// `stuff8_core` for git@github.com:kelastanpatembok/stuff8_core.git). On the
+// host the staged source is flattened to /opt/projects/<project>, so service
+// paths that begin with the estate core name must strip it.
+fn estate_core_name(content: &str) -> String {
+    let composition = ecompose::parse_composition(content);
+    composition
+        .get("git")
+        .map(|g| repo_name_from_git_url(g))
+        .unwrap_or_default()
+}
+
+fn resolve_ct_service_dir(service: &ecompose::Service, ct_project_root: &str, project_dir: &str, estate_core: &str) -> String {
+    let relative_path = relative_ct_service_path(&service.path, &Path::new(ct_project_root).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), project_dir, estate_core);
+    if relative_path.is_empty() {
+        return ct_project_root.to_string();
+    }
+    format!("{ct_project_root}/{relative_path}")
+}
+
+fn is_peer_dependency_resolution_error(result: &util::Captured) -> bool {
+    let text = format!("{}\n{}", result.stdout, result.stderr);
+    text.contains("ERESOLVE")
+        || text.to_lowercase().contains("peer dependency")
+        || text.to_lowercase().contains("legacy-peer-deps")
+}
+
+fn derive_webhook_hostname(app_hostname: &str) -> String {
+    if app_hostname.is_empty() {
+        return String::new();
+    }
+    let labels: Vec<&str> = app_hostname.trim_matches('.').split('.').collect();
+    if labels.len() <= 2 {
+        return format!("hooks.{app_hostname}");
+    }
+    let (head, rest) = labels.split_first().unwrap();
+    format!("hooks-{head}.{}", rest.join("."))
+}
+
+fn derive_staging_hostname(app_hostname: &str) -> String {
+    if app_hostname.is_empty() {
+        return String::new();
+    }
+    let labels: Vec<&str> = app_hostname.trim_matches('.').split('.').collect();
+    if labels.len() <= 2 {
+        return format!("staging.{app_hostname}");
+    }
+    let (head, rest) = labels.split_first().unwrap();
+    format!("staging-{head}.{}", rest.join("."))
+}
+
+#[derive(Clone)]
+pub struct DeployGithubConfig {
+    pub branch: String,
+    pub debounce_ms: u64,
+    pub path: String,
+    pub port: Option<u32>,
+    pub proxy_ct_input: String,
+    pub scheme: String,
+    pub webhook_hostname: String,
+    pub stale_webhook_hostname: String,
+    pub webhook_url: String,
+}
+
+pub fn resolve_deploy_github_config(
+    project: &str,
+    expose: &ecompose::Expose,
+    deploy: &HashMap<String, HashMap<String, String>>,
+) -> Option<DeployGithubConfig> {
+    let github = deploy.get("github").cloned().unwrap_or_default();
+    if !util::to_bool(github.get("enabled").map(|s| s.as_str()).unwrap_or("")) {
+        return None;
+    }
+    let scheme = github.get("scheme").cloned().or_else(|| expose.get("scheme").cloned()).unwrap_or_else(|| "https".to_string());
+    let derived = derive_webhook_hostname(&expose.hostname());
+    let hostname = github.get("webhook_hostname").cloned().unwrap_or(derived.clone());
+    let legacy_hostname = if !github.contains_key("webhook_hostname") && !expose.hostname().is_empty() {
+        format!("hooks.{}", expose.hostname().trim_matches('.'))
+    } else {
+        String::new()
+    };
+    let port = github
+        .get("webhook_port")
+        .and_then(|p| p.parse::<u32>().ok())
+        .filter(|p| (20000..=27999).contains(p));
+    let debounce_ms = github
+        .get("debounce_ms")
+        .and_then(|d| d.parse::<u64>().ok())
+        .unwrap_or(15000);
+    let path_name = github.get("webhook_path").cloned().unwrap_or_else(|| "/__eco/github/deploy".to_string());
+    let branch = github.get("branch").cloned().unwrap_or_else(|| "main".to_string());
+    let proxy_ct_input = github
+        .get("proxy_ct")
+        .cloned()
+        .or_else(|| expose.get("proxy_ct").cloned())
+        .or_else(|| expose.get("proxy_ctid").cloned())
+        .or_else(|| expose.get("via").cloned());
+
+    if hostname.is_empty() {
+        return None;
+    }
+    let proxy_ct_input = proxy_ct_input.unwrap_or_default();
+    if proxy_ct_input.is_empty() {
+        return None;
+    }
+
+    let path = if path_name.starts_with('/') { path_name.clone() } else { format!("/{path_name}") };
+    let webhook_url = format!("{scheme}://{hostname}{path}");
+    Some(DeployGithubConfig {
+        branch,
+        debounce_ms,
+        path,
+        port,
+        proxy_ct_input,
+        scheme,
+        webhook_hostname: hostname.clone(),
+        stale_webhook_hostname: if legacy_hostname != hostname { legacy_hostname } else { String::new() },
+        webhook_url,
+    })}
+
+fn is_self_domain(domain: &str, project: &str, project_dir: &str) -> bool {
+    let base = Path::new(project_dir)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    domain == project || domain == base
+}
+
+async fn _noop() {}
+
+fn resolve_domain_git(domain: &str, project: &str, content: &str) -> Result<Option<(String, String)>, String> {
+    if domain == format!("{project}_composition") {
+        let composition = ecompose::parse_composition(content);
+        if let Some(git) = composition.get("git") {
+            if !git.is_empty() {
+                let branch = composition.get("branch").cloned().unwrap_or_else(|| "main".to_string());
+                return Ok(Some((git.clone(), branch)));
+            }
+        }
+    }
+    // Estate-core model: the estate repo (named freely, e.g. {project}_core) is
+    // the repo that owns ecompose.yml, self-declared via composition.git. Match
+    // it by repo name so it resolves even when the manifest is a bare copy on a
+    // host (no .git, project_dir is not the estate repo).
+    let composition = ecompose::parse_composition(content);
+    if let Some(git) = composition.get("git") {
+        if !git.is_empty() && domain == repo_name_from_git_url(git) {
+            let branch = composition.get("branch").cloned().unwrap_or_else(|| "main".to_string());
+            return Ok(Some((git.clone(), branch)));
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_project_git(project_dir: &Path, project: &str, content: &str) -> Result<String, String> {
+    // The ecompose.yml composition.git is authoritative when declared (a fresh
+    // host and remote-mode staged source may have no .git directory at all).
+    if let Some(git) = ecompose::parse_composition(content).get("git") {
+        if !git.is_empty() {
+            return Ok(git.clone());
+        }
+    }
+    resolve_project_git_remote(project_dir, project)
+}
+
+fn resolve_project_git_remote(project_dir: &Path, project: &str) -> Result<String, String> {
+    let result = run_capture("git", &["config".to_string(), "--get".to_string(), "remote.origin.url".to_string()], project_dir)?;
+    let remote = result.stdout.trim().to_string();
+    if result.code != 0 || remote.is_empty() {
+        return Err(format!(
+            "Deploy webhook is enabled for {project}, but no git remote origin could be resolved from {}.",
+            project_dir.display()
+        ));
+    }
+    Ok(remote)
+}
+
+pub struct GithubRepoPlan {
+    pub domain: String,
+    pub git: String,
+    pub branch: String,
+    pub owner: String,
+    pub repo: String,
+    pub full_name: String,
+}
+
+fn resolve_deploy_github_repos_for_project(
+    domains: &[String],
+    project: &str,
+    project_dir: &Path,
+    branch: &str,
+    domain_branch_overrides: &HashMap<String, String>,
+    content: &str,
+) -> Result<Vec<GithubRepoPlan>, String> {
+    let mut repos = Vec::new();
+    for domain in domains {
+        if is_self_domain(domain, project, &project_dir.display().to_string()) {
+            let git = resolve_project_git(project_dir, project, content)?;
+            let coords = github::parse_github_repo_coordinates(&git)?;
+            repos.push(GithubRepoPlan {
+                domain: domain.clone(),
+                git: git.clone(),
+                branch: branch.to_string(),
+                owner: coords.owner,
+                repo: coords.repo,
+                full_name: coords.full_name,
+            });
+            continue;
+        }
+        let (git, repo_branch) = resolve_domain_git(domain, project, content)?
+            .ok_or_else(|| {
+                format!(
+                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml)"
+                )
+            })?;
+        let coords = github::parse_github_repo_coordinates(&git)?;
+        let resolved_branch = domain_branch_overrides.get(domain).cloned().unwrap_or(repo_branch);
+        repos.push(GithubRepoPlan {
+            domain: domain.clone(),
+            git,
+            branch: resolved_branch,
+            owner: coords.owner,
+            repo: coords.repo,
+            full_name: coords.full_name,
+        });
+    }
+    Ok(repos)
+}
+
+ fn pct_exec(ctid: &str, command: &str) -> Result<(), String> {
+     run_command(
+         "pct",
+         &["exec".to_string(), ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), command.to_string()],
+         &util::current_dir(),
+     )
+ }
+
+/// Run a host-side shell line (may be a multi-line bash fragment such as the
+/// dedicated-Rust-builder steps) via `bash -c`. Lines starting with `#` are
+/// treated as comments and skipped.
+fn run_command_plan_line(line: &str) -> Result<(), String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(());
+    }
+    let status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(trimmed)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| format!("run plan line failed: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(crate::util::describe_status("bash -c plan step", &status))
+    }
+}
+
+pub fn pct_exec_capture(ctid: &str, command: &str) -> Result<String, String> {
+    let result = run_capture(
+        "pct",
+        &["exec".to_string(), ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), command.to_string()],
+        &util::current_dir(),
+    )?;
+    if result.code != 0 {
+        return Err(format!(
+            "pct exec {ctid} failed with code {}: {}",
+            result.code,
+            if result.stderr.trim().is_empty() { result.stdout.trim().to_string() } else { result.stderr.trim().to_string() }
+        ));
+    }
+    Ok(result.stdout)
+}
+
+fn build_deploy_receiver_files(
+    project: &str,
+    project_dir: &str,
+    ct_project_root: &str,
+    _ct_project_parent: &str,
+    _ct_workspace_root: &str,
+    ct_eco_root: &str,
+    ct_config_path: &str,
+    github_deploy: &DeployGithubConfig,
+    github_repos: &[GithubRepoPlan],
+    webhook_secret: &str,
+    dependency_install_steps: &[(String, String)],
+    data_bootstrap_steps: &[String],
+    migration_steps: &[String],
+    build_steps: &[(String, String)],
+    services: &[ecompose::Service],
+    uses_dedicated_rust_builder: bool,
+    _rust_builder_is_application: bool,
+    staging: bool,
+    staging_ecompose_content: &str,
+) -> Result<ReceiverSetup, String> {
+    let deploy_root = format!("{ct_project_root}/.eco/deploy");
+    let deploy_script_path = format!("{deploy_root}/redeploy.sh");
+    let config_path = format!("{deploy_root}/github-webhook.json");
+    let main_pm2_config_name = Path::new(ct_config_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "ecosystem.config.js".to_string());
+    let webhook_pm2_config_name = if main_pm2_config_name.ends_with(".cjs") {
+        "webhook-ecosystem.config.cjs"
+    } else {
+        "webhook-ecosystem.config.js"
+    };
+    let pm2_config_path = format!("{deploy_root}/{webhook_pm2_config_name}");
+
+    let mut lines: Vec<String> = vec![
+        "#!/bin/bash".to_string(),
+        "set -euo pipefail".to_string(),
+        String::new(),
+        format!("PROJECT_ROOT={}", shell_single_quote(ct_project_root)),
+        format!("WORKSPACE_ROOT={}", shell_single_quote("/opt/projects")),
+        format!("ECO_ROOT={}", shell_single_quote(ct_eco_root)),
+        format!("PROJECT_NAME={}", shell_single_quote(project)),
+        format!("DEPLOY_LOCK={}", shell_single_quote(&format!("{ct_project_root}/.eco/deploy/redeploy.lock"))),
+        "mkdir -p \"$(dirname \"$DEPLOY_LOCK\")\"".to_string(),
+        "exec 9>\"$DEPLOY_LOCK\"".to_string(),
+        "if ! flock -n 9; then echo \"[eco deploy] another deploy owns this estate lock; exiting\" >&2; exit 0; fi".to_string(),
+        "# Keep a small, configurable buffer so a CT never reaches emergency read-only mode.".to_string(),
+        "# Only disposable logs and debug build outputs are reclaimed automatically; release".to_string(),
+        "# artifacts remain intact so the currently running application is always restartable.".to_string(),
+        "ECO_MIN_FREE_MB=${ECO_MIN_FREE_MB:-4096}".to_string(),
+        "free_kb() { df -Pk \"$PROJECT_ROOT\" | awk 'NR == 2 { print $4 }'; }".to_string(),
+        "reclaim_safe_cache() {".to_string(),
+        "  echo \"[eco deploy] low disk space; reclaiming safe cache for $PROJECT_NAME\" >&2".to_string(),
+        "  find \"$PROJECT_ROOT\" -type d -path '*/target/debug' -prune -print -exec rm -rf {} +".to_string(),
+        "  find \"$PROJECT_ROOT\" -type d -path '*/target/incremental' -prune -print -exec rm -rf {} +".to_string(),
+        "  find \"$HOME/.pm2/logs\" -type f -size +10M -print -exec truncate -s 0 {} + 2>/dev/null || true".to_string(),
+        "}".to_string(),
+        "MIN_FREE_KB=$((ECO_MIN_FREE_MB * 1024))".to_string(),
+        "if [ \"$(free_kb)\" -lt \"$MIN_FREE_KB\" ]; then reclaim_safe_cache; fi".to_string(),
+        "if [ \"$(free_kb)\" -lt \"$MIN_FREE_KB\" ]; then".to_string(),
+        "  echo \"[eco deploy] refusing deploy: less than ${ECO_MIN_FREE_MB}MB free after safe cleanup. Reclaim release build cache during a maintenance window.\" >&2".to_string(),
+        "  exit 1".to_string(),
+        "fi".to_string(),
+        "TRIGGER_REPO=${1:-manual}".to_string(),
+        "echo \"[eco deploy] trigger: ${TRIGGER_REPO}\"".to_string(),
+        String::new(),
+    ];
+
+    let composed_domain_paths: Vec<String> = github_repos
+        .iter()
+        .filter(|repo| !is_self_domain(&repo.domain, project, project_dir))
+        .map(|repo| repo.domain.clone())
+        .collect();
+
+    for repo in github_repos {
+        if !is_self_domain(&repo.domain, project, project_dir) && !domain_has_ct_source(&repo.domain, services) {
+            // Rust-only domain (or one not composed as a `path:` source): its
+            // binaries are shipped (remote cross-compile / dedicated builder /
+            // LXS), so the CT never needs its source. `eco up` refreshes it only
+            // when the app CT must feed a dedicated builder.
+            continue;
+        }
+        let repo_path = if is_self_domain(&repo.domain, project, project_dir) {
+            ct_project_root.to_string()
+        } else {
+            format!("{ct_project_root}/{}", repo.domain)
+        };
+        let preserve = if is_self_domain(&repo.domain, project, project_dir) {
+            composed_domain_paths.clone()
+        } else {
+            Vec::new()
+        };
+        lines.push(format!("# sync repo: {}", repo.domain));
+        lines.push(build_git_force_sync_command(&repo_path, &repo.branch, &repo.git, &preserve, staging));
+        lines.push(String::new());
+    }
+
+    if staging && !staging_ecompose_content.is_empty() {
+        lines.push("# re-apply staging ecompose.yml (repo sync restored the prod manifest)".to_string());
+        lines.push(format!(
+            "install -D -m 0644 {} {}",
+            shell_single_quote(&format!("{deploy_root}/staging-ecompose.yml")),
+            shell_single_quote(&format!("{ct_project_root}/ecompose.yml"))
+        ));
+        lines.push(String::new());
+    }
+
+    for (name, command) in dependency_install_steps {
+        lines.push(format!("# install deps: {name}"));
+        lines.push(command.clone());
+        lines.push(String::new());
+    }
+    for command in data_bootstrap_steps {
+        lines.push("# bootstrap data services".to_string());
+        lines.push(command.clone());
+        lines.push(String::new());
+    }
+    for command in migration_steps {
+        lines.push("# apply Rust database migrations".to_string());
+        let prefix = if uses_dedicated_rust_builder { "export ECO_SQLX_BIN=/opt/eco-tools/sqlx; " } else { "" };
+        lines.push(format!("{prefix}{command}"));
+        lines.push(String::new());
+    }
+
+    lines.push("# refresh eco CLI inside CT: install the bundled binary onto PATH".to_string());
+    lines.push("mkdir -p /usr/local/bin".to_string());
+    lines.push(format!("install -m 0755 {}/bin/eco /usr/local/bin/eco", shell_single_quote(ct_eco_root)));
+    lines.push("export ECO_BIN=/usr/local/bin/eco".to_string());
+    lines.push(String::new());
+    lines.push("# regenerate estate configuration (also runs each rust service's".to_string());
+    lines.push("# integration tests and records any failures -- see".to_string());
+    lines.push("# run_test_gates_before_deploy in configure.sh)".to_string());
+    lines.push(format!("cd {}", shell_single_quote("/opt/projects")));
+    lines.push(format!(
+        "ECO_BIN=/usr/local/bin/eco ECO_DEPLOY_MODE=prod ECO_NON_INTERACTIVE=1 {} ECO_RUN_TESTS_BEFORE_DEPLOY=1 PROJECT_DIR={} PROJECT_NAME={} PM2_DIR={} bash {}",
+        systemd_env(),
+        shell_single_quote(ct_project_root),
+        shell_single_quote(project),
+        shell_single_quote(ct_project_root),
+        shell_single_quote(&format!("{ct_eco_root}/configure.sh"))
+    ));
+    lines.push(String::new());
+
+    for (name, command) in build_steps {
+        lines.push(format!("# build artifact: {name}"));
+        lines.push(command.clone());
+        lines.push(String::new());
+    }
+
+    // Rust service rebuild (hash-based skip), mirroring the Node receiver.
+    // When target_mode is single-binary, all Rust domains are merged into one
+    // binary built from the project-level shim crate (*_binary/).
+    let rust_services: Vec<&ecompose::Service> = services
+        .iter()
+        .filter(|s| s.runtimes.iter().any(|r| r == "rust") && !s.path.is_empty())
+        .collect();
+    if !rust_services.is_empty() {
+        if uses_dedicated_rust_builder {
+            lines.push("# ── external dedicated Rust builder ──".to_string());
+            lines.push("# Rust artifacts are built on the dedicated builder CT and shipped to".to_string());
+            lines.push("# this CT by host-side `eco up` (ECO_RUST_DEDICATED_BUILDER). The webhook".to_string());
+            lines.push("# redeploy does not compile Rust; it only syncs source and restarts".to_string());
+            lines.push("# services against the shipped release binaries.".to_string());
+            for svc in &rust_services {
+                lines.push(format!("echo \"[eco deploy] {}: Rust built externally on ECO_RUST_DEDICATED_BUILDER; using shipped release binary\"", svc.name));
+            }
+            lines.push(String::new());
+        } else {
+            // Rust is built off-CT only; the redeploy script never compiles from
+            // source. If this branch is somehow reached, fail loudly rather than
+            // silently rebuilding.
+            lines.push("# Rust source build is not supported: binaries must be supplied (remote / builder / LXS).".to_string());
+            lines.push(format!("echo \"[eco deploy] {}: refused to compile Rust in-CT; supply binaries via eco up --remote or ECO_RUST_DEDICATED_BUILDER\" >&2", project));
+            lines.push("exit 1".to_string());
+            lines.push(String::new());
+        }
+    }
+
+    // Restart app services
+    lines.push("# restart app services -- skip any service whose integration tests".to_string());
+    lines.push("# just failed (see run_test_gates_before_deploy in configure.sh)".to_string());
+    lines.push(format!("cd {}", shell_single_quote(ct_project_root)));
+    lines.push("# Host env (BREVO_API_KEY/MAIL_FROM_*) is operator fallback for .env generation,".to_string());
+    lines.push("# never a source for service process env. Unset so services read their own .env".to_string());
+    lines.push("# (where an ecompose.yml-declared sender wins) instead of inheriting host values.".to_string());
+    lines.push("unset BREVO_API_KEY MAIL_FROM_EMAIL MAIL_FROM_NAME 2>/dev/null || true".to_string());
+    lines.push(format!("FAILED_SERVICES_FILE={}", shell_single_quote(&format!("{ct_project_root}/.eco-test-failures"))));
+    lines.push("FAILED_SERVICES=\"\"".to_string());
+    lines.push("if [ -s \"$FAILED_SERVICES_FILE\" ]; then".to_string());
+    lines.push("  FAILED_SERVICES=$(tr '\\n' ' ' < \"$FAILED_SERVICES_FILE\")".to_string());
+    lines.push("  echo \"[eco deploy] skipping (tests failed): ${FAILED_SERVICES}\" >&2".to_string());
+    lines.push("fi".to_string());
+    lines.push(format!(
+        "ALL_APPS=$(node -e \"console.log(require('./{main_pm2_config_name}').apps.map(a => a.name).join(' '))\")"
+    ));
+    lines.push("RESTART_APPS=\"\"".to_string());
+    lines.push("for app in $ALL_APPS; do".to_string());
+    lines.push("  skip=0".to_string());
+    lines.push("  for failed in $FAILED_SERVICES; do".to_string());
+    lines.push("    if [ \"$app\" = \"$failed\" ]; then skip=1; fi".to_string());
+    lines.push("  done".to_string());
+    lines.push("  if [ \"$skip\" -eq 0 ]; then RESTART_APPS=\"$RESTART_APPS $app\"; fi".to_string());
+    lines.push("done".to_string());
+    lines.push("if [ -n \"$RESTART_APPS\" ]; then".to_string());
+    if systemd_mode() {
+        lines.push("  for app in $RESTART_APPS; do".to_string());
+        lines.push("    unit=\"eco-$app.service\"".to_string());
+        lines.push("    systemctl reset-failed \"$unit\" 2>/dev/null || true".to_string());
+        lines.push("    systemctl restart \"$unit\"".to_string());
+        lines.push("  done".to_string());
+        lines.push("else".to_string());
+        lines.push("  echo \"[eco deploy] no services passed their test gate, nothing to restart\" >&2".to_string());
+        lines.push("fi".to_string());
+        lines.push("systemctl daemon-reload 2>/dev/null || true".to_string());
+        lines.push(format!("for app in $(node -e \"console.log(require('./{main_pm2_config_name}').apps.map(a => a.name).join(' '))\"); do systemctl enable eco-$app.service 2>/dev/null || true; done"));
+    } else {
+        lines.push("  RESTART_LIST=$(echo \"$RESTART_APPS\" | tr ' ' ',' | sed 's/^,//')".to_string());
+        lines.push(format!("  pm2 startOrReload {} --update-env --only \"$RESTART_LIST\"", main_pm2_config_name));
+        lines.push("else".to_string());
+        lines.push("  echo \"[eco deploy] no services passed their test gate, nothing to restart\" >&2".to_string());
+        lines.push("fi".to_string());
+        lines.push(format!("pm2 startOrReload {} --update-env", shell_single_quote(&pm2_config_path)));
+    }
+    lines.push(String::new());
+
+    let receiver_config = serde_json::json!({
+        "branch": github_deploy.branch,
+        "branchPolicy": if staging { "any-except-main" } else { "fixed" },
+        "debounceMs": github_deploy.debounce_ms,
+        "deployCommand": deploy_script_path,
+        "path": github_deploy.path,
+        "port": github_deploy.port.unwrap_or(0),
+        "project": project,
+        "projectRoot": ct_project_root,
+        "repos": github_repos.iter().map(|repo| serde_json::json!({
+            "branch": github_deploy.branch,
+            "domain": repo.domain,
+            "fullName": repo.full_name
+        })).collect::<Vec<_>>(),
+        "secret": webhook_secret
+    });
+
+    let webhook_app_name = if staging {
+        format!("{project}-staging-deploy-webhook")
+    } else {
+        format!("{project}-deploy-webhook")
+    };
+    // The deploy receiver is the Rust binary's internal `webhook-server`
+    // subcommand (installed on the CT at /usr/local/bin/eco), not the legacy
+    // Node github-webhook-receiver.js -- the CT no longer needs node for this.
+    let pm2_config = format!(
+        "module.exports = {{\n  apps: [\n    {{\n      name: {},\n      cwd: {},\n      script: {},\n      args: \"webhook-server\",\n      interpreter: \"none\",\n      env: {{\n        ECO_WEBHOOK_CONFIG: {},\n        ECO_WEBHOOK_PORT: {}\n      }}\n    }}\n  ]\n}};\n",
+        util::json_string(&webhook_app_name),
+        util::json_string(ct_project_root),
+        util::json_string("/usr/local/bin/eco"),
+        util::json_string(&config_path),
+        util::json_string(&github_deploy.port.unwrap_or(0).to_string())
+    );
+
+    let mut files: Vec<(String, String)> = vec![
+        (config_path.clone(), format!("{}\n", serde_json::to_string_pretty(&receiver_config).unwrap_or_default())),
+        (deploy_script_path.clone(), format!("{}\n", lines.join("\n"))),
+        (pm2_config_path.clone(), pm2_config),
+    ];
+    if staging && !staging_ecompose_content.is_empty() {
+        files.push((format!("{deploy_root}/staging-ecompose.yml"), staging_ecompose_content.to_string()));
+    }
+
+    Ok(ReceiverSetup {
+        config_path,
+        deploy_root,
+        deploy_script_path,
+        files,
+        pm2_config_path,
+    })
+}
+
+pub struct ReceiverSetup {
+    pub config_path: String,
+    pub deploy_root: String,
+    pub deploy_script_path: String,
+    pub files: Vec<(String, String)>,
+    pub pm2_config_path: String,
+}
+
+fn cargo_package_name(cargo_toml: &str) -> Option<String> {
+    let mut in_package = false;
+    for raw in cargo_toml.split('\n') {
+        let line = raw.trim_end_matches('\r');
+        if line == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if in_package && line.starts_with('[') {
+            break;
+        }
+        if in_package {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("name") {
+                if let Some(eq) = rest.find('=') {
+                    let val = rest[eq + 1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !val.is_empty() {
+                        return Some(val);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn build_data_bootstrap_plan(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, project: &str, estate_core: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let has_mongo = services.iter().any(|s| s.runtimes.iter().any(|r| r == "mongodb@7"));
+    let sql_services: Vec<&ecompose::Service> = services.iter().filter(|s| s.runtimes.iter().any(|r| r == "postgresql@15")).collect();
+
+    if has_mongo {
+        commands.push(
+            "if command -v systemctl >/dev/null 2>&1; then\n  systemctl enable mongod >/dev/null 2>&1 || true;\n  systemctl restart mongod;\nelif command -v service >/dev/null 2>&1; then\n  service mongod restart || true;\nfi"
+                .to_string(),
+        );
+    }
+    if !sql_services.is_empty() {
+        commands.push(
+            "if command -v systemctl >/dev/null 2>&1; then\n  systemctl enable postgresql >/dev/null 2>&1 || true;\n  systemctl restart postgresql;\nelif command -v service >/dev/null 2>&1; then\n  service postgresql restart || true;\nfi"
+                .to_string(),
+        );
+    }
+
+    for service in &sql_services {
+        let db_name = sql_database_name_for_service(service, project);
+        let db_role = format!("{project}_user");
+        let env_file = format!("{}/.env", resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core));
+        let quoted_env_file = shell_single_quote(&env_file);
+        let is_java = uses_java_database_configuration(service);
+        let mut commands_for_service = vec![
+            format!("touch {quoted_env_file}"),
+            "if [[ -z \"${DATABASE_PASSWORD:-}\" ]]; then".to_string(),
+            format!("  db_password=\"$(grep -E '^DATABASE_PASSWORD=' {quoted_env_file} 2>/dev/null | cut -d'=' -f2- | tr -d '\\r' || true)\";"),
+            "  if [[ -z \"$db_password\" ]]; then".to_string(),
+            "    echo 'ERROR: DATABASE_PASSWORD is not exported in the shell environment and no value is persisted in the service .env. Add it to ~/.bashrc on the CT.' >&2;".to_string(),
+            "    exit 1;".to_string(),
+            "  fi".to_string(),
+            format!("  echo \"[eco up] DATABASE_PASSWORD not in shell env -- reusing the value already persisted in {env_file} (no rotation)\";"),
+            "else".to_string(),
+            "  db_password=\"${DATABASE_PASSWORD}\";".to_string(),
+            "fi".to_string(),
+            format!("sed -i '/^DATABASE_PASSWORD=/d' {quoted_env_file};"),
+            format!("printf 'DATABASE_PASSWORD=%s\\n' \"$db_password\" >> {quoted_env_file};"),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \"DO \\$\\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{db_role}') THEN CREATE ROLE {db_role} WITH LOGIN; END IF; END \\$\\$;\""),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \"ALTER ROLE {db_role} WITH LOGIN PASSWORD '$db_password';\""),
+            format!("PGPASSWORD=\"$db_password\" psql -h 127.0.0.1 -U {db_role} -d postgres -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null"),
+            format!("runuser -u postgres -- psql -tAc \"SELECT 1 FROM pg_database WHERE datname = '{db_name}'\" | grep -q 1 || runuser -u postgres -- createdb -O {db_role} {}", shell_single_quote(&db_name)),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {} -c \"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_role};\"", shell_single_quote(&db_name)),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {} -c \"GRANT ALL ON SCHEMA public TO {db_role};\"", shell_single_quote(&db_name)),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {} -c \"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {db_role};\"", shell_single_quote(&db_name)),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {} -c \"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {db_role};\"", shell_single_quote(&db_name)),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {} -c \"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {db_role};\"", shell_single_quote(&db_name)),
+            format!("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {} -c \"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {db_role};\"", shell_single_quote(&db_name)),
+            format!("sed -i '/^DATABASE_USERNAME=/d' {quoted_env_file};"),
+            format!("printf 'DATABASE_USERNAME=%s\\n' \"{db_role}\" >> {quoted_env_file};"),
+        ];
+        if is_java {
+            commands_for_service.push(env_set_if_missing_command(&env_file, "DATABASE_URL", &format!("jdbc:postgresql://localhost:5432/{db_name}")));
+        } else {
+            commands_for_service.push(format!(
+                "sed -i '/^DATABASE_URL=/d' {quoted_env_file}\nprintf 'DATABASE_URL=postgresql://{db_role}:%s@127.0.0.1:5432/{db_name}\\n' \"$db_password\" >> {quoted_env_file}"
+            ));
+        }
+        commands.push(commands_for_service.join("\n"));
+    }
+
+    // DEEPSEEK_API_KEY passthrough
+    let deepseek = util::env_var_or("DEEPSEEK_API_KEY", "");
+    if !deepseek.is_empty() {
+        for service in services {
+            let key = "DEEPSEEK_API_KEY";
+            let env_file = format!("{}/.env", resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core));
+            let quoted_env_file = shell_single_quote(&env_file);
+            let quoted_example = shell_single_quote(&format!("{env_file}.example"));
+            commands.push(format!(
+                "if [ -f {quoted_example} ] && grep -qE \"^{key}=\" {quoted_example}; then\n  touch {quoted_env_file}\n  sed -i '/^{key}=/d' {quoted_env_file}\n  printf '{key}=%s\\n' {} >> {quoted_env_file}\nfi",
+                shell_single_quote(&deepseek)
+            ));
+        }
+    }
+
+    commands
+}
+
+fn build_rust_migration_plan(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, estate_core: &str) -> Vec<String> {
+    services
+        .iter()
+        .filter(|s| s.runtimes.iter().any(|r| r == "rust") && s.runtimes.iter().any(|r| r == "postgresql@15"))
+        .map(|service| {
+            let service_dir = resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core);
+            format!(
+                "if [ -d {} ]; then\n  cd {}\n  set -a; . ./.env; set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    command -v cargo >/dev/null 2>&1 || {{ echo 'sqlx is unavailable and this CT has no Cargo; configure ECO_RUST_DEDICATED_BUILDER.' >&2; exit 1; }}\n    cargo install sqlx-cli --no-default-features --features postgres,rustls\n    sqlx_bin=\"$(command -v sqlx)\"\n  fi\n  \"$sqlx_bin\" migrate run --source migrations\nfi",
+                shell_single_quote(&format!("{service_dir}/migrations")),
+                shell_single_quote(&service_dir)
+            )
+        })
+        .collect()
+}
+
+fn build_stop_estate_rust_builds_command(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, estate_core: &str) -> String {
+    let service_dirs: Vec<String> = {
+        let mut dirs: Vec<String> = services
+            .iter()
+            .filter(|s| s.runtimes.iter().any(|r| r == "rust"))
+            .map(|s| resolve_ct_service_dir(s, ct_project_root, project_dir, estate_core))
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    };
+    if service_dirs.is_empty() {
+        return "true".to_string();
+    }
+    let quoted_dirs: Vec<String> = service_dirs.iter().map(|d| shell_single_quote(d)).collect();
+    [
+        format!("set -- {}", quoted_dirs.join(" ")),
+        "stopped_pids=()".to_string(),
+        "for proc in /proc/[0-9]*; do".to_string(),
+        "  pid=${proc#/proc/}".to_string(),
+        "  [ \"$pid\" = \"$$\" ] && continue".to_string(),
+        "  cwd=$(readlink -f \"$proc/cwd\" 2>/dev/null || true)".to_string(),
+        "  belongs=0".to_string(),
+        "  for service_dir in \"$@\"; do".to_string(),
+        "    case \"$cwd\" in \"$service_dir\"|\"$service_dir\"/*) belongs=1; break ;; esac".to_string(),
+        "  done".to_string(),
+        "  [ \"$belongs\" -eq 1 ] || continue".to_string(),
+        "  executable=$(readlink -f \"$proc/exe\" 2>/dev/null || true)".to_string(),
+        "  case \"$executable\" in".to_string(),
+        "    */rustc) ;; # child compiler of a Cargo build; stop it with its parent".to_string(),
+        "    */cargo|*/rustup)".to_string(),
+        "      arguments=$(tr '\\000' ' ' < \"$proc/cmdline\" 2>/dev/null || true)".to_string(),
+        "      case \"$arguments\" in *\"cargo build\"*|*\"cargo check\"*|*\"cargo test\"*|*\"cargo install\"*|*\"cargo run\"*) ;; *) continue ;; esac".to_string(),
+        "      ;;".to_string(),
+        "    *) continue ;;".to_string(),
+        "  esac".to_string(),
+        "  stopped_pids+=(\"$pid\")".to_string(),
+        "done".to_string(),
+        "if [ \"${#stopped_pids[@]}\" -eq 0 ]; then exit 0; fi".to_string(),
+        "echo \"[eco up] Stopping in-progress Rust build(s) for this estate: ${stopped_pids[*]}\"".to_string(),
+        "for pid in \"${stopped_pids[@]}\"; do kill -TERM \"$pid\" 2>/dev/null || true; done".to_string(),
+        "for _ in 1 2 3; do".to_string(),
+        "  still_running=0".to_string(),
+        "  for pid in \"${stopped_pids[@]}\"; do [ -d \"/proc/$pid\" ] && still_running=1; done".to_string(),
+        "  [ \"$still_running\" -eq 0 ] && exit 0".to_string(),
+        "  sleep 1".to_string(),
+        "done".to_string(),
+        "for pid in \"${stopped_pids[@]}\"; do [ -d \"/proc/$pid\" ] && kill -KILL \"$pid\" 2>/dev/null || true; done".to_string(),
+    ]
+    .join("\n")
+}
+
+fn create_pct_args(project: &str, ct: &HashMap<String, String>, options: &HashMap<String, String>) -> Vec<String> {
+    let mut merged = ct.clone();
+    for (k, v) in options {
+        merged.insert(k.clone(), v.clone());
+    }
+    vec![
+        "create".to_string(),
+        merged.get("id").cloned().unwrap_or_default(),
+        merged.get("template").cloned().unwrap_or_default(),
+        "--hostname".to_string(),
+        merged.get("hostname").cloned().unwrap_or_else(|| project.to_string()),
+        "--cores".to_string(),
+        merged.get("cores").cloned().unwrap_or_else(|| "2".to_string()),
+        "--memory".to_string(),
+        merged.get("memory").cloned().unwrap_or_else(|| "4096".to_string()),
+        "--swap".to_string(),
+        merged.get("swap").cloned().unwrap_or_else(|| "1024".to_string()),
+        "--rootfs".to_string(),
+        format!("{}:{}", merged.get("storage").cloned().unwrap_or_default(), merged.get("disk").cloned().unwrap_or_default()),
+        "--net0".to_string(),
+        build_net0(&merged),
+        "--unprivileged".to_string(),
+        merged.get("unprivileged").cloned().unwrap_or_else(|| "1".to_string()),
+    ]
+}
+
+fn resolve_available_template(requested_template: &str) -> Result<String, String> {
+    // <storage>:vztmpl/<archive>
+    let Some((storage, archive)) = requested_template.split_once(":vztmpl/") else {
+        return Ok(requested_template.to_string());
+    };
+    let list_result = run_capture("pvesm", &["list".to_string(), storage.to_string(), "--content".to_string(), "vztmpl".to_string()], &util::current_dir())?;
+    if list_result.code == 0 && list_result.stdout.contains(archive) {
+        return Ok(requested_template.to_string());
+    }
+    if requested_template == FALLBACK_CT_TEMPLATE {
+        return Ok(requested_template.to_string());
+    }
+    util::eprintln_stderr(&format!(
+        "\n[eco up] WARNING: template \"{requested_template}\" not found on this Proxmox host's storage -- falling back to {FALLBACK_CT_TEMPLATE} for this CT. Build the custom template with 'eco ct template <source-ctid> --name <name> --clone-id <id>' to speed up provisioning here.\n"
+    ));
+    Ok(FALLBACK_CT_TEMPLATE.to_string())
+}
+
+fn print_step(message: &str) {
+    util::println_stdout(&format!("\n[eco up] {message}"));
+}
+
+pub struct ProjectDeployment {
+    pub file_path: String,
+    pub content: String,
+    pub project_dir: PathBuf,
+    pub project: String,
+    pub ct: HashMap<String, String>,
+    pub deploy: HashMap<String, HashMap<String, String>>,
+    pub expose: ecompose::Expose,
+    pub services: Vec<ecompose::Service>,
+    pub storage: HashMap<String, HashMap<String, String>>,
+    pub ctid: String,
+    pub ct_workspace_root: String,
+    pub ct_project_root: String,
+    pub ct_project_parent: String,
+    pub ct_eco_root: String,
+    pub pm2_config_filename: String,
+    pub ct_config_path: String,
+}
+
+pub fn load_project_deployment(input: &str, start_dir: &Path) -> Result<ProjectDeployment, String> {
+    let deployment = ecompose::read_ecompose(input, start_dir)?;
+    let project_dir = deployment
+        .file_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "cannot resolve project dir".to_string())?;
+    let project = {
+        let name = ecompose::parse_project_name(&deployment.content);
+        if name.is_empty() {
+            project_dir
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            name
+        }
+    };
+    let ct = ecompose::parse_ct_metadata(&deployment.content);
+    let deploy = ecompose::parse_deploy(&deployment.content);
+    let expose = ecompose::parse_expose(&deployment.content);
+    let services = ecompose::parse_services(&deployment.content);
+    let storage = ecompose::parse_storage(&deployment.content);
+
+    if ct.get("id").map(|s| s.is_empty()).unwrap_or(true)
+        || ct.get("template").map(|s| s.is_empty()).unwrap_or(true)
+        || ct.get("storage").map(|s| s.is_empty()).unwrap_or(true)
+        || ct.get("disk").map(|s| s.is_empty()).unwrap_or(true)
+        || ct.get("bridge").map(|s| s.is_empty()).unwrap_or(true)
+    {
+        return Err(format!("Missing required ct metadata in {}", deployment.file_path.display()));
+    }
+
+    let ctid = ct.get("id").cloned().unwrap_or_default();
+    let ct_workspace_root = "/opt/projects".to_string();
+    let ct_project_root = format!("{ct_workspace_root}/{project}");
+    let ct_project_parent = Path::new(&ct_project_root)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ct_project_root.clone());
+    let ct_eco_root = format!("{ct_workspace_root}/eco");
+    let is_esm = project_is_esm(&project_dir);
+    let pm2_config_filename = if is_esm { "ecosystem.config.cjs".to_string() } else { "ecosystem.config.js".to_string() };
+    let ct_config_path = format!("{ct_project_root}/{pm2_config_filename}");
+
+    Ok(ProjectDeployment {
+        file_path: deployment.file_path.display().to_string(),
+        content: deployment.content,
+        project_dir,
+        project,
+        ct,
+        deploy,
+        expose,
+        services,
+        storage,
+        ctid,
+        ct_workspace_root,
+        ct_project_root,
+        ct_project_parent,
+        ct_eco_root,
+        pm2_config_filename,
+        ct_config_path,
+    })
+}
+
+fn project_is_esm(project_dir: &Path) -> bool {
+    let raw = std::fs::read_to_string(project_dir.join("package.json")).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "module"))
+        .unwrap_or(false)
+}
+
+fn resolve_ct_id_by_hostname(hostname: &str) -> Result<String, String> {
+    let result = run_capture("pct", &["list".to_string()], &util::current_dir())?;
+    if result.code != 0 {
+        return Err(format!("pct list failed with code {}: {}", result.code, result.stderr.trim()));
+    }
+    for raw_line in result.stdout.split('\n') {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("VMID") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let ctid = parts[0];
+        if !ctid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let config = run_capture("pct", &["config".to_string(), ctid.to_string()], &util::current_dir())?;
+        if config.code != 0 {
+            continue;
+        }
+        let found = config.stdout.lines().find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("hostname:")
+        });
+        if let Some(value) = found {
+            if value.trim() == hostname {
+                return Ok(ctid.to_string());
+            }
+        }
+    }
+    Err(format!("Cannot resolve CT by hostname \"{hostname}\" from pct list."))
+}
+
+fn resolve_ct_input(input: &str) -> Result<String, String> {
+    if input.is_empty() {
+        return Err("Missing CT identifier.".to_string());
+    }
+    if input.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(input.to_string());
+    }
+    resolve_ct_id_by_hostname(input)
+}
+
+fn ensure_ct_running(ctid: &str) -> Result<(), String> {
+    let status = run_capture("pct", &["status".to_string(), ctid.to_string()], &util::current_dir())?;
+    if status.code == 0 && status.stdout.contains("status: running") {
+        return Ok(());
+    }
+    run_command("pct", &["start".to_string(), ctid.to_string()], &util::current_dir())
+}
+
+fn push_text_file_to_ct(ctid: &str, target_path: &str, content: &str, label: &str) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir().join(format!("eco-up-file-{}-{}", label, std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let source_path = temp_dir.join(format!("{label}.tmp"));
+    std::fs::write(&source_path, content).map_err(|e| e.to_string())?;
+    let result = run_command(
+        "pct",
+        &["push".to_string(), ctid.to_string(), source_path.display().to_string(), target_path.to_string()],
+        &util::current_dir(),
+    );
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    result
+}
+
+fn escape_single_quotes(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+fn minio_ct_reference(storage: &HashMap<String, HashMap<String, String>>) -> Result<String, String> {
+    let ref_val = storage
+        .get("minio")
+        .and_then(|m| m.get("ct"))
+        .cloned()
+        .unwrap_or_default();
+    if ref_val.is_empty() {
+        return Err(
+            "storage.minio requires `ct: <MinIO CT hostname or ID>` for production. \
+Eco keeps S3 traffic on Proxmox's private CT bridge and never routes it through public ingress."
+                .to_string(),
+        );
+    }
+    Ok(ref_val)
+}
+
+fn minio_client_config(endpoint: &str, region: &str, access_key: &str, secret_key: &str) -> Result<String, String> {
+    for (name, value) in [("endpoint", endpoint), ("region", region), ("accessKey", access_key), ("secretKey", secret_key)] {
+        if value.is_empty() || value.contains('\n') || value.contains('\r') {
+            return Err(format!("Invalid managed MinIO {name} value."));
+        }
+    }
+    Ok(format!(
+        "S3_ENDPOINT={endpoint}\nS3_REGION={region}\nS3_ACCESS_KEY={access_key}\nS3_SECRET_KEY={secret_key}\n"
+    ))
+}
+
+fn resolve_ct_primary_ip(ctid: &str) -> Result<String, String> {
+    let output = pct_exec_capture(
+        ctid,
+        "ip=$(ip -4 -o addr show scope global | awk '{ split($4, address, \"/\"); print address[1]; exit }'); if [ -n \"$ip\" ]; then printf '%s\\n' \"$ip\"; else hostname -I | awk '{ for (i = 1; i <= NF; i++) { if (split($i, octets, \".\") == 4) { print $i; exit } } }'; fi",
+    )?;
+    let ip = output.trim().to_string();
+    if ip.is_empty() {
+        return Err(format!("Cannot resolve primary IP for CT {ctid}."));
+    }
+    Ok(ip)
+}
+
+fn provision_dedicated_minio(storage: &HashMap<String, HashMap<String, String>>, app_ctid: &str) -> Result<Option<MinioInfo>, String> {
+    if storage.get("minio").is_none() {
+        return Ok(None);
+    }
+    let minio_ctid = resolve_ct_input(&minio_ct_reference(storage)?)?;
+    if minio_ctid == app_ctid {
+        return Err("storage.minio.ct must name a dedicated MinIO CT, not the application CT.".to_string());
+    }
+    ensure_ct_running(&minio_ctid)?;
+
+    let installer = embedded::INSTALL_MINIO_SH;
+    let installer_path = "/tmp/eco-install-minio.sh";
+    push_text_file_to_ct(&minio_ctid, installer_path, installer, "eco-install-minio.sh")?;
+    pct_exec(&minio_ctid, &format!("chmod 700 {installer_path} && ECO_DEPLOY_MODE=prod bash {installer_path} --ensure && rm -f {installer_path}"))?;
+
+    let credentials = pct_exec_capture(
+        &minio_ctid,
+        "awk -F= '$1 == \"S3_ACCESS_KEY\" || $1 == \"S3_SECRET_KEY\" { print }' /etc/eco/minio-client.env",
+    )?;
+    let mut values = HashMap::new();
+    for line in credentials.split('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(eq) = line.find('=') {
+            values.insert(line[..eq].to_string(), line[eq + 1..].to_string());
+        }
+    }
+    let ip = resolve_ct_primary_ip(&minio_ctid)?;
+    let region = storage
+        .get("minio")
+        .and_then(|m| m.get("region"))
+        .cloned()
+        .unwrap_or_else(|| "us-east-1".to_string());
+    let endpoint = format!("http://{ip}:9000");
+    let client_config = minio_client_config(
+        &endpoint,
+        &region,
+        values.get("S3_ACCESS_KEY").map(|s| s.as_str()).unwrap_or(""),
+        values.get("S3_SECRET_KEY").map(|s| s.as_str()).unwrap_or(""),
+    )?;
+    Ok(Some(MinioInfo {
+        ctid: minio_ctid,
+        endpoint,
+        client_config,
+    }))
+}
+
+pub struct MinioInfo {
+    pub ctid: String,
+    pub endpoint: String,
+    pub client_config: String,
+}
+
+fn install_minio_client_config(ctid: &str, minio: &MinioInfo) -> Result<(), String> {
+    pct_exec(ctid, "mkdir -p /etc/eco")?;
+    push_text_file_to_ct(ctid, "/etc/eco/minio-client.env", &minio.client_config, "minio-client.env")?;
+    pct_exec(ctid, "chmod 600 /etc/eco/minio-client.env")
+}
+
+fn is_token_based_tunnel_config(content: &str) -> bool {
+    let has_tunnel = content
+        .lines()
+        .any(|l| l.starts_with("tunnel:") && l.split(':').nth(1).map(|s| !s.trim().is_empty()).unwrap_or(false));
+    let has_credentials = content
+        .lines()
+        .any(|l| l.starts_with("credentials-file:") && l.split(':').nth(1).map(|s| !s.trim().is_empty()).unwrap_or(false));
+    has_tunnel && !has_credentials
+}
+
+fn is_eco_managed_token_tunnel(content: &str) -> bool {
+    let has_id = content
+        .lines()
+        .any(|l| l.starts_with("# eco-tunnel-id:") && l.split(':').nth(1).map(|s| !s.trim().is_empty()).unwrap_or(false));
+    is_token_based_tunnel_config(content) && has_id
+}
+
+fn parse_cloudflared_config(content: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let mut top_lines = Vec::new();
+    let mut rules: Vec<(String, String)> = Vec::new();
+    let mut in_ingress = false;
+    let mut current_hostname = String::new();
+
+    for line in content.split('\n') {
+        let l = line.trim_end_matches('\r');
+        if !in_ingress && l.trim() == "ingress:" {
+            in_ingress = true;
+            continue;
+        }
+        if !in_ingress {
+            top_lines.push(l.to_string());
+            continue;
+        }
+        let trimmed = l.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("- hostname:") {
+            current_hostname = rest.trim().to_string();
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("service:") {
+            let service = rest.trim().to_string();
+            if current_hostname.is_empty() {
+                rules.push((String::new(), service));
+            } else {
+                rules.push((current_hostname.clone(), service));
+                current_hostname.clear();
+            }
+        }
+    }
+    (top_lines, rules)
+}
+
+fn serialize_cloudflared_config(top_lines: &[String], rules: &[(String, String)]) -> String {
+    let mut lines: Vec<String> = top_lines.to_vec();
+    if lines.last().map(|l| !l.is_empty()).unwrap_or(false) {
+        lines.push(String::new());
+    }
+    lines.push("ingress:".to_string());
+    for (hostname, service) in rules {
+        if hostname.is_empty() {
+            lines.push(format!("  - service: {service}"));
+        } else {
+            lines.push(format!("  - hostname: {hostname}"));
+            lines.push(format!("    service: {service}"));
+        }
+    }
+    let joined = lines.join("\n");
+    let trimmed = joined.trim_end();
+    format!("{trimmed}\n")
+}
+
+fn upsert_cloudflared_hostname(content: &str, hostname: &str, service_url: &str) -> String {
+    let (top_lines, rules) = parse_cloudflared_config(content);
+    let mut non_fallback: Vec<(String, String)> = rules
+        .iter()
+        .filter(|(h, s)| !h.is_empty() || s != "http_status:404")
+        .cloned()
+        .collect();
+    let fallback = rules
+        .iter()
+        .find(|(h, s)| h.is_empty() && s == "http_status:404")
+        .cloned()
+        .unwrap_or((String::new(), "http_status:404".to_string()));
+
+    let mut replaced = false;
+    let next_rules: Vec<(String, String)> = non_fallback
+        .iter()
+        .map(|(h, s)| {
+            if h == hostname {
+                replaced = true;
+                (hostname.to_string(), service_url.to_string())
+            } else {
+                (h.clone(), s.clone())
+            }
+        })
+        .collect();
+    let mut final_rules = next_rules;
+    if !replaced {
+        final_rules.push((hostname.to_string(), service_url.to_string()));
+    }
+    final_rules.push(fallback);
+    serialize_cloudflared_config(&top_lines, &final_rules)
+}
+
+fn require_pm2_config_snippet(config_path: &str) -> String {
+    let cjs_path = config_path.trim_end_matches(".js").to_string() + ".cjs";
+    format!(
+        "const config = (() => {{ try {{ return require({}); }} catch (e) {{ return require({}); }} }})();",
+        util::json_string(&cjs_path),
+        util::json_string(config_path)
+    )
+}
+
+fn build_prune_conflicting_ports_command(config_path: &str) -> String {
+    let js = format!(
+        "{}\nconst {{ execSync }} = require('child_process');\nconst ports = new Set();\nfor (const app of (config.apps || [])) {{ for (const val of Object.values(app.env || {{}})) {{ const p = parseInt(val, 10); if (p > 0) ports.add(p); }} }}\nif (ports.size > 0) {{\n  let procs = [];\n  try {{ procs = JSON.parse(execSync('pm2 jlist').toString()); }} catch (e) {{}}\n  for (const proc of procs) {{\n    const env = proc.pm2_env || {{}};\n    let hit = false;\n    for (const val of Object.values(env)) {{ const p = parseInt(val, 10); if (ports.has(p)) {{ hit = true; break; }} }}\n    if (hit) {{ try {{ execSync('pm2 delete ' + JSON.stringify(proc.name)); }} catch (e) {{}} }}\n  }}\n}}",
+        require_pm2_config_snippet(config_path)
+    );
+    format!("node -e {}", util::shell_single_quote(&js))
+}
+
+fn delete_declared_pm2_apps_js(config_path: &str) -> String {
+    format!(
+        "{}\nconst {{ execSync }} = require('child_process');\nfor (const app of (config.apps || [])) {{\n  if (!app.name) continue;\n  try {{ execSync('pm2 delete ' + JSON.stringify(app.name), {{ stdio: 'ignore' }}); }} catch (e) {{}}\n}}",
+        require_pm2_config_snippet(config_path)
+    )
+}
+
+fn build_delete_declared_pm2_apps_command(config_path: &str) -> String {
+    format!("node -e {}", util::shell_single_quote(&delete_declared_pm2_apps_js(config_path)))
+}
+
+fn systemd_mode() -> bool {
+    util::env_var_or("ECO_SYSTEMD", "") == "1"
+}
+
+// Env prefix passed into configure.sh on the CT so it emits systemd units
+// (ECO_SYSTEMD=1) alongside the PM2 config during the migration.
+fn systemd_env() -> &'static str {
+    if systemd_mode() { "ECO_SYSTEMD=1" } else { "" }
+}
+
+// Phase 3: when ECO_SYSTEMD=1, restart the estate's apps via systemd units
+// (generated by configure.sh from the same ecosystem.config.js) instead of
+// `pm2 startOrReload`. Emits: daemon-reload, then enable/reset-failed/restart
+// for each app.
+fn build_systemd_start_command(config_path: &str) -> String {
+    let js = format!(
+        "{}\nconst apps = config.apps || [];\nconst lines = ['systemctl daemon-reload || true'];\nfor (const app of apps) {{\n  if (!app.name) continue;\n  const unit = 'eco-' + app.name + '.service';\n  lines.push('systemctl enable ' + unit + ' 2>/dev/null || true');\n  lines.push('systemctl reset-failed ' + unit + ' 2>/dev/null || true');\n  lines.push('systemctl restart ' + unit + ' || true');\n}}\nprocess.stdout.write(lines.join('; '));",
+        require_pm2_config_snippet(config_path)
+    );
+    format!("node -e {}", util::shell_single_quote(&js))
+}
+
+fn resolve_service_port_from_ct(ctid: &str, config_path: &str, service_name: &str) -> Result<String, String> {
+    let js = format!(
+        "{}\nconst target = {};\nconst apps = config.apps || [];\nconst match = apps.find((app) => app.name === target || app.name.endsWith(\"-\" + target));\nif (!match) {{ process.stderr.write(\"Missing service \" + target); process.exit(1); }}\nconst env = match.env || {{}};\nconst port = env.PORT || env.SERVER_PORT || \"\";\nprocess.stdout.write(String(port));",
+        require_pm2_config_snippet(config_path),
+        util::json_string(service_name)
+    );
+    let output = pct_exec_capture(ctid, &format!("node -e {}", util::shell_single_quote(&js)))?;
+    let port = output.trim().to_string();
+    if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("Cannot resolve port for exposed service \"{service_name}\" from {config_path}."));
+    }
+    Ok(port)
+}
+
+fn ct_config_has_service(ctid: &str, config_path: &str, service_name: &str) -> bool {
+    let js = format!(
+        "{}\nconst target = {};\nconst apps = config.apps || [];\nconst match = apps.find((app) => app.name === target || app.name.endsWith(\"-\" + target));\nprocess.stdout.write(match ? \"yes\" : \"no\");",
+        require_pm2_config_snippet(config_path),
+        util::json_string(service_name)
+    );
+    match pct_exec_capture(ctid, &format!("node -e {}", util::shell_single_quote(&js))) {
+        Ok(output) => output.trim() == "yes",
+        Err(_) => false,
+    }
+}
+
+fn ensure_ct_caddy(ctid: &str) -> Result<(), String> {
+    pct_exec(
+        ctid,
+        "if ! command -v caddy >/dev/null 2>&1; then\n  apt-get update;\n  apt-get install -y caddy;\nfi",
+    )
+}
+
+fn ensure_proxy_cloudflared(proxy_ctid: &str) -> Result<(), String> {
+    pct_exec(
+        proxy_ctid,
+        "if ! command -v cloudflared >/dev/null 2>&1; then\n  apt-get update;\n  apt-get install -y curl ca-certificates;\n  arch=$(dpkg --print-architecture);\n  case \"$arch\" in\n    amd64) pkg=cloudflared-linux-amd64.deb ;;\n    arm64) pkg=cloudflared-linux-arm64.deb ;;\n    *) echo \"Unsupported architecture for cloudflared: $arch\" >&2; exit 1 ;;\n  esac;\n  curl -fsSL \"https://github.com/cloudflare/cloudflared/releases/latest/download/${pkg}\" -o /tmp/cloudflared.deb;\n  apt-get install -y /tmp/cloudflared.deb;\n  rm -f /tmp/cloudflared.deb;\nfi",
+    )
+}
+
+fn resolve_proxy_cloudflared_config_path(proxy_ctid: &str, preferred_path: &str, cloudflare_account: &str) -> Result<String, String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if !preferred_path.is_empty() {
+        candidates.push(preferred_path.to_string());
+    }
+    if !cloudflare_account.is_empty() {
+        candidates.push(cloudflare::cloudflared_config_path_for_account(cloudflare_account));
+    } else {
+        candidates.push("/etc/cloudflared/config.yml".to_string());
+        candidates.push("/root/.cloudflared/config.yml".to_string());
+    }
+    for candidate in candidates {
+        let result = run_capture(
+            "pct",
+            &["exec".to_string(), proxy_ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), format!("test -f {candidate}")],
+            &util::current_dir(),
+        )?;
+        if result.code == 0 {
+            return Ok(candidate);
+        }
+    }
+    if !cloudflare_account.is_empty() {
+        return Err(format!(
+            "Cannot locate cloudflared config for account \"{cloudflare_account}\" in proxy CT {proxy_ctid} at {}.",
+            cloudflare::cloudflared_config_path_for_account(cloudflare_account)
+        ));
+    }
+    let systemctl_result = run_capture(
+        "pct",
+        &["exec".to_string(), proxy_ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), "systemctl cat cloudflared 2>/dev/null || true".to_string()],
+        &util::current_dir(),
+    )?;
+    let unit_text = format!("{}\n{}", systemctl_result.stdout, systemctl_result.stderr);
+    // find --config <path> or --config=<path>
+    if let Some(idx) = unit_text.find("--config") {
+        let rest = &unit_text[idx + 8..];
+        let rest = rest.trim_start();
+        let path = if let Some(rest) = rest.strip_prefix('=') {
+            rest.split_whitespace().next().unwrap_or("").trim_matches('"').trim_matches('\'').to_string()
+        } else {
+            rest.split_whitespace().next().unwrap_or("").trim_matches('"').trim_matches('\'').to_string()
+        };
+        if !path.is_empty() {
+            let exists = run_capture(
+                "pct",
+                &["exec".to_string(), proxy_ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), format!("test -f {path}")],
+                &util::current_dir(),
+            )?;
+            if exists.code == 0 {
+                return Ok(path);
+            }
+        }
+    }
+    let find_result = run_capture(
+        "pct",
+        &["exec".to_string(), proxy_ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), "find /etc/cloudflared /root/.cloudflared /home -maxdepth 3 -type f -name 'config.yml' 2>/dev/null | head -n 1".to_string()],
+        &util::current_dir(),
+    )?;
+    let found = find_result.stdout.trim().to_string();
+    if !found.is_empty() {
+        return Ok(found);
+    }
+    Err(format!("Cannot locate cloudflared config in proxy CT {proxy_ctid}. Checked common paths and systemd unit config."))
+}
+
+fn prompt_for_replicas(default_value: &str) -> String {
+    match crate::checklist::prompt_line(&format!("Number of cloudflared tunnel replicas? [{default_value}]: ")) {
+        Ok(answer) => {
+            let parsed: i64 = answer.trim().parse().unwrap_or(0);
+            if parsed < 1 {
+                default_value.to_string()
+            } else {
+                parsed.to_string()
+            }
+        }
+        Err(_) => default_value.to_string(),
+    }
+}
+
+fn ensure_tunnel_replicas(proxy_ctid: &str, account: &str, count: i64, cloudflared_config_path: &str, _dry_run: bool) -> Result<(), String> {
+    let service_name = cloudflare::cloudflared_service_name_for_account(if account == "default" { "" } else { account });
+    let template_unit_name = format!("{service_name}@.service");
+    let config_content = pct_exec_capture(proxy_ctid, &format!("cat {cloudflared_config_path}"))?;
+    let token = config_content
+        .lines()
+        .find_map(|l| l.strip_prefix("tunnel:"))
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default();
+    if token.is_empty() {
+        print_step(&format!("Cannot read tunnel token from {cloudflared_config_path} in proxy CT {proxy_ctid}; skipping replicas setup"));
+        return Ok(());
+    }
+    let unit_content = format!(
+        "[Unit]\nDescription=cloudflared {account} replica %i\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nTimeoutStartSec=15\nType=notify\nExecStart=/usr/bin/cloudflared --no-autoupdate --config {cloudflared_config_path} tunnel run --token {token}\nRestart=on-failure\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n"
+    );
+    push_text_file_to_ct(proxy_ctid, &format!("/etc/systemd/system/{template_unit_name}"), &unit_content, "cloudflared-template")?;
+    pct_exec(proxy_ctid, "systemctl daemon-reload")?;
+    let current_raw = pct_exec_capture(
+        proxy_ctid,
+        &format!("systemctl list-units '{service_name}@*' --no-legend --state=active 2>/dev/null | wc -l"),
+    )?;
+    let current: i64 = current_raw.trim().parse().unwrap_or(0);
+    if count > current {
+        print_step(&format!("Scaling cloudflared {account} from {current} to {count} replica(s)"));
+        for i in (current + 1)..=count {
+            pct_exec(proxy_ctid, &format!("systemctl enable --now {service_name}@{i}"))?;
+        }
+    } else if count < current {
+        print_step(&format!("Scaling cloudflared {account} from {current} to {count} replica(s)"));
+        for i in (count + 1)..=current {
+            pct_exec(proxy_ctid, &format!("systemctl disable --now {service_name}@{i}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_proxy_hostname(
+    dry_run: bool,
+    proxy_ct_input: &str,
+    hostname: &str,
+    service_url: &str,
+    _cloudflared_config: &str,
+    tunnel_name: &str,
+    cloudflare_account: &str,
+    tunnel_replicas: i64,
+    non_interactive: bool,
+) -> Result<Vec<String>, String> {
+    let default_config_path = cloudflare::cloudflared_config_path_for_account(cloudflare_account);
+    let service_name = cloudflare::cloudflared_service_name_for_account(cloudflare_account);
+
+    if dry_run {
+        let lines = vec![
+            format!(
+                "# expose: {hostname} -> {service_url} via proxy CT {proxy_ct_input}{}",
+                if cloudflare_account.is_empty() { String::new() } else { format!(" (Cloudflare account \"{cloudflare_account}\")") }
+            ),
+            format!("pct exec {proxy_ct_input} -- bash -lc 'mkdir -p {}'", std::path::Path::new(&default_config_path).parent().map(|p| p.display().to_string()).unwrap_or_default()),
+            format!("pct exec {proxy_ct_input} -- bash -lc '# auto-detect cloudflared config path, update ingress for {hostname}'"),
+            format!("pct exec {proxy_ct_input} -- bash -lc '# create DNS route only when tunnel auth supports cloudflared tunnel route dns'"),
+            format!("pct exec {proxy_ct_input} -- bash -lc 'systemctl restart {service_name} || service {service_name} restart'"),
+        ];
+        return Ok(lines);
+    }
+
+    let proxy_ctid = resolve_ct_input(proxy_ct_input)?;
+    ensure_ct_running(&proxy_ctid)?;
+    print_step(&format!(
+        "Exposing {hostname} via proxy CT {proxy_ctid}{}",
+        if cloudflare_account.is_empty() { String::new() } else { format!(" (Cloudflare account \"{cloudflare_account}\")") }
+    ));
+    ensure_proxy_cloudflared(&proxy_ctid)?;
+    pct_exec(&proxy_ctid, &format!("mkdir -p {}", std::path::Path::new(&default_config_path).parent().map(|p| p.display().to_string()).unwrap_or_default()))?;
+
+    let mut cloudflared_config_path = String::new();
+    match resolve_proxy_cloudflared_config_path(&proxy_ctid, "", cloudflare_account) {
+        Ok(p) => cloudflared_config_path = p,
+        Err(_) => {
+            print_step(&format!(
+                "Proxy CT {proxy_ctid} has no cloudflared config{}. Bootstrapping dedicated tunnel for {hostname}",
+                if cloudflare_account.is_empty() { String::new() } else { format!(" for account \"{cloudflare_account}\"") }
+            ));
+            let bootstrap = crate::commands::proxy::ensure_proxy_tunnel(
+                &proxy_ctid,
+                hostname,
+                tunnel_name,
+                service_url,
+                non_interactive,
+                cloudflare_account,
+            )?;
+            cloudflared_config_path = if bootstrap.config_path.is_empty() { default_config_path.clone() } else { bootstrap.config_path };
+        }
+    }
+
+    let existing_config = match pct_exec_capture(&proxy_ctid, &format!("cat {cloudflared_config_path}")) {
+        Ok(c) => c,
+        Err(_) => {
+            print_step(&format!(
+                "Proxy CT {proxy_ctid} cloudflared config is missing at {cloudflared_config_path}. Rebuilding tunnel automation for {hostname}"
+            ));
+            let bootstrap = crate::commands::proxy::ensure_proxy_tunnel(
+                &proxy_ctid,
+                hostname,
+                tunnel_name,
+                service_url,
+                non_interactive,
+                cloudflare_account,
+            )?;
+            cloudflared_config_path = if bootstrap.config_path.is_empty() { default_config_path.clone() } else { bootstrap.config_path };
+            pct_exec_capture(&proxy_ctid, &format!("cat {cloudflared_config_path}"))?
+        }
+    };
+
+    if is_token_based_tunnel_config(&existing_config) && !is_eco_managed_token_tunnel(&existing_config) {
+        print_step(&format!(
+            "Proxy CT {proxy_ctid} is using a legacy token-based cloudflared config. Replacing it with a dedicated eco-managed tunnel for {hostname}"
+        ));
+        let bootstrap = crate::commands::proxy::ensure_proxy_tunnel(
+            &proxy_ctid,
+            hostname,
+            tunnel_name,
+            service_url,
+            non_interactive,
+            cloudflare_account,
+        )?;
+        cloudflared_config_path = if bootstrap.config_path.is_empty() { default_config_path.clone() } else { bootstrap.config_path };
+        let _ = pct_exec_capture(&proxy_ctid, &format!("cat {cloudflared_config_path}"))?;
+    }
+
+    let has_tunnel_line = existing_config
+        .lines()
+        .any(|l| l.starts_with("tunnel:") && l.split(':').nth(1).map(|s| !s.trim().is_empty()).unwrap_or(false));
+    if !has_tunnel_line {
+        return Err(format!("cloudflared config in proxy CT {proxy_ctid} is missing a tunnel: entry."));
+    }
+
+    if is_token_based_tunnel_config(&existing_config) && !is_eco_managed_token_tunnel(&existing_config) {
+        print_step(&format!(
+            "Proxy CT {proxy_ctid} already has a token tunnel configured; skipping tunnel configuration for {hostname}"
+        ));
+        return Ok(Vec::new());
+    }
+
+    if is_eco_managed_token_tunnel(&existing_config) {
+        let (_, rules) = parse_cloudflared_config(&existing_config);
+        let existing_rule = rules.iter().find(|(h, _)| h == hostname);
+        if let Some((_, svc)) = existing_rule {
+            if svc == service_url {
+                print_step(&format!(
+                    "Proxy CT {proxy_ctid} already has {hostname} -> {service_url}; reconciling DNS and remote tunnel config"
+                ));
+                let tunnel_id = existing_config
+                    .lines()
+                    .find_map(|l| l.strip_prefix("# eco-tunnel-id:").map(|s| s.trim().to_string()))
+                    .unwrap_or_default();
+                if !tunnel_id.is_empty() && cloudflare::has_cloudflare_api_env(cloudflare_account) {
+                    cloudflare::overwrite_dns_record_for_tunnel(hostname, &tunnel_id, cloudflare_account)?;
+                    cloudflare::put_remote_tunnel_config(&tunnel_id, hostname, service_url, cloudflare_account)?;
+                } else {
+                    let resolved_tunnel_name = existing_config
+                        .lines()
+                        .find_map(|l| l.strip_prefix("tunnel:").map(|s| s.trim().to_string()))
+                        .unwrap_or_default();
+                    if !resolved_tunnel_name.is_empty() {
+                        let _ = pct_exec(
+                            &proxy_ctid,
+                            &format!("cloudflared tunnel route dns {} {} || true", escape_single_quotes(&resolved_tunnel_name), escape_single_quotes(hostname)),
+                        );
+                    }
+                }
+                if tunnel_replicas > 1 {
+                    let final_replicas = if !non_interactive {
+                        prompt_for_replicas(&tunnel_replicas.to_string()).parse::<i64>().unwrap_or(tunnel_replicas)
+                    } else {
+                        tunnel_replicas
+                    };
+                    if final_replicas > 1 {
+                        ensure_tunnel_replicas(&proxy_ctid, if cloudflare_account.is_empty() { "default" } else { cloudflare_account }, final_replicas, &cloudflared_config_path, dry_run)?;
+                    }
+                }
+                return Ok(Vec::new());
+            }
+        }
+
+        print_step(&format!("Adding {hostname} to existing eco-managed tunnel in proxy CT {proxy_ctid}"));
+        let tunnel_id = existing_config
+            .lines()
+            .find_map(|l| l.strip_prefix("# eco-tunnel-id:").map(|s| s.trim().to_string()))
+            .unwrap_or_default();
+        let next_config = upsert_cloudflared_hostname(&existing_config, hostname, service_url);
+        push_text_file_to_ct(&proxy_ctid, "/tmp/eco-cloudflared-config.yml", &next_config, "cloudflared-config")?;
+        pct_exec(&proxy_ctid, &format!("install -D -m 0644 /tmp/eco-cloudflared-config.yml {cloudflared_config_path} && rm -f /tmp/eco-cloudflared-config.yml"))?;
+
+        if !tunnel_id.is_empty() && cloudflare::has_cloudflare_api_env(cloudflare_account) {
+            cloudflare::overwrite_dns_record_for_tunnel(hostname, &tunnel_id, cloudflare_account)?;
+            cloudflare::put_remote_tunnel_config(&tunnel_id, hostname, service_url, cloudflare_account)?;
+        } else {
+            let resolved_tunnel_name = existing_config
+                .lines()
+                .find_map(|l| l.strip_prefix("tunnel:").map(|s| s.trim().to_string()))
+                .unwrap_or_default();
+            if !resolved_tunnel_name.is_empty() {
+                let _ = pct_exec(
+                    &proxy_ctid,
+                    &format!("cloudflared tunnel route dns {} {} || true", escape_single_quotes(&resolved_tunnel_name), escape_single_quotes(hostname)),
+                );
+            }
+        }
+        let _ = pct_exec(&proxy_ctid, &format!("systemctl restart {service_name} || service {service_name} restart"));
+        print_step(&format!("Expose complete for {hostname}"));
+        if tunnel_replicas > 1 {
+            let final_replicas = if !non_interactive {
+                prompt_for_replicas(&tunnel_replicas.to_string()).parse::<i64>().unwrap_or(tunnel_replicas)
+            } else {
+                tunnel_replicas
+            };
+            if final_replicas > 1 {
+                ensure_tunnel_replicas(&proxy_ctid, if cloudflare_account.is_empty() { "default" } else { cloudflare_account }, final_replicas, &cloudflared_config_path, dry_run)?;
+            }
+        }
+        return Ok(Vec::new());
+    }
+
+    let next_config = upsert_cloudflared_hostname(&existing_config, hostname, service_url);
+    push_text_file_to_ct(&proxy_ctid, "/tmp/eco-cloudflared-config.yml", &next_config, "cloudflared-config")?;
+    pct_exec(&proxy_ctid, &format!("install -D -m 0644 /tmp/eco-cloudflared-config.yml {cloudflared_config_path} && rm -f /tmp/eco-cloudflared-config.yml"))?;
+
+    let resolved_tunnel_name = existing_config
+        .lines()
+        .find_map(|l| l.strip_prefix("tunnel:").map(|s| s.trim().to_string()))
+        .unwrap_or_default();
+    if resolved_tunnel_name.is_empty() {
+        return Err(format!("Cannot resolve tunnel name/id from {cloudflared_config_path} in proxy CT {proxy_ctid}."));
+    }
+    let _ = pct_exec(
+        &proxy_ctid,
+        &format!("cloudflared tunnel route dns {} {} || true", escape_single_quotes(&resolved_tunnel_name), escape_single_quotes(hostname)),
+    );
+
+    if let Err(e) = pct_exec(&proxy_ctid, &format!("systemctl restart {service_name} || service {service_name} restart")) {
+        print_step(&format!(
+            "{service_name} restart failed in proxy CT {proxy_ctid}. Recreating the dedicated tunnel for {hostname}: {e}"
+        ));
+        crate::commands::proxy::ensure_proxy_tunnel(&proxy_ctid, hostname, tunnel_name, service_url, true, cloudflare_account)?;
+    }
+
+    print_step(&format!("Expose complete for {hostname}"));
+    if tunnel_replicas > 1 {
+        let final_replicas = if !non_interactive {
+            prompt_for_replicas(&tunnel_replicas.to_string()).parse::<i64>().unwrap_or(tunnel_replicas)
+        } else {
+            tunnel_replicas
+        };
+        if final_replicas > 1 {
+            ensure_tunnel_replicas(&proxy_ctid, if cloudflare_account.is_empty() { "default" } else { cloudflare_account }, final_replicas, &cloudflared_config_path, dry_run)?;
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn expose_via_proxy_ct(
+    dry_run: bool,
+    expose: &ecompose::Expose,
+    project: &str,
+    app_ctid: &str,
+    app_config_path: &str,
+) -> Result<Vec<String>, String> {
+    if !expose.enabled() {
+        return Ok(Vec::new());
+    }
+    let hostname = {
+        let h = expose.hostname();
+        if h.is_empty() { format!("{project}.ktt.my.id") } else { h }
+    };
+    let mut service_name = expose.service();
+    if service_name.is_empty() {
+        service_name = format!("{project}-frontend");
+    }
+    let proxy_ct_input = expose.proxy_ct_input();
+    if proxy_ct_input.is_empty() {
+        return Err(format!("Expose is enabled for {project}, but expose.proxy_ct is missing."));
+    }
+
+    let mut results = Vec::new();
+
+    if dry_run {
+        let service_port = if !expose.target_port().is_empty() && expose.target_port().chars().all(|c| c.is_ascii_digit()) {
+            expose.target_port()
+        } else {
+            format!("<service-port:{service_name}>")
+        };
+        results.extend(ensure_proxy_hostname(
+            dry_run,
+            &proxy_ct_input,
+            &hostname,
+            &format!("http://<app-ct-ip>:{service_port}"),
+            &expose.cloudflared_config(),
+            &expose.tunnel_name(),
+            &expose.cloudflare_account(),
+            expose.tunnel_replicas.unwrap_or(0),
+            false,
+        )?);
+    } else {
+        let gateway_service_name = format!("{project}-gateway");
+        let has_gateway_service = ct_config_has_service(app_ctid, app_config_path, &gateway_service_name);
+        if has_gateway_service {
+            service_name = gateway_service_name;
+        }
+        let port = if !has_gateway_service && !expose.target_port().is_empty() && expose.target_port().chars().all(|c| c.is_ascii_digit()) {
+            expose.target_port()
+        } else {
+            resolve_service_port_from_ct(app_ctid, app_config_path, &service_name)?
+        };
+        let app_ip = resolve_ct_primary_ip(app_ctid)?;
+        let service_url = format!("http://{app_ip}:{port}");
+        ensure_proxy_hostname(
+            dry_run,
+            &proxy_ct_input,
+            &hostname,
+            &service_url,
+            &expose.cloudflared_config(),
+            &expose.tunnel_name(),
+            &expose.cloudflare_account(),
+            expose.tunnel_replicas.unwrap_or(0),
+            false,
+        )?;
+    }
+
+    for entry in &expose.additional {
+        let entry_hostname = entry.get("hostname").cloned().unwrap_or_default();
+        let entry_service_name = entry.get("service").cloned().unwrap_or_default();
+        if entry_hostname.is_empty() || entry_service_name.is_empty() {
+            continue;
+        }
+        if dry_run {
+            let service_port = entry
+                .get("target_port")
+                .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                .cloned()
+                .unwrap_or_else(|| format!("<service-port:{entry_service_name}>"));
+            results.extend(ensure_proxy_hostname(
+                dry_run,
+                &proxy_ct_input,
+                &entry_hostname,
+                &format!("http://<app-ct-ip>:{service_port}"),
+                &entry.get("cloudflared_config").cloned().unwrap_or_else(|| expose.cloudflared_config()),
+                &entry.get("tunnel_name").cloned().unwrap_or_else(|| expose.tunnel_name()),
+                &entry.get("cloudflare_account").cloned().unwrap_or_else(|| expose.cloudflare_account()),
+                0,
+                false,
+            )?);
+            continue;
+        }
+        let entry_port = entry
+            .get("target_port")
+            .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+            .cloned()
+            .unwrap_or(resolve_service_port_from_ct(app_ctid, app_config_path, &entry_service_name)?);
+        let entry_app_ip = resolve_ct_primary_ip(app_ctid)?;
+        let entry_service_url = format!("http://{entry_app_ip}:{entry_port}");
+        ensure_proxy_hostname(
+            dry_run,
+            &proxy_ct_input,
+            &entry_hostname,
+            &entry_service_url,
+            &entry.get("cloudflared_config").cloned().unwrap_or_else(|| expose.cloudflared_config()),
+            &entry.get("tunnel_name").cloned().unwrap_or_else(|| expose.tunnel_name()),
+            &entry.get("cloudflare_account").cloned().unwrap_or_else(|| expose.cloudflare_account()),
+            0,
+            false,
+        )?;
+    }
+    Ok(results)
+}
+
+fn install_deploy_receiver(ctid: &str, receiver_setup: &ReceiverSetup, webhook_app_name: &str, webhook_port: &str) -> Result<(), String> {
+    pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&receiver_setup.deploy_root)))?;
+    for (target_path, file_content) in &receiver_setup.files {
+        push_text_file_to_ct(ctid, target_path, file_content, "receiver-file")?;
+    }
+    if systemd_mode() {
+        let unit_name = format!("eco-{webhook_app_name}.service");
+        let unit = format!(
+            "[Unit]\nDescription={webhook_app_name}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/local/bin/eco webhook-server\nEnvironment=ECO_WEBHOOK_CONFIG={}\nEnvironment=ECO_WEBHOOK_PORT={webhook_port}\nRestart=always\nRestartSec=2\nStartLimitIntervalSec=0\n\n[Install]\nWantedBy=multi-user.target\n",
+            receiver_setup.config_path
+        );
+        pct_exec(ctid, &format!("cat > /etc/systemd/system/{} << 'UNITEOF'\n{}\nUNITEOF", shell_single_quote(&unit_name), unit))?;
+        pct_exec(
+            ctid,
+            &format!("systemctl daemon-reload && systemctl enable {} && systemctl reset-failed {} 2>/dev/null || true; systemctl restart {}", shell_single_quote(&unit_name), shell_single_quote(&unit_name), shell_single_quote(&unit_name)),
+        )
+    } else {
+        pct_exec(
+            ctid,
+            &format!(
+                "chmod 700 {} && pm2 startOrReload {} --update-env",
+                shell_single_quote(&receiver_setup.deploy_script_path),
+                shell_single_quote(&receiver_setup.pm2_config_path)
+            ),
+        )
+    }
+}
+
+fn sync_github_deploy_webhooks(github_repos: &[GithubRepoPlan], github_deploy: &DeployGithubConfig, webhook_secret: &str) -> Result<Vec<(String, String, String)>, String> {
+    let token = util::env_var_or("GITHUB_TOKEN", "");
+    if token.is_empty() {
+        return Err("GITHUB_TOKEN is required when deploy.github.enabled is true.".to_string());
+    }
+    let mut results = Vec::new();
+    for repo in github_repos {
+        let result = github::sync_github_push_webhook(
+            &token,
+            &repo.owner,
+            &repo.repo,
+            &github_deploy.webhook_url,
+            webhook_secret,
+            &github_deploy.stale_webhook_hostname,
+        )?;
+        results.push((repo.full_name.clone(), result.action, result.hook_id));
+    }
+    Ok(results)
+}
+
+fn tar_and_push_dir(ctid: &str, source_dir: &str, target_tar_name: &str) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir().join(format!("eco-up-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let tar_path = temp_dir.join(format!("{target_tar_name}.tar"));
+    let source = Path::new(source_dir);
+    let parent_dir = source.parent().unwrap_or(Path::new("/")).display().to_string();
+    let base_name = source.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+
+    let mut tar_args: Vec<String> = vec!["-C".to_string(), parent_dir];
+    if base_name != target_tar_name {
+        tar_args.push("--transform".to_string());
+        tar_args.push(format!("s|^{base_name}|{target_tar_name}|"));
+    }
+    for exclude in [
+        ".env", "*/.env", ".env.local", "*/.env.local", ".env.*.local", "*/.env.*.local",
+        ".configure-state", "*/.configure-state",
+        "ecosystem.config.js", "*/ecosystem.config.js",
+        "ecosystem.config.cjs", "*/ecosystem.config.cjs",
+        "Caddyfile", "*/Caddyfile",
+        "node_modules", "*/node_modules",
+        "target", "*/target",
+        ".git", "*/.git",
+    ] {
+        tar_args.push("--exclude".to_string());
+        tar_args.push(exclude.to_string());
+    }
+    tar_args.push("-cf".to_string());
+    tar_args.push(tar_path.display().to_string());
+    tar_args.push(base_name);
+
+    let result = (|| -> Result<(), String> {
+        run_command("tar", &tar_args, &util::current_dir())?;
+        run_command(
+            "pct",
+            &["push".to_string(), ctid.to_string(), tar_path.display().to_string(), format!("/tmp/{target_tar_name}.tar")],
+            &util::current_dir(),
+        )
+    })();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    result
+}
+
+fn is_on_proxmox_host() -> bool {
+    util::command_on_path("pct")
+}
+
+fn is_ct_estate_context(input: &str) -> bool {
+    if !Path::new("/opt/projects/eco").exists() {
+        return false;
+    }
+    Path::new(input).is_absolute() && input.starts_with("/opt/projects")
+}
+
+fn resolve_estate_webhook_port(ctid: &str, ct_project_root: &str, github_deploy: &DeployGithubConfig) -> Result<u32, String> {
+    if let Some(port) = github_deploy.port {
+        return Ok(port);
+    }
+    let config_path = format!("{ct_project_root}/.eco/deploy/github-webhook.json");
+    let js = format!(
+        "try {{ const value = require({}).port; if (Number.isInteger(value) && value >= 20000 && value <= 27999) process.stdout.write(String(value)); }} catch {{}}",
+        util::json_string(&config_path)
+    );
+    let existing = pct_exec_capture(ctid, &format!("node -e {}", util::shell_single_quote(&js))).unwrap_or_default();
+    let saved: i64 = existing.trim().parse().unwrap_or(0);
+    if (20000..=27999).contains(&saved) {
+        return Ok(saved as u32);
+    }
+    let mut rng = rand::thread_rng();
+    for _ in 0..200 {
+        let candidate = rng.gen_range(20000..28000);
+        let listeners = pct_exec_capture(ctid, &format!("ss -ltn 'sport = :{candidate}' | tail -n +2"))?;
+        if listeners.trim().is_empty() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("Could not allocate a free private webhook port for {}.", github_deploy.webhook_hostname))
+}
+
+fn resolve_estate_webhook_secret(ctid: &str, ct_project_root: &str, fallback: &str) -> Result<String, String> {
+    let config_path = format!("{ct_project_root}/.eco/deploy/github-webhook.json");
+    let js = format!(
+        "try {{ const value = require({}).secret; if (typeof value === \"string\" && value.length >= 16) process.stdout.write(value); }} catch {{}}",
+        util::json_string(&config_path)
+    );
+    let existing = pct_exec_capture(ctid, &format!("node -e {}", util::shell_single_quote(&js))).unwrap_or_default();
+    let saved = existing.trim().to_string();
+    if !saved.is_empty() {
+        Ok(saved)
+    } else {
+        Ok(fallback.to_string())
+    }
+}
+
+fn resolve_host_ssh_dir() -> Result<PathBuf, String> {
+    let home = util::home_dir();
+    let ssh_dir = PathBuf::from(&home).join(".ssh");
+    if !ssh_dir.is_dir() {
+        return Err(format!("Host SSH directory not found: {}", ssh_dir.display()));
+    }
+    Ok(ssh_dir)
+}
+
+fn is_esm_project(project_dir: &Path) -> bool {
+    project_is_esm(project_dir)
+}
+
+fn delete_local_declared_pm2_apps(config_path: &str, cwd: &Path) -> Result<(), String> {
+    let js = delete_declared_pm2_apps_js(config_path);
+    run_command("node", &["-e".to_string(), js], cwd)
+}
+
+fn resolve_local_pm2_config_path(dir: &Path) -> PathBuf {
+    let cjs = dir.join("ecosystem.config.cjs");
+    if cjs.is_file() {
+        cjs
+    } else {
+        dir.join("ecosystem.config.js")
+    }
+}
+
+fn assert_local_pm2_apps_present(config_path: &Path, cwd: &Path) -> Result<(), String> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let expected: Vec<String> = extract_pm2_app_names(&content);
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let result = run_capture("pm2", &["jlist".to_string()], cwd)?;
+    if result.code != 0 {
+        return Err(format!("Unable to verify PM2 services after startup: {}", result.stderr.trim()));
+    }
+    let processes: serde_json::Value = serde_json::from_str(&result.stdout)
+        .map_err(|_| "Unable to parse PM2 service list after startup.".to_string())?;
+    let actual: Vec<String> = processes
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let missing: Vec<&String> = expected.iter().filter(|name| !actual.contains(name)).collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "PM2 did not register declared service(s): {}. Check the generated ecosystem config and service logs.",
+            missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn extract_pm2_app_names(config_text: &str) -> Vec<String> {
+    // naive extraction of name: "..." entries within apps array
+    let mut names = Vec::new();
+    for line in config_text.split('\n') {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("name:") {
+            let val = rest.trim();
+            let val = val.trim_matches('"').trim_matches('\'');
+            if !val.is_empty() && !val.contains("module") && !val.contains('}') {
+                names.push(val.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn run_up_dev(args: &[String]) -> Result<(), String> {
+    let (options, positionals) = parse_options(args);
+    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let cwd = util::current_dir();
+    let deployment = load_project_deployment(&input, &cwd)?;
+    let estate_root = deployment
+        .project_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| deployment.project_dir.clone());
+    let domains = ecompose::unique_domains_from_ecompose(&deployment.content, &deployment.project);
+    let domain_branch_overrides = domain_branch_overrides_from_ecompose(&deployment.content);
+    let domain_dev_flags = domain_dev_flags_from_ecompose(&deployment.content);
+
+    let mut skipped_domains = std::collections::HashSet::new();
+    let mut skipped_runtimes = std::collections::HashSet::new();
+    for domain in &domains {
+        if domain == &deployment.project {
+            continue;
+        }
+        let flag = domain_dev_flags.get(domain).cloned().unwrap_or_default();
+        if flag == "disabled" {
+            skipped_domains.insert(domain.clone());
+            continue;
+        }
+        if flag == "optional" {
+            let mut unsatisfied = Vec::new();
+            for token in domain_runtimes_from_services(domain, &deployment.services) {
+                if !runtime_satisfiable(&token) {
+                    unsatisfied.push(token);
+                }
+            }
+            if !unsatisfied.is_empty() {
+                skipped_domains.insert(domain.clone());
+                for token in unsatisfied {
+                    skipped_runtimes.insert(token);
+                }
+            }
+        }
+    }
+    let dev_domains: Vec<String> = domains.iter().filter(|d| !skipped_domains.contains(*d)).cloned().collect();
+    let dev_services: Vec<ecompose::Service> = deployment
+        .services
+        .iter()
+        .filter(|s| {
+            let first = s.path.split('/').next().unwrap_or("");
+            !skipped_domains.contains(first)
+        })
+        .cloned()
+        .collect();
+    let skip_notice = if skipped_domains.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nSkipped optional domain(s) in local dev (still deployed in prod): {}{}\n",
+            skipped_domains.iter().cloned().collect::<Vec<_>>().join(", "),
+            if skipped_runtimes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " -- runtime(s) not available on this machine: {}",
+                    skipped_runtimes.iter().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+        )
+    };
+
+    let services = discover_local_services(&estate_root, Some(&dev_services), &deployment.project_dir, &deployment.project);
+
+    let dev_plan: Vec<String> = vec![
+        format!("estate root: {}", estate_root.display()),
+        dev_domains
+            .iter()
+            .filter(|d| d.as_str() != deployment.project)
+            .map(|d| format!("clone repo if missing: {d}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        format!("provision local runtimes from manifest: {}", deployment.project_dir.display()),
+        dev_services
+            .iter()
+            .filter(|s| s.runtimes.iter().any(|r| r == "postgresql@15"))
+            .map(|s| format!("ensure local PostgreSQL database: {}", sql_database_name_for_service(s, &deployment.project)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        dev_services
+            .iter()
+            .filter(|s| s.runtimes.iter().any(|r| r == "rust") && s.runtimes.iter().any(|r| r == "postgresql@15"))
+            .map(|s| format!("run Rust migrations if present: {}", s.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        services
+            .iter()
+            .filter(|s| s.r#type == "rust")
+            .map(|s| format!("build Rust service: {}", s.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        services
+            .iter()
+            .filter(|s| ["nextjs", "vite", "node"].contains(&s.r#type.as_str()))
+            .map(|s| format!("npm install: {} ({})", s.name, s.dir))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        format!("configure locally in estate scope: {}", deployment.project_dir.display()),
+        format!(
+            "delete existing PM2 services declared by {}",
+            resolve_local_pm2_config_path(&deployment.project_dir).display()
+        ),
+        format!(
+            "pm2 startOrReload {} --update-env",
+            resolve_local_pm2_config_path(&deployment.project_dir).display()
+        ),
+    ]
+    .into_iter()
+    .flat_map(|s| s.split('\n').map(|x| x.to_string()).collect::<Vec<_>>())
+    .filter(|s| !s.is_empty())
+    .collect();
+
+    if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
+        util::println_stdout("eco up dev plan");
+        util::println_stdout(&format!("Manifest: {}", deployment.file_path));
+        util::println_stdout(&format!("Project root: {}\n", deployment.project_dir.display()));
+        if !skip_notice.is_empty() {
+            util::println_stdout(&skip_notice);
+        }
+        for line in &dev_plan {
+            util::println_stdout(line);
+        }
+        return Ok(());
+    }
+
+    if !skip_notice.is_empty() {
+        util::println_stdout(&skip_notice);
+    }
+    ensure_local_domain_repos(&estate_root, &dev_domains, &deployment.project, &domain_branch_overrides, &deployment.content)?;
+    print_step(&format!("Provisioning local runtimes for {}", deployment.project));
+    let mut extra_env: Vec<(String, String)> = Vec::new();
+    if !skipped_runtimes.is_empty() {
+        extra_env.push(("ECO_DEV_SKIP_RUNTIMES".to_string(), skipped_runtimes.iter().cloned().collect::<Vec<_>>().join(",")));
+    }
+    embedded::run_bundled_script("provision.sh", &[deployment.project_dir.display().to_string()], "estate", &extra_env)?;
+    bootstrap_local_postgres(&dev_services, &estate_root, &deployment.project)?;
+    run_local_rust_migrations(&dev_services, &estate_root)?;
+
+    print_step(&format!("Generating local ecosystem config for {}", deployment.project));
+    let mut configure_env: Vec<(String, String)> = vec![
+        ("ECO_NON_INTERACTIVE".to_string(), "1".to_string()),
+        ("PROJECT_DIR".to_string(), estate_root.display().to_string()),
+        ("PROJECT_NAME".to_string(), deployment.project.clone()),
+        ("PM2_DIR".to_string(), deployment.project_dir.display().to_string()),
+    ];
+    if !skipped_domains.is_empty() {
+        configure_env.push(("ECO_DEV_SKIP_DOMAINS".to_string(), skipped_domains.iter().cloned().collect::<Vec<_>>().join(",")));
+    }
+    embedded::run_bundled_script("configure.sh", &[], "estate", &configure_env)?;
+
+    let refreshed_services = discover_local_services(&estate_root, Some(&dev_services), &deployment.project_dir, &deployment.project);
+    build_local_rust_services(&refreshed_services)?;
+    install_local_dependencies(&refreshed_services)?;
+
+    print_step(&format!("Starting PM2 services for {}", deployment.project));
+    let ecosystem_config = resolve_local_pm2_config_path(&deployment.project_dir);
+    print_step(&format!("Removing existing PM2 services for {}", deployment.project));
+    delete_local_declared_pm2_apps(&ecosystem_config.display().to_string(), &deployment.project_dir)?;
+
+    clear_local_next_development_caches(&refreshed_services)?;
+    run_command("pm2", &["start".to_string(), ecosystem_config.display().to_string(), "--update-env".to_string()], &deployment.project_dir)?;
+    assert_local_pm2_apps_present(&ecosystem_config, &deployment.project_dir)?;
+    print_step(&format!("Completed local dev bootstrap for {}", deployment.project));
+
+    util::println_stdout("\n[eco up] Following PM2 logs — press Ctrl+C to stop\n");
+    let status = std::process::Command::new("pm2")
+        .args(["logs".to_string(), "--lines".to_string(), "50".to_string()])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+    let _ = status;
+    Ok(())
+}
+
+fn clear_local_next_development_caches(services: &[LocalService]) -> Result<(), String> {
+    for service in services {
+        if service.r#type != "nextjs" {
+            continue;
+        }
+        let cache_dir = Path::new(&service.dir).join(".next");
+        if !cache_dir.exists() {
+            continue;
+        }
+        print_step(&format!("Clearing Next.js development cache: {}", service.name));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct LocalService {
+    name: String,
+    r#type: String,
+    dir: String,
+}
+
+fn detect_service_type_local(package_json_text: &str) -> String {
+    if package_json_text.contains("\"next\"") {
+        "nextjs".to_string()
+    } else if package_json_text.contains("\"astro\"") {
+        "astro".to_string()
+    } else if package_json_text.contains("\"vite\"") {
+        "vite".to_string()
+    } else {
+        "node".to_string()
+    }
+}
+
+fn discover_local_services(
+    estate_root: &Path,
+    declared: Option<&[ecompose::Service]>,
+    project_dir: &Path,
+    project: &str,
+) -> Vec<LocalService> {
+    let mut services = Vec::new();
+    let top_level = util::sorted_dir_entries(estate_root);
+    for entry in top_level {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let label = entry.file_name().to_string_lossy().to_string();
+        scan_local_dir(&path, &label, "", &mut services);
+    }
+
+    let Some(declared) = declared else {
+        return services;
+    };
+    if declared.is_empty() {
+        return services;
+    }
+    let allowed = estate_service_dirs(declared, estate_root, project_dir, project);
+    services
+        .into_iter()
+        .filter(|s| {
+            let canonical = Path::new(&s.dir).canonicalize().unwrap_or_else(|_| PathBuf::from(&s.dir));
+            allowed.contains(&canonical)
+        })
+        .collect()
+}
+
+fn scan_local_dir(scan_path: &Path, label: &str, rel_path: &str, services: &mut Vec<LocalService>) {
+    let pom = scan_path.join("pom.xml");
+    let cargo = scan_path.join("Cargo.toml");
+    let go_mod = scan_path.join("go.mod");
+    let pkg = scan_path.join("package.json");
+
+    let name = if rel_path.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}-{}", rel_path.replace('/', "-"))
+    };
+
+    if pom.is_file() {
+        services.push(LocalService { name, r#type: "spring-boot".to_string(), dir: scan_path.display().to_string() });
+        return;
+    }
+    if cargo.is_file() {
+        services.push(LocalService { name, r#type: "rust".to_string(), dir: scan_path.display().to_string() });
+        return;
+    }
+    if go_mod.is_file() {
+        services.push(LocalService { name, r#type: "go".to_string(), dir: scan_path.display().to_string() });
+        return;
+    }
+    if pkg.is_file() {
+        if let Ok(package_json) = std::fs::read_to_string(&pkg) {
+            services.push(LocalService {
+                name,
+                r#type: detect_service_type_local(&package_json),
+                dir: scan_path.display().to_string(),
+            });
+        }
+        return;
+    }
+
+    let entries = util::sorted_dir_entries(scan_path);
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let child_name = entry.file_name().to_string_lossy().to_string();
+        if ["node_modules", "target", ".next", ".git"].contains(&child_name.as_str()) {
+            continue;
+        }
+        let child_rel = if rel_path.is_empty() { child_name.clone() } else { format!("{rel_path}/{child_name}") };
+        scan_local_dir(&path, label, &child_rel, services);
+    }
+}
+
+fn estate_service_dirs(
+    declared_services: &[ecompose::Service],
+    estate_root: &Path,
+    project_dir: &Path,
+    project: &str,
+) -> std::collections::HashSet<PathBuf> {
+    let mut dirs = std::collections::HashSet::new();
+    dirs.insert(std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf()));
+    for service in declared_services {
+        if service.path.is_empty() {
+            continue;
+        }
+        let relative = relative_ct_service_path(&service.path, project, &project_dir.display().to_string(), "");
+        let relative = if relative.is_empty() { service.path.clone() } else { relative };
+        dirs.insert(std::fs::canonicalize(estate_root.join(&relative)).unwrap_or_else(|_| estate_root.join(&relative)));
+        dirs.insert(std::fs::canonicalize(project_dir.join(&relative)).unwrap_or_else(|_| project_dir.join(&relative)));
+    }
+    dirs
+}
+
+fn ensure_local_domain_repos(
+    estate_root: &Path,
+    domains: &[String],
+    project: &str,
+    domain_branch_overrides: &HashMap<String, String>,
+    content: &str,
+) -> Result<(), String> {
+    for domain in domains {
+        if domain == project {
+            continue;
+        }
+        let target_path = estate_root.join(domain);
+        if target_path.join(".git").exists() {
+            continue;
+        }
+        let (git, repo_branch) = resolve_domain_git(domain, project, content)?
+            .ok_or_else(|| {
+                format!(
+                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml)"
+                )
+            })?;
+        if target_path.exists() {
+            return Err(format!("Refusing to clone {domain} into existing non-git path: {}", target_path.display()));
+        }
+        let branch = domain_branch_overrides
+            .get(domain)
+            .cloned()
+            .unwrap_or_else(|| repo_branch.clone());
+        let branch_note = if branch != repo_branch {
+            format!(" (branch override: {branch})")
+        } else {
+            String::new()
+        };
+        print_step(&format!("Cloning repo: {domain}{branch_note}"));
+        run_command("git", &["clone".to_string(), "--branch".to_string(), branch, git, target_path.display().to_string()], estate_root)?;
+    }
+    Ok(())
+}
+
+fn install_local_dependencies(services: &[LocalService]) -> Result<(), String> {
+    for service in services {
+        if !["nextjs", "vite", "node"].contains(&service.r#type.as_str()) {
+            continue;
+        }
+        let service_dir = Path::new(&service.dir);
+        let package_json_path = service_dir.join("package.json");
+        if !package_json_path.exists() {
+            continue;
+        }
+        print_step(&format!("Installing npm dependencies: {}", service.name));
+        let install_result = run_capture("npm", &["install".to_string()], service_dir)?;
+        if install_result.code != 0 {
+            if is_peer_dependency_resolution_error(&install_result) {
+                print_step(&format!("Retrying npm install with --legacy-peer-deps: {}", service.name));
+                run_command("npm", &["install".to_string(), "--legacy-peer-deps".to_string()], service_dir)?;
+            } else {
+                return Err(format!("npm install failed for {}", service.name));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_postgres_client() -> Result<String, String> {
+    let on_path = run_capture("which", &["psql".to_string()], &util::current_dir())?;
+    if on_path.code == 0 && !on_path.stdout.trim().is_empty() {
+        return Ok(on_path.stdout.trim().to_string());
+    }
+    for candidate in [
+        "/Applications/Postgres.app/Contents/Versions/15/bin/psql",
+        "/Applications/Postgres.app/Contents/Versions/latest/bin/psql",
+    ] {
+        if Path::new(candidate).exists() {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err("PostgreSQL is declared in ecompose.yml but psql was not found. Run `eco provision` first.".to_string())
+}
+
+fn is_placeholder_database_url(value: &str) -> bool {
+    value.is_empty()
+        || value.contains('<')
+        || value.contains('>')
+        || value.to_lowercase().contains("todo")
+        || value.to_lowercase().contains("example")
+        || value.to_lowercase().contains("your")
+        || value.to_lowercase().contains("password")
+}
+
+fn write_local_database_url(env_file: &Path, database_url: &str) -> Result<bool, String> {
+    let content = std::fs::read_to_string(env_file).unwrap_or_default();
+    let existing = content
+        .split('\n')
+        .find_map(|l| l.strip_prefix("DATABASE_URL=").map(|v| v.trim().to_string()));
+    if let Some(existing) = existing {
+        if !is_placeholder_database_url(&existing) {
+            return Ok(false);
+        }
+    }
+    let next_line = format!("DATABASE_URL={database_url}");
+    let next_content = if let Some(_) = content.split('\n').find(|l| l.starts_with("DATABASE_URL=")) {
+        let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
+        for l in lines.iter_mut() {
+            if l.starts_with("DATABASE_URL=") {
+                *l = next_line.clone();
+            }
+        }
+        lines.join("\n")
+    } else {
+        let suffix = if content.is_empty() || content.ends_with('\n') { "" } else { "\n" };
+        format!("{content}{suffix}{next_line}\n")
+    };
+    std::fs::write(env_file, next_content).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn bootstrap_local_postgres(services: &[ecompose::Service], estate_root: &Path, project: &str) -> Result<(), String> {
+    let sql_services: Vec<&ecompose::Service> = services.iter().filter(|s| s.runtimes.iter().any(|r| r == "postgresql@15")).collect();
+    if sql_services.is_empty() {
+        return Ok(());
+    }
+    let psql = local_postgres_client()?;
+    let auth_args: Vec<String> = ["-h".to_string(), "localhost".to_string(), "-d".to_string(), "postgres".to_string(), "-Atqc".to_string()].to_vec();
+    let current_user = run_capture(&psql, &auth_args.iter().cloned().chain(vec!["SELECT current_user".to_string()]).collect::<Vec<_>>(), &util::current_dir())?;
+    if current_user.code != 0 || current_user.stdout.trim().is_empty() {
+        return Err("Could not connect to local PostgreSQL. Start PostgreSQL and configure a local role, then rerun `eco up`.".to_string());
+    }
+    let username = current_user.stdout.trim().to_string();
+
+    for service in sql_services {
+        let db_name = sql_database_name_for_service(service, project);
+        if !db_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!("Unsafe generated PostgreSQL database name: {db_name}"));
+        }
+        let exists = run_capture(&psql, &auth_args.iter().cloned().chain(vec![format!("SELECT 1 FROM pg_database WHERE datname = '{db_name}'")]).collect::<Vec<_>>(), &util::current_dir())?;
+        if exists.code != 0 {
+            return Err(format!("Could not inspect local PostgreSQL database {db_name}."));
+        }
+        if exists.stdout.trim().is_empty() {
+            run_command(&psql, &["-h".to_string(), "localhost".to_string(), "-d".to_string(), "postgres".to_string(), "-v".to_string(), "ON_ERROR_STOP=1".to_string(), "-c".to_string(), format!("CREATE DATABASE \"{db_name}\"")], &util::current_dir())?;
+            print_step(&format!("Created local PostgreSQL database {db_name}"));
+        }
+        let env_file = estate_root.join(&service.path).join(".env");
+        let database_url = format!("postgresql://{}@localhost:5432/{db_name}", url::form_urlencoded::byte_serialize(username.as_bytes()).collect::<String>());
+        if write_local_database_url(&env_file, &database_url)? {
+            print_step(&format!("Configured DATABASE_URL for {}", service.name));
+        }
+    }
+    Ok(())
+}
+
+fn cargo_run_env() -> HashMap<String, String> {
+    let mut env_map: HashMap<String, String> = std::env::vars().collect();
+    let mut path_entries: Vec<String> = env_map
+        .get("PATH")
+        .map(|p| p.split(':').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let home = util::home_dir();
+    for candidate in [format!("{home}/.cargo/bin"), "/usr/local/cargo/bin".to_string()] {
+        if !path_entries.contains(&candidate) {
+            path_entries.push(candidate);
+        }
+    }
+    env_map.insert("PATH".to_string(), path_entries.join(":"));
+    env_map
+}
+
+fn run_local_rust_migrations(services: &[ecompose::Service], estate_root: &Path) -> Result<(), String> {
+    let rust_sql: Vec<&ecompose::Service> = services
+        .iter()
+        .filter(|s| s.runtimes.iter().any(|r| r == "rust") && s.runtimes.iter().any(|r| r == "postgresql@15"))
+        .collect();
+    for service in rust_sql {
+        let service_dir = estate_root.join(&service.path);
+        let migrations_dir = service_dir.join("migrations");
+        if !migrations_dir.exists() {
+            continue;
+        }
+        let env_content = std::fs::read_to_string(service_dir.join(".env")).unwrap_or_default();
+        let database_url = env_content
+            .split('\n')
+            .find_map(|l| l.strip_prefix("DATABASE_URL=").map(|v| v.trim().to_string()))
+            .ok_or_else(|| format!("DATABASE_URL is required to run migrations for {}.", service.name))?;
+
+        let sqlx = run_capture("which", &["sqlx".to_string()], &util::current_dir())?;
+        if sqlx.code != 0 {
+            print_step("Installing sqlx-cli for Rust migrations");
+            run_command_env(
+                "cargo",
+                &["install".to_string(), "sqlx-cli".to_string(), "--no-default-features".to_string(), "--features".to_string(), "postgres,rustls".to_string()],
+                &util::current_dir(),
+                &cargo_run_env().into_iter().collect::<Vec<_>>(),
+            )?;
+        }
+        print_step(&format!("Running Rust migrations: {}", service.name));
+        let env_map: HashMap<String, String> = std::env::vars().collect();
+        let mut run_env = env_map.clone();
+        run_env.insert("DATABASE_URL".to_string(), database_url);
+        run_command_env("sqlx", &["migrate".to_string(), "run".to_string(), "--source".to_string(), "migrations".to_string()], &service_dir, &run_env.into_iter().collect::<Vec<_>>())?;
+    }
+    Ok(())
+}
+
+fn find_rust_artifact(service_dir: &Path, package_name: &str) -> Result<Option<(String, i64, String)>, String> {
+    let metadata_result = run_capture("cargo", &["metadata".to_string(), "--no-deps".to_string(), "--format-version".to_string(), "1".to_string()], service_dir)?;
+    if metadata_result.code == 0 {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&metadata_result.stdout) {
+            if let Some(target_directory) = parsed.get("target_directory").and_then(|t| t.as_str()) {
+                for profile in ["release", "debug"] {
+                    let candidate = Path::new(target_directory).join(profile).join(package_name);
+                    if candidate.is_file() {
+                        let mtime = std::fs::metadata(&candidate).and_then(|m| m.modified()).map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)).unwrap_or(0);
+                        let file_desc = run_capture("file", &[candidate.display().to_string()], service_dir).map(|r| r.stdout).unwrap_or_default();
+                        return Ok(Some((candidate.display().to_string(), mtime, file_desc)));
+                    }
+                }
+                return Ok(None);
+            }
+        }
+    }
+    let candidates = [
+        service_dir.join("target").join("release").join(package_name),
+        service_dir.parent().map(|p| p.join("target").join("release").join(package_name)).unwrap_or_default(),
+        service_dir.parent().and_then(|p| p.parent()).map(|p| p.join("target").join("release").join(package_name)).unwrap_or_default(),
+        service_dir.join("target").join("debug").join(package_name),
+        service_dir.parent().map(|p| p.join("target").join("debug").join(package_name)).unwrap_or_default(),
+        service_dir.parent().and_then(|p| p.parent()).map(|p| p.join("target").join("debug").join(package_name)).unwrap_or_default(),
+    ];
+    for candidate in candidates {
+        if candidate.is_file() {
+            let mtime = std::fs::metadata(&candidate).and_then(|m| m.modified()).map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)).unwrap_or(0);
+            let file_desc = run_capture("file", &[candidate.display().to_string()], service_dir).map(|r| r.stdout).unwrap_or_default();
+            return Ok(Some((candidate.display().to_string(), mtime, file_desc)));
+        }
+    }
+    Ok(None)
+}
+
+fn newest_rust_input_mtime(directory: &Path) -> i64 {
+    let mut newest = 0i64;
+    fn scan(scan_dir: &Path, newest: &mut i64) {
+        let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(scan_dir)
+            .map(|e| e.flatten().collect())
+            .unwrap_or_default();
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !["target", "node_modules", ".git"].contains(&name.as_str()) {
+                    scan(&path, newest);
+                }
+            } else if path.is_file() {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            let ms = d.as_millis() as i64;
+                            if ms > *newest {
+                                *newest = ms;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    scan(directory, &mut newest);
+    newest
+}
+
+fn rust_build_state(service_dir: &Path) -> Result<(bool, String, bool), String> {
+    let cargo_toml = std::fs::read_to_string(service_dir.join("Cargo.toml")).unwrap_or_default();
+    if cargo_toml.is_empty() {
+        return Ok((false, "no Cargo.toml".to_string(), false));
+    }
+    let package_name = cargo_package_name(&cargo_toml);
+    let Some(package_name) = package_name else {
+        return Ok((true, "unknown package binary".to_string(), false));
+    };
+    let artifact = find_rust_artifact(service_dir, &package_name)?;
+    let Some((artifact_path, artifact_mtime, file_desc)) = artifact else {
+        return Ok((true, "binary is missing".to_string(), false));
+    };
+    if util::platform() == "darwin" && file_desc.contains("Mach-O") {
+        let expected_arch = if util::arch() == "x64" { "x86_64".to_string() } else { util::arch() };
+        if !file_desc.contains(&expected_arch) {
+            return Ok((true, "binary has a non-native architecture".to_string(), true));
+        }
+    }
+    let mut newest_input = newest_rust_input_mtime(service_dir);
+    for directory in [service_dir.parent().map(|p| p.to_path_buf()).unwrap_or_default(), service_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default()] {
+        for filename in ["Cargo.toml", "Cargo.lock"] {
+            let input_path = directory.join(filename);
+            if input_path.is_file() {
+                if let Ok(meta) = std::fs::metadata(&input_path) {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            let ms = d.as_millis() as i64;
+                            if ms > newest_input {
+                                newest_input = ms;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if newest_input > artifact_mtime {
+        return Ok((true, "source is newer than the binary".to_string(), false));
+    }
+    let _ = artifact_path;
+    Ok((false, "native binary is current".to_string(), false))
+}
+
+fn build_local_rust_services(services: &[LocalService]) -> Result<(), String> {
+    for service in services.iter().filter(|s| s.r#type == "rust") {
+        let service_dir = Path::new(&service.dir);
+        if !service_dir.join("Cargo.toml").exists() {
+            continue;
+        }
+        let (needs_build, reason, clean) = rust_build_state(service_dir)?;
+        if !needs_build {
+            print_step(&format!("Rust service is current; skipping build: {}", service.name));
+            continue;
+        }
+        if reason == "unknown package binary" {
+            print_step(&format!("Skipping Rust build for {}: no [package] binary (virtual workspace or malformed manifest)", service.name));
+            continue;
+        }
+        if clean {
+            print_step(&format!("Removing non-native Rust build cache: {}", service.name));
+            run_command_env("cargo", &["clean".to_string()], service_dir, &cargo_run_env().into_iter().collect::<Vec<_>>())?;
+        }
+        print_step(&format!("Building Rust service ({reason}): {}", service.name));
+        run_command_env("cargo", &["build".to_string()], service_dir, &cargo_run_env().into_iter().collect::<Vec<_>>())?;
+    }
+    Ok(())
+}
+
+fn derive_staging_ecompose_content(content: &str, staging_config: &HashMap<String, String>, staging_hostname: &str) -> String {
+    let mut rewritten: Vec<String> = Vec::new();
+    let mut in_ct = false;
+    let mut in_expose = false;
+    for raw in content.split('\n') {
+        let line = raw.trim_end_matches('\r').trim_end().to_string();
+        if line == "ct:" {
+            in_ct = true;
+            rewritten.push(line);
+            continue;
+        }
+        if line == "expose:" {
+            in_expose = true;
+            rewritten.push(line);
+            continue;
+        }
+        if in_ct && !line.starts_with("  ") {
+            in_ct = false;
+        }
+        if in_expose && !line.starts_with("  ") {
+            in_expose = false;
+        }
+        if in_ct {
+            if let Some(rest) = line.strip_prefix("  id:") {
+                let ct_val = staging_config.get("ct").cloned().unwrap_or_default();
+                rewritten.push(format!("  id: {ct_val}"));
+                continue;
+            }
+            rewritten.push(line);
+            continue;
+        }
+        if in_expose {
+            if let Some(_) = line.strip_prefix("  hostname:") {
+                rewritten.push(format!("  hostname: {staging_hostname}"));
+                continue;
+            }
+            rewritten.push(line);
+            continue;
+        }
+        rewritten.push(line);
+    }
+    let base = rewritten.join("\n");
+    format!(
+        "# staging footprint: deployed to CT {} at {staging_hostname}\n# All other settings mirror the prod manifest from which this was derived.\n{base}\n",
+        staging_config.get("ct").cloned().unwrap_or_default()
+    )
+}
+
+fn provision_estate(
+    deployment: &ProjectDeployment,
+    options: &HashMap<String, String>,
+    staging: bool,
+    staging_config: &HashMap<String, String>,
+) -> Result<(), String> {
+    let ctid = if staging {
+        staging_config.get("ct").cloned().unwrap_or_default()
+    } else {
+        deployment.ctid.clone()
+    };
+    let mut ct = deployment.ct.clone();
+    if staging {
+        ct.insert("id".to_string(), ctid.clone());
+        ct.insert("hostname".to_string(), format!("{}-staging", deployment.project));
+    }
+    let expose = if staging {
+        let mut e = deployment.expose.clone();
+        e.map.insert("hostname".to_string(), {
+            staging_config
+                .get("hostname")
+                .cloned()
+                .unwrap_or_else(|| derive_staging_hostname(&deployment.expose.hostname()))
+        });
+        e.additional.clear();
+        e
+    } else {
+        deployment.expose.clone()
+    };
+    let create_args = create_pct_args(&deployment.project, &ct, &HashMap::new());
+    let webhook_tunnel_name = if staging {
+        format!("{}-staging-deploy-webhook", deployment.project)
+    } else {
+        format!("{}-deploy-webhook", deployment.project)
+    };
+    let staging_ecompose_content = if staging {
+        derive_staging_ecompose_content(&deployment.content, staging_config, &expose.hostname())
+    } else {
+        String::new()
+    };
+    let staging_ecompose_path = format!("{}/ecompose.yml", deployment.ct_project_root);
+    let domains = ecompose::unique_domains_from_ecompose(&deployment.content, &deployment.project);
+    let domain_branch_overrides = domain_branch_overrides_from_ecompose(&deployment.content);
+    let host_ssh_dir = resolve_host_ssh_dir()?;
+    // Use the staging-aware `expose` (hostname already rewritten to
+    // staging.<hostname>) so a staging footprint derives its own webhook
+    // hostname (hooks-staging.<hostname>) instead of the prod one.
+    let github_deploy = resolve_deploy_github_config(&deployment.project, &expose, &deployment.deploy);
+    let github_repos = match &github_deploy {
+        Some(gd) => resolve_deploy_github_repos_for_project(
+            &domains,
+            &deployment.project,
+            &deployment.project_dir,
+            &gd.branch,
+            &domain_branch_overrides,
+            &deployment.content,
+        )?,
+        None => Vec::new(),
+    };
+    let webhook_secret = match &github_deploy {
+        Some(_) => resolve_estate_webhook_secret(&ctid, &deployment.ct_project_root, &rand_secret())?,
+        None => String::new(),
+    };
+    let bootstrap_repo = github_repos
+        .iter()
+        .find(|repo| is_self_domain(&repo.domain, &deployment.project, &deployment.project_dir.display().to_string()));
+    let bootstrap_source_sync = bootstrap_repo.map(|repo| {
+        let preserve: Vec<String> = domains
+            .iter()
+            .filter(|d| !is_self_domain(d, &deployment.project, &deployment.project_dir.display().to_string()))
+            .cloned()
+            .collect();
+        (
+            repo.domain.clone(),
+            build_git_force_sync_command(&deployment.ct_project_root, &repo.branch, &repo.git, &preserve, false),
+        )
+    });
+
+    let mut repo_clone_steps: Vec<(String, String)> = Vec::new();
+    for domain in &domains {
+        if is_self_domain(domain, &deployment.project, &deployment.project_dir.display().to_string()) {
+            continue;
+        }
+        let (git, repo_branch) = resolve_domain_git(domain, &deployment.project, &deployment.content)?
+            .ok_or_else(|| {
+                format!(
+                    "No git remote found for domain \"{domain}\" (no composition: block in ecompose.yml)"
+                )
+            })?;
+        repo_clone_steps.push((
+            domain.clone(),
+            build_git_force_sync_command(
+                &format!("{}/{}", deployment.ct_project_root, domain),
+                &domain_branch_overrides.get(domain).cloned().unwrap_or_else(|| repo_branch.clone()),
+                &git,
+                &[],
+                false,
+            ),
+        ));
+    }
+
+    // Services whose dist was built on the local builder and shipped in the
+    // payload (dirs under remote-artifacts) — the CT must NOT npm ci/build
+    // them; it serves the shipped artifact.
+    let shipped_frontends: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The estate core repo name (e.g. `stuff8_core`), used to strip service
+    // path prefixes that reference the estate core on flattened host layouts.
+    let estate_core = estate_core_name(&deployment.content);
+
+    let mut dependency_install_steps: Vec<(String, String)> = deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty())
+        .filter(|s| s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")))
+        .map(|s| {
+            let service_dir = resolve_ct_service_dir(s, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
+            (s.name.clone(), build_npm_install_command(&service_dir))
+        })
+        .collect();
+
+    let mut build_steps: Vec<(String, String)> = Vec::new();
+    for service in deployment.services.iter().filter(|s| !s.path.is_empty()) {
+        let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
+        if service.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")) {
+            if shipped_frontends.contains(&service.name) {
+                continue;
+            }
+            build_steps.push((
+                service.name.clone(),
+                format!(
+                    "if [ -f \"{service_dir}/package.json\" ]; then cd \"{service_dir}\" && if [ -f \".env\" ]; then set -a && . ./.env && set +a; fi && ECO_DEPLOY_MODE=prod npm run build --if-present; fi"
+                ),
+            ));
+        }
+        if service.runtimes.iter().any(|r| r == "maven") {
+            build_steps.push((
+                service.name.clone(),
+                format!("if [ -f \"{service_dir}/pom.xml\" ]; then cd \"{service_dir}\" && mvn -DskipTests package; fi"),
+            ));
+        }
+    }
+
+    let data_bootstrap_steps = build_data_bootstrap_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &deployment.project, &estate_core);
+    let migration_steps = build_rust_migration_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
+    let dedicated_rust_builder = util::env_var_or("ECO_RUST_DEDICATED_BUILDER", "").trim().to_string();
+    let dedicated_rust_builder_ctid = if dedicated_rust_builder.is_empty() {
+        String::new()
+    } else {
+        resolve_ct_input(&dedicated_rust_builder)?
+    };
+    let rust_builder_is_application = !dedicated_rust_builder.is_empty() && dedicated_rust_builder_ctid == ctid;
+    let external_rust_builder = !dedicated_rust_builder.is_empty() && !rust_builder_is_application;
+    let rust_services: Vec<&ecompose::Service> = deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+        .collect();
+    let stop_estate_rust_builds_command = build_stop_estate_rust_builds_command(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
+
+    // Remote mode (`eco up --remote`): the Rust binaries were cross-compiled on
+    // the developer machine and shipped here inside the deploy payload. The dev
+    // source is authoritative, so git force-sync / domain clones are skipped
+    // and the CT never compiles Rust; the shipped binaries are installed into
+    // target/release and the source hash is recorded so later builds skip.
+    let remote_mode = options.get("remote").map(|v| v == "true").unwrap_or(false);
+    let remote_artifacts = options.get("remote-artifacts").cloned().unwrap_or_default();
+    let remote_hashes = options.get("remote-hashes").cloned().unwrap_or_default();
+    let remote_frontend_hashes = options.get("remote-frontend-hashes").cloned().unwrap_or_default();
+    // Frontends shipped as prebuilt dist (dirs under remote-artifacts) skip the
+    // CT-side `npm run build`; the dist was built on the local builder.
+    let shipped_frontends: std::collections::HashSet<String> = if remote_mode && !remote_artifacts.is_empty() {
+        std::fs::read_dir(&remote_artifacts)
+            .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
+    if !shipped_frontends.is_empty() {
+        build_steps.retain(|(name, _)| !shipped_frontends.contains(name));
+        print_step(&format!("[{}] skipping CT-side frontend builds for shipped dists: {:?}", deployment.project, shipped_frontends));
+    }
+    // Bun-compiled node backends are self-contained single binaries — no npm
+    // install (runtime node_modules) on the CT at all.
+    let bun_frontends: std::collections::HashSet<String> = if remote_mode && !remote_artifacts.is_empty() {
+        std::fs::read_dir(&remote_artifacts)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().is_dir() && e.path().join(".eco-bun").is_file())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
+    if !bun_frontends.is_empty() {
+        dependency_install_steps.retain(|(name, _)| !bun_frontends.contains(name));
+        print_step(&format!("[{}] Bun-compiled services skip CT npm ci: {:?}", deployment.project, bun_frontends));
+    }
+
+    // Rust is built off-CT only: binaries are supplied by `eco up --remote`
+    // (cross-compiled on the dev machine), an external dedicated builder CT, or
+    // an LXS package. A plain in-CT `cargo build` is no longer supported --
+    // fail fast instead of silently compiling from source.
+    if !rust_services.is_empty() && !remote_mode && !external_rust_builder && !rust_builder_is_application {
+        return Err(format!(
+            "{} declares Rust service(s) [{}] but no Rust binary source is configured. Rust must be supplied as prebuilt binaries: run `eco up --remote`, set ECO_RUST_DEDICATED_BUILDER, or use an `lxs:` service. In-CT `cargo build` is not supported.",
+            deployment.project,
+            rust_services.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    let mut commands: Vec<String> = vec![
+        format!("pct status {ctid} || pct create {}", create_args[1..].join(" ")),
+        format!("pct start {ctid}"),
+        format!("pct exec {ctid} -- bash -lc 'mkdir -p {}'", deployment.ct_workspace_root),
+        format!("# stop only in-progress Cargo builds belonging to this estate (never other estates in the CT)"),
+        format!("pct exec {ctid} -- bash -lc {}", shell_single_quote(&stop_estate_rust_builds_command)),
+        format!("pct push {ctid} <temp-tar:project:{}> /tmp/{}.tar", deployment.project, deployment.project),
+        format!("pct push {ctid} <temp-tar:eco> /tmp/eco.tar"),
+        format!("pct push {ctid} <temp-tar:.ssh:{}> /tmp/.ssh.tar", host_ssh_dir.display()),
+        format!(
+            "pct exec {ctid} -- bash -lc 'cd {} && tar -xf /tmp/{}.tar && tar -xf /tmp/eco.tar && rm -f /tmp/{}.tar /tmp/eco.tar && mkdir -p /root && tar -xf /tmp/.ssh.tar -C /root && rm -f /tmp/.ssh.tar && chmod 700 /root/.ssh && find /root/.ssh -type d -exec chmod 700 {} \\; && find /root/.ssh -type f -exec chmod 600 {} \\;'",
+            deployment.ct_workspace_root,
+            deployment.project,
+            deployment.project,
+            "{}",
+            "{}"
+        ),
+    ];
+    if let Some((_, command)) = &bootstrap_source_sync {
+        if !remote_mode {
+            commands.push(format!("# force-sync bootstrap source\npct exec {ctid} -- bash -lc '{}'", command));
+        }
+    }
+    if staging {
+        commands.push(format!(
+            "# write staging ecompose.yml (staging hostname + ct) after bootstrap sync restores the prod manifest\npct push {ctid} <staging-ecompose> {staging_ecompose_path}"
+        ));
+    }
+    commands.push(format!(
+        "pct exec {ctid} -- bash -lc 'cd {} && {}bash {}/provision.sh {}'",
+        deployment.ct_workspace_root,
+        if external_rust_builder || remote_mode { "ECO_RUST_DEDICATED_BUILDER=managed " } else { "" },
+        deployment.ct_eco_root,
+        deployment.project
+    ));
+    if expose.enabled() {
+        commands.push(format!(
+            "pct exec {ctid} -- bash -lc 'if ! command -v caddy >/dev/null 2>&1; then apt-get update && apt-get install -y caddy; fi'"
+        ));
+    }
+    if !remote_mode {
+        for (domain, command) in &repo_clone_steps {
+            commands.push(format!("# sync repo: {domain}\npct exec {ctid} -- bash -lc '{}'", command));
+        }
+    }
+    for (name, command) in &dependency_install_steps {
+        commands.push(format!("# install deps: {name}\npct exec {ctid} -- bash -lc '{}'", command));
+    }
+    for (index, command) in data_bootstrap_steps.iter().enumerate() {
+        commands.push(format!("# bootstrap data service #{}\npct exec {ctid} -- bash -lc '{}'", index + 1, command));
+    }
+    for (index, command) in migration_steps.iter().enumerate() {
+        let prefix = if dedicated_rust_builder.is_empty() { "" } else { "export ECO_SQLX_BIN=/opt/eco-tools/sqlx; " };
+        commands.push(format!("# apply Rust migration set #{}\npct exec {ctid} -- bash -lc '{}{}'", index + 1, prefix, command));
+    }
+    commands.push(format!("pct exec {ctid} -- bash -lc 'mkdir -p /usr/local/bin && install -m 0755 {}/bin/eco /usr/local/bin/eco && export ECO_BIN=/usr/local/bin/eco'", shell_single_quote(&deployment.ct_eco_root)));
+    if !rust_services.is_empty() {
+        if external_rust_builder {
+            let steps = build_dedicated_rust_steps(
+                &ctid,
+                &dedicated_rust_builder_ctid,
+                &deployment.project,
+                &deployment.ct_project_root,
+                &deployment.services,
+            );
+            commands.push("# build Rust artifacts via dedicated builder (before configure.sh)".to_string());
+            for line in steps {
+                commands.push(line);
+            }
+        } else {
+            for service in &rust_services {
+                let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
+                commands.push(format!(
+                    "# build Rust service: {}\npct exec {ctid} -- bash -lc 'cd {} && RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH RUSTC_WRAPPER= cargo build --release'",
+                    service.name,
+                    shell_single_quote(&service_dir)
+                ));
+            }
+        }
+    }
+    // Refresh the CT's configure.sh from the shipped binary before running it
+    // (in remote mode the workspace copy can be stale).
+    commands.push(format!(
+        "pct exec {ctid} -- /usr/local/bin/eco __bundle-configure-sh {}",
+        shell_single_quote(&format!("{}/configure.sh", deployment.ct_eco_root))
+    ));
+    commands.push(format!(
+        "pct exec {ctid} -- bash -lc 'cd {} && ECO_BIN=/usr/local/bin/eco ECO_DEPLOY_MODE=prod ECO_NON_INTERACTIVE=1 {} PROJECT_DIR={} PROJECT_NAME={} PM2_DIR={} bash {}/configure.sh'",
+        deployment.ct_workspace_root,
+        systemd_env(),
+        deployment.ct_project_root,
+        deployment.project,
+        deployment.ct_project_root,
+        deployment.ct_eco_root
+    ));
+    for (name, command) in &build_steps {
+        commands.push(format!("# build artifact: {name}\npct exec {ctid} -- bash -lc '{}'", command));
+    }
+    commands.push(format!(
+        "# remove the estate's current PM2 services, then prune any old process that still holds a configured port\npct exec {ctid} -- bash -lc '{}'",
+        build_delete_declared_pm2_apps_command(&deployment.ct_config_path)
+    ));
+    let start_services_cmd = if systemd_mode() {
+        format!("pct exec {ctid} -- bash -lc '{}'", build_systemd_start_command(&deployment.ct_config_path))
+    } else {
+        format!("pct exec {ctid} -- bash -lc 'pm2 startOrReload {} --update-env'", deployment.ct_config_path)
+    };
+    commands.push(start_services_cmd);
+
+    let exposure_plan = expose_via_proxy_ct(true, &expose, &deployment.project, &ctid, &deployment.ct_config_path)
+        .unwrap_or_else(|e| {
+            if expose.enabled() {
+                vec![format!("# expose error: {e}")]
+            } else {
+                Vec::new()
+            }
+        });
+
+    if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
+        let mut out = String::new();
+        out.push_str(&format!("eco up plan{}\n", if staging { " (staging)" } else { "" }));
+        out.push_str(&format!("Manifest: {}\n", deployment.file_path));
+        out.push_str(&format!("Project root: {}\n", deployment.project_dir.display()));
+        out.push_str(&format!("CT workspace root: {}\n", deployment.ct_workspace_root));
+        out.push_str(&format!("CT ID: {ctid}\n"));
+        out.push_str(&format!("Hostname: {}\n", if expose.hostname().is_empty() { "(none)".to_string() } else { expose.hostname() }));
+        out.push_str(&format!("Domains: {}\n\n", domains.join(", ")));
+        for c in &commands {
+            out.push_str(c);
+            out.push('\n');
+        }
+        for c in &exposure_plan {
+            out.push_str(c);
+            out.push('\n');
+        }
+        print!("{out}");
+        return Ok(());
+    }
+
+    let status = run_capture("pct", &["status".to_string(), ctid.clone()], &util::current_dir())?;
+    if status.code != 0 {
+        let available_template = resolve_available_template(ct.get("template").map(|s| s.as_str()).unwrap_or(""))?;
+        let resolved_create_args = if available_template == ct.get("template").map(|s| s.to_string()).unwrap_or_default() {
+            create_args.clone()
+        } else {
+            let mut opts = HashMap::new();
+            opts.insert("template".to_string(), available_template);
+            create_pct_args(&deployment.project, &ct, &opts)
+        };
+        run_command("pct", &resolved_create_args, &util::current_dir())?;
+    }
+
+    ensure_ct_running(&ctid)?;
+    print_step(&format!("CT {ctid} is running"));
+    let minio = provision_dedicated_minio(&deployment.storage, &ctid)?;
+    if let Some(minio) = &minio {
+        print_step(&format!("[CT {}] MinIO is ready at its private bridge endpoint", minio.ctid));
+        install_minio_client_config(&ctid, minio)?;
+    }
+    pct_exec(&ctid, &format!("mkdir -p {}", deployment.ct_workspace_root))?;
+    print_step(&format!("[CT {ctid}] Stopping in-progress Rust builds for {}", deployment.project));
+    pct_exec(&ctid, &stop_estate_rust_builds_command)?;
+    print_step(&format!("[CT {ctid}] Pushing project repo: {}", deployment.project));
+    tar_and_push_dir(&ctid, &deployment.project_dir.display().to_string(), &deployment.project)?;
+    print_step(&format!("[CT {ctid}] Pushing eco repo"));
+    tar_and_push_dir(&ctid, &embedded::package_root().display().to_string(), "eco")?;
+    print_step(&format!("[CT {ctid}] Copying host SSH credentials"));
+    tar_and_push_dir(&ctid, &host_ssh_dir.display().to_string(), ".ssh")?;
+    pct_exec(
+        &ctid,
+        &format!(
+            "cd {} && tar -xf /tmp/{}.tar && tar -xf /tmp/eco.tar && rm -f /tmp/{}.tar /tmp/eco.tar && mkdir -p /root && tar -xf /tmp/.ssh.tar -C /root && rm -f /tmp/.ssh.tar && chmod 700 /root/.ssh && find /root/.ssh -type d -exec chmod 700 {{}} \\; && find /root/.ssh -type f -exec chmod 600 {{}} \\;",
+            deployment.ct_workspace_root,
+            deployment.project,
+            deployment.project
+        ),
+    )?;
+    if remote_mode {
+        // Remote deploys skip git force-sync (the shipped source is
+        // authoritative), so stale top-level files from an earlier deploy
+        // layout survive the tar merge. Remove them the way `git clean` would:
+        // anything on the CT that is not in the shipped source, preserving only
+        // eco-generated state (.eco, target/, the PM2 config, Caddyfile).
+        print_step(&format!("[CT {ctid}] Removing stale source files not present in the shipped source"));
+        remove_stale_ct_source(&ctid, deployment)?;
+    }
+    if let Some((_, command)) = &bootstrap_source_sync {
+        if !remote_mode {
+            print_step(&format!("[CT {ctid}] Syncing bootstrap source: {}", bootstrap_source_sync.as_ref().map(|(d, _)| d.clone()).unwrap_or_default()));
+            pct_exec(&ctid, &format!("cd {} && {}", deployment.ct_workspace_root, command))?;
+        }
+    }
+    if staging {
+        print_step(&format!("[CT {ctid}] Writing staging ecompose.yml ({})", expose.hostname()));
+        push_text_file_to_ct(&ctid, &staging_ecompose_path, &staging_ecompose_content, "staging-ecompose")?;
+    }
+    print_step(&format!("[CT {ctid}] Provisioning runtimes for {}", deployment.project));
+    pct_exec(
+        &ctid,
+        &format!(
+            "cd {} && {}bash {}/provision.sh {}",
+            deployment.ct_workspace_root,
+            if external_rust_builder || remote_mode { "ECO_RUST_DEDICATED_BUILDER=managed " } else { "" },
+            deployment.ct_eco_root,
+            deployment.project
+        ),
+    )?;
+    if expose.enabled() {
+        print_step(&format!("[CT {ctid}] Ensuring caddy is installed for gateway"));
+        ensure_ct_caddy(&ctid)?;
+    }
+    if !remote_mode {
+        for (domain, command) in &repo_clone_steps {
+            print_step(&format!("[CT {ctid}] Syncing repo: {domain}"));
+            pct_exec(&ctid, &format!("cd {} && {}", deployment.ct_workspace_root, command))?;
+        }
+    }
+    for (name, command) in &dependency_install_steps {
+        print_step(&format!("[CT {ctid}] Installing npm dependencies: {name}"));
+        pct_exec(&ctid, &format!("cd {} && {}", deployment.ct_workspace_root, command))?;
+    }
+    print_step(&format!("[CT {ctid}] Installing eco CLI"));
+    // Install the CURRENT eco binary (the agent's own) so configure.sh and
+    // __bundle-configure-sh are the shipped versions, not a stale CT copy.
+    pct_exec(&ctid, "mkdir -p /usr/local/bin")?;
+    run_command(
+        "pct",
+        &["push".to_string(), ctid.to_string(), "/usr/local/bin/eco".to_string(), "/tmp/eco-agent-bin".to_string()],
+        &util::current_dir(),
+    )?;
+    pct_exec(&ctid, "install -m 0755 /tmp/eco-agent-bin /usr/local/bin/eco && rm -f /tmp/eco-agent-bin")?;
+    for (index, command) in data_bootstrap_steps.iter().enumerate() {
+        print_step(&format!("[CT {ctid}] Bootstrapping data service {}", index + 1));
+        pct_exec(&ctid, &format!("export LANG=C.UTF-8 LC_ALL=C.UTF-8 PERL_BADLANG=0\n{}", command))?;
+    }
+    for (index, command) in migration_steps.iter().enumerate() {
+        print_step(&format!("[CT {ctid}] Applying Rust migration set {}", index + 1));
+        let prefix = if dedicated_rust_builder.is_empty() { "" } else { "export ECO_SQLX_BIN=/opt/eco-tools/sqlx; " };
+        pct_exec(&ctid, &format!("{prefix}{command}"))?;
+    }
+    // Build Rust services. With a dedicated builder CT the source is synced,
+    // built there, and the release binaries transferred to this CT; otherwise
+    // the app CT builds in place. In remote mode the binaries were
+    // cross-compiled on the developer machine and shipped in the deploy
+    // payload, so they are installed directly. Runs BEFORE configure.sh so it
+    // detects the release binaries and points PM2 at them instead of `cargo run`.
+    let mut rust_build_failures: Vec<String> = Vec::new();
+    if !rust_services.is_empty() {
+        if remote_mode {
+            print_step(&format!("[CT {ctid}] Installing remotely-built Rust binaries for {}", deployment.project));
+            match install_remote_rust_binaries(&ctid, deployment, &remote_artifacts, &remote_hashes, &estate_core) {
+                Ok(()) => print_step(&format!("[CT {ctid}] Remote Rust binaries installed for {}", deployment.project)),
+                Err(e) => {
+                    util::eprintln_stderr(&format!("\n[eco up] WARNING: Installing remote Rust binaries failed, continuing: {e}\n"));
+                    rust_build_failures.push(e);
+                }
+            }
+            if let Err(e) = install_remote_frontend_artifacts(&ctid, deployment, &remote_artifacts, &remote_frontend_hashes, &estate_core) {
+                util::eprintln_stderr(&format!("\n[eco up] WARNING: Installing shipped frontend dists failed, continuing: {e}\n"));
+                rust_build_failures.push(e);
+            }
+        } else if external_rust_builder {
+            print_step(&format!("[CT {dedicated_rust_builder_ctid}] Building Rust artifacts for {} via dedicated builder", deployment.project));
+            let steps = build_dedicated_rust_steps(
+                &ctid,
+                &dedicated_rust_builder_ctid,
+                &deployment.project,
+                &deployment.ct_project_root,
+                &deployment.services,
+            );
+            let script = steps.join("\n");
+            match run_command_plan_line(&script) {
+                Ok(()) => print_step(&format!("[CT {dedicated_rust_builder_ctid}] Rust artifacts built and transferred for {}", deployment.project)),
+                Err(e) => {
+                    util::eprintln_stderr(&format!("\n[eco up] WARNING: Rust build step failed, continuing: {e}\n"));
+                    rust_build_failures.push(e);
+                }
+            }
+        } else {
+            for service in &rust_services {
+                let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
+                let build_cmd = format!(
+                    "cd {} && RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH RUSTC_WRAPPER= cargo build --release",
+                    shell_single_quote(&service_dir)
+                );
+                match pct_exec(&ctid, &build_cmd) {
+                    Ok(()) => print_step(&format!("[CT {ctid}] Built Rust service: {}", service.name)),
+                    Err(e) => {
+                        util::eprintln_stderr(&format!("\n[eco up] [CT {ctid}] WARNING: Building Rust service {} failed, continuing: {e}\n", service.name));
+                        rust_build_failures.push(format!("Building Rust service {}: {e}", service.name));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(installed) = (|| -> Result<Option<Vec<String>>, String> {
+        if deployment.services.iter().any(|s| !s.lxs.is_empty()) {
+            print_step(&format!("[CT {ctid}] Installing LXS services for {}", deployment.project));
+            return Ok(Some(install_lxs_services(&ctid, deployment)?));
+        }
+        Ok(None)
+    })()? {
+        if installed.is_empty() {
+            util::eprintln_stderr("[eco up] WARNING: no LXS installed for declared lxs: services");
+        }
+    }
+    print_step(&format!("[CT {ctid}] Generating ecosystem config for {}", deployment.project));
+    // Refresh configure.sh from the shipped binary first (remote mode ships a
+    // stale workspace copy otherwise).
+    pct_exec(&ctid, &format!("/usr/local/bin/eco __bundle-configure-sh {}", shell_single_quote(&format!("{}/configure.sh", deployment.ct_eco_root))))?;
+    pct_exec(
+        &ctid,
+        &format!(
+            "cd {} && ECO_BIN=/usr/local/bin/eco ECO_DEPLOY_MODE=prod ECO_NON_INTERACTIVE=1 {} PROJECT_DIR={} PROJECT_NAME={} PM2_DIR={} bash {}/configure.sh",
+            deployment.ct_workspace_root,
+            systemd_env(),
+            deployment.ct_project_root,
+            deployment.project,
+            deployment.ct_project_root,
+            deployment.ct_eco_root
+        ),
+    )?;
+
+    let mut receiver_setup: Option<ReceiverSetup> = None;
+    let mut resolved_webhook_port: u32 = 0;
+    // Webhook-driven deploys are legacy. With the build farm on each developer
+    // machine, `eco up --remote` IS the deploy — no GitHub webhook receiver,
+    // no redeploy.sh, no webhook sync. Only non-remote (`eco up`) deploys set
+    // up the legacy webhook path.
+    if !remote_mode {
+        if let Some(gd_ref) = &github_deploy {
+            let port = resolve_estate_webhook_port(&ctid, &deployment.ct_project_root, gd_ref)?;
+            resolved_webhook_port = port;
+            let mut gd = gd_ref.clone();
+            gd.port = Some(port);
+            print_step(&format!("[CT {ctid}] Allocated deploy webhook port {port}"));
+            let mut services_with_mode = deployment.services.clone();
+            let target_mode = deployment
+                .content
+                .split('\n')
+                .find_map(|l| l.strip_prefix("target_mode:").map(|v| v.trim().to_string()))
+                .unwrap_or_default();
+            let _ = &mut services_with_mode;
+            receiver_setup = Some(build_deploy_receiver_files(
+                &deployment.project,
+                &deployment.project_dir.display().to_string(),
+                &deployment.ct_project_root,
+                &deployment.ct_project_parent,
+                &deployment.ct_workspace_root,
+                &deployment.ct_eco_root,
+                &deployment.ct_config_path,
+                &gd,
+                &github_repos,
+                &webhook_secret,
+                &dependency_install_steps,
+                &data_bootstrap_steps,
+                &migration_steps,
+                &build_steps,
+                &deployment.services,
+                !dedicated_rust_builder.is_empty() || remote_mode,
+                rust_builder_is_application && !remote_mode,
+                staging,
+                &staging_ecompose_content,
+            )?);
+            let _ = target_mode;
+        }
+    }
+
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for failure in rust_build_failures {
+        failures.push(("Building Rust".to_string(), failure));
+    }
+    for (name, command) in &build_steps {
+        match pct_exec(&ctid, &format!("cd {} && {}", deployment.ct_workspace_root, command)) {
+            Ok(()) => print_step(&format!("[CT {ctid}] Building artifact: {name}")),
+            Err(e) => {
+                util::eprintln_stderr(&format!("\n[eco up] [CT {ctid}] WARNING: Building artifact {name} failed, continuing: {e}\n"));
+                failures.push((format!("Building artifact: {name}"), e));
+            }
+        }
+    }
+    match (|| -> Result<(), String> {
+        print_step(&format!("[CT {ctid}] Starting services for {} ({})", deployment.project, if systemd_mode() { "systemd" } else { "pm2" }));
+        pct_exec(&ctid, &build_delete_declared_pm2_apps_command(&deployment.ct_config_path))?;
+        pct_exec(&ctid, &build_prune_conflicting_ports_command(&deployment.ct_config_path))?;
+        if systemd_mode() {
+            pct_exec(&ctid, &build_systemd_start_command(&deployment.ct_config_path))
+        } else {
+            pct_exec(&ctid, &format!("pm2 startOrReload {} --update-env", deployment.ct_config_path))
+        }
+    })() {
+        Ok(()) => {}
+        Err(e) => {
+            util::eprintln_stderr(&format!("\n[eco up] [CT {ctid}] WARNING: Starting services failed, continuing: {e}\n"));
+            failures.push((format!("Starting services for {}", deployment.project), e));
+        }
+    }
+    if !remote_mode {
+        if let (Some(receiver_setup), Some(gd)) = (&receiver_setup, &github_deploy) {
+            match (|| -> Result<(), String> {
+            print_step(&format!("[CT {ctid}] Installing deploy webhook receiver for {}{}", deployment.project, if staging { " (staging)" } else { "" }));
+            install_deploy_receiver(&ctid, receiver_setup, &webhook_tunnel_name, &resolved_webhook_port.to_string())?;
+            let app_ip = resolve_ct_primary_ip(&ctid)?;
+            ensure_proxy_hostname(
+                false,
+                &gd.proxy_ct_input,
+                &gd.webhook_hostname,
+                &format!("http://{app_ip}:{}", resolved_webhook_port),
+                &deployment.expose.cloudflared_config(),
+                &webhook_tunnel_name,
+                &deployment.expose.cloudflare_account(),
+                0,
+                false,
+            )?;
+            print_step(&format!("[CT {ctid}] Syncing GitHub webhooks for {}", deployment.project));
+            sync_github_deploy_webhooks(&github_repos, gd, &webhook_secret)?;
+            Ok(())
+        })() {
+            Ok(()) => {}
+            Err(e) => {
+                util::eprintln_stderr(&format!("\n[eco up] [CT {ctid}] WARNING: Installing deploy webhook receiver failed, continuing: {e}\n"));
+                failures.push((format!("Installing deploy webhook receiver for {}", deployment.project), e));
+            }
+        }
+    }
+    }
+    match expose_via_proxy_ct(false, &expose, &deployment.project, &ctid, &deployment.ct_config_path) {
+        Ok(_) => {}
+        Err(e) => {
+            util::eprintln_stderr(&format!("\n[eco up] [CT {ctid}] WARNING: Exposing via proxy CT failed, continuing: {e}\n"));
+            failures.push((format!("Exposing {} via proxy CT", deployment.project), e));
+        }
+    }
+
+    if !failures.is_empty() {
+        let mut message = format!("\n[eco up] Completed {} with {} failed step(s):", deployment.project, failures.len());
+        for (label, error) in &failures {
+            message.push_str(&format!("\n  - {label}: {error}"));
+        }
+        if remote_mode {
+            // Running inside the `eco serve` agent: never kill the server
+            // process. Return the failures as an error instead.
+            message.push_str("\nEverything else succeeded, including exposing the estate if enabled.");
+            return Err(message);
+        }
+        util::println_stdout(&message);
+        util::println_stdout("\nEverything else succeeded, including exposing the estate if enabled. Fix the failed step(s) above and re-run 'eco up' (or the specific step manually) to clear them.");
+        std::process::exit(1);
+    } else {
+        print_step(&format!("Completed {}", deployment.project));
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remote deploy: the developer machine keeps the estate source locally,
+// cross-compiles the Rust services for Linux (x86_64-unknown-linux-musl) with
+// the correct env, and ships the binaries over HTTP to the `eco serve` agent
+// on the Proxmox host. The agent installs them into the target CT and runs the
+// estate deploy without compiling Rust there — removing the shared builder-CT
+// contention that a single CT (e.g. CT 1000) creates when several estates build
+// at once.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REMOTE_SOURCE_SKIP: [&str; 9] = [".env", ".env.local", ".git", "node_modules", "target", ".next", ".cache", ".eco", "dist"];
+
+fn skip_none(_: &str) -> bool {
+    false
+}
+
+// Only secret/local env files are excluded from the shipped source. `.env.example`
+// is a committed contract file configure.sh reads on the CT to normalize env
+// (JWT_SECRET, CORS, feature flags) and must be shipped.
+fn should_skip_remote_source(name: &str) -> bool {
+    REMOTE_SOURCE_SKIP.contains(&name) || (name.starts_with(".env.") && name.ends_with(".local")) || name.ends_with(".log")
+}
+
+fn copy_tree_excluding(src: &Path, dst: &Path, skip: fn(&str) -> bool) -> Result<(), String> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if skip(&name) {
+            continue;
+        }
+        let source = entry.path();
+        let destination = dst.join(&name);
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
+            copy_tree_excluding(&source, &destination, skip)?;
+        } else if file_type.is_symlink() {
+            // Keep payloads self-contained: skip symlinks.
+            continue;
+        } else {
+            std::fs::copy(&source, &destination).map_err(|e| format!("copy {}: {e}", source.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_rust_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if path.is_dir() {
+            if ["target", "node_modules", ".git"].contains(&name.as_str()) {
+                continue;
+            }
+            collect_rust_inputs(&path, out)?;
+        } else if name.ends_with(".rs") || name == "Cargo.toml" || name == "Cargo.lock" {
+            out.push(path.display().to_string());
+        }
+    }
+    Ok(())
+}
+
+// In remote mode the shipped source is authoritative and git force-sync is
+// skipped, so a tar extract only merges/overwrites: stale top-level entries
+// from an earlier deploy layout survive. Remove any top-level entry on the CT
+// that is not in the shipped source, preserving eco-generated state.
+fn remove_stale_ct_source(ctid: &str, deployment: &ProjectDeployment) -> Result<(), String> {
+    let shipped: std::collections::HashSet<String> = std::fs::read_dir(&deployment.project_dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+        .collect();
+    let current_output = pct_exec_capture(ctid, &format!("ls -1A {}", shell_single_quote(&deployment.ct_project_root)))?;
+    let preserved = [".eco", "target", "node_modules", ".eco-rust-hash", &deployment.pm2_config_filename, "Caddyfile"];
+    for entry in current_output.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        if shipped.contains(entry) || preserved.contains(&entry) {
+            continue;
+        }
+        print_step(&format!("[CT {ctid}] Removing stale top-level source entry: {entry}"));
+        pct_exec(ctid, &format!("rm -rf {}", shell_single_quote(&format!("{}/{}", deployment.ct_project_root, entry))))?;
+    }
+    Ok(())
+}
+
+// Mirrors the hash produced by the CT-side `buildConditionalRustCommand` so the
+// recorded `.eco-rust-hash` lets later deploys skip a rebuild when the source
+// shipped to the CT is unchanged.
+fn compute_rust_input_hash(service_dir: &Path) -> Result<String, String> {
+    let mut inputs: Vec<String> = Vec::new();
+    collect_rust_inputs(service_dir, &mut inputs)?;
+    let ancestors = [
+        service_dir.to_path_buf(),
+        service_dir.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+        service_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default(),
+    ];
+    for dir in ancestors {
+        for manifest in ["Cargo.toml", "Cargo.lock"] {
+            let path = dir.join(manifest);
+            if path.is_file() {
+                inputs.push(path.display().to_string());
+            }
+        }
+    }
+    inputs.sort();
+    let mut combined = String::new();
+    for path in &inputs {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+        let digest = sha2::Sha256::digest(&bytes);
+        combined.push_str(&format!("{}  {path}\n", crate::registry::hex_encode(&digest)));
+    }
+    let final_digest = sha2::Sha256::digest(combined.as_bytes());
+    Ok(crate::registry::hex_encode(&final_digest))
+}
+
+// True when a crate uses the compile-time sqlx macros (which need a live DB or
+// committed .sqlx/ offline metadata); runtime sqlx::query(&str) does not.
+fn crate_uses_sqlx_query_macros(dir: &Path) -> bool {
+    const MACRO_TOKENS: [&str; 7] = ["query!", "query_as!", "query_scalar!", "query_with!", "query_file!", "query_as_file!", "query_scalar_file!"];
+    let src = dir.join("src");
+    if !src.is_dir() {
+        return false;
+    }
+    fn scan(dir: &Path, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if *found {
+                    return;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, found);
+                } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        for token in MACRO_TOKENS {
+                            if text.contains(token) {
+                                *found = true;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut found = false;
+    scan(&src, &mut found);
+    found
+}
+
+fn resolve_cargo_target_dir(dir: &Path) -> Option<String> {
+    let result = run_capture("cargo", &["metadata".to_string(), "--no-deps".to_string(), "--format-version".to_string(), "1".to_string()], dir).ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&result.stdout).ok()?;
+    value.get("target_directory").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+// The workspace root that owns this crate, if any. Workspace members must be
+// built with `cargo ... -p <package>` from this root, not from the member dir.
+fn cargo_workspace_root(dir: &Path) -> Option<String> {
+    let result = run_capture("cargo", &["metadata".to_string(), "--no-deps".to_string(), "--format-version".to_string(), "1".to_string()], dir).ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&result.stdout).ok()?;
+    value.get("workspace_root").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn is_shell_ident(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn parse_env_line(line: &str) -> Option<(String, String)> {    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    let mut value = value.trim().to_string();
+    if let Some(stripped) = value.strip_prefix('"') {
+        value = stripped.strip_suffix('"').map(|s| s.to_string()).unwrap_or_else(|| stripped.to_string());
+    } else if let Some(stripped) = value.strip_prefix('\'') {
+        value = stripped.strip_suffix('\'').map(|s| s.to_string()).unwrap_or_else(|| stripped.to_string());
+    }
+    Some((key, value))
+}
+
+fn project_path_segment(value: &str) -> String {
+    value.replace(' ', "%20")
+}
+
+fn agent_client_get(url: &str, api_key: &str) -> Result<String, String> {
+    let response = match ureq::get(url).set("Authorization", &format!("Bearer {api_key}")).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(e) => return Err(format!("agent request failed: {e}")),
+    };
+    let status = response.status();
+    let text = response.into_string().map_err(|e| e.to_string())?;
+    if (200..300).contains(&status) {
+        Ok(text)
+    } else {
+        Err(format!("agent {status}: {text}"))
+    }
+}
+
+fn agent_client_post(url: &str, api_key: &str, body: &[u8]) -> Result<String, String> {
+    // Retry the payload upload — large payloads over lossy links (tailnet,
+    // flaky dev machines) can drop mid-stream. Up to 6 attempts with backoff.
+    let mut last_err = String::new();
+    for attempt in 1..=6 {
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(3600)).build();
+        let response = match agent
+            .post(url)
+            .set("Authorization", &format!("Bearer {api_key}"))
+            .set("Content-Type", "application/gzip")
+            .send_bytes(body)
+        {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(e) => {
+                last_err = format!("agent request failed: {e}");
+                if attempt < 6 {
+                    print_step(&format!("payload upload attempt {attempt} failed ({e}); retrying..."));
+                    std::thread::sleep(std::time::Duration::from_secs(attempt as u64 * 3));
+                }
+                continue;
+            }
+        };
+        let status = response.status();
+        let text = response.into_string().map_err(|e| e.to_string())?;
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        last_err = format!("agent {status}: {text}");
+        break;
+    }
+    Err(last_err)
+}
+
+fn rustup_target_installed(target: &str) -> bool {
+    match run_capture("rustup", &["target".to_string(), "list".to_string(), "--installed".to_string()], &util::current_dir()) {
+        Ok(result) => result.stdout.lines().any(|line| line.trim() == target),
+        Err(_) => false,
+    }
+}
+
+fn ensure_pinned_zig() -> Result<PathBuf, String> {
+    const ZIG_VERSION: &str = "0.13.0";
+    let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "x86_64") => "macos-x86_64".to_string(),
+        ("macos", "aarch64") => "macos-aarch64".to_string(),
+        ("linux", "x86_64") => "linux-x86_64".to_string(),
+        ("linux", "aarch64") => "linux-aarch64".to_string(),
+        (os, arch) => return Err(format!("zig cross toolchain unsupported on {os}/{arch}")),
+    };
+    let cache = Path::new(&util::home_dir()).join(".cache").join("eco").join("zig");
+    let install_dir = cache.join(format!("zig-{triple}-{ZIG_VERSION}"));
+    if install_dir.join("zig").is_file() {
+        return Ok(install_dir);
+    }
+    let tarball = format!("zig-{triple}-{ZIG_VERSION}.tar.xz");
+    print_step(&format!("Downloading pinned zig {ZIG_VERSION} ({tarball})"));
+    let _ = std::fs::create_dir_all(&cache);
+    let target_path = cache.join(&tarball);
+    let url = format!("https://ziglang.org/download/{ZIG_VERSION}/{tarball}");
+    run_command("curl", &["-fsSL".to_string(), url, "-o".to_string(), target_path.display().to_string()], &util::current_dir())?;
+    run_command("tar", &["xf".to_string(), target_path.display().to_string(), "-C".to_string(), cache.display().to_string()], &util::current_dir())?;
+    let _ = std::fs::remove_file(&target_path);
+    if !install_dir.join("zig").is_file() {
+        return Err(format!("zig extraction did not produce {}", install_dir.display()));
+    }
+    Ok(install_dir)
+}
+
+// Provisions the local cross-compile toolchain the same way build-release.sh
+// does for the eco binary itself: rustup target + pinned zig + cargo-zigbuild.
+// Returns the zig bin dir when a pinned copy was installed (else None when a
+// system `zig` is already on PATH).
+fn ensure_cross_toolchain() -> Result<Option<PathBuf>, String> {
+    if !rustup_target_installed("x86_64-unknown-linux-musl") {
+        print_step("Installing rustup target x86_64-unknown-linux-musl");
+        run_command("rustup", &["target".to_string(), "add".to_string(), "x86_64-unknown-linux-musl".to_string()], &util::current_dir())?;
+    }
+    if !util::command_on_path("cargo-zigbuild") {
+        print_step("Installing cargo-zigbuild (pinned)");
+        run_command("cargo", &["install".to_string(), "cargo-zigbuild".to_string(), "--locked".to_string()], &util::current_dir())?;
+    }
+    if util::command_on_path("zig") {
+        return Ok(None);
+    }
+    let zig_dir = ensure_pinned_zig()?;
+    Ok(Some(zig_dir))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local Linux builder (eco-builder VM) — where Node/Rust artifacts are built so
+// production CTs never compile anything. Default driver is Multipass
+// (`multipass exec <ECO_BUILDER>`); override with ECO_BUILDER_CMD on machines
+// where Multipass is unavailable (M1: `limactl shell <name> --`, etc.).
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn builder_name() -> String {
+    util::env_var_or("ECO_BUILDER", "eco-builder")
+}
+
+// Build node artifacts directly on the dev machine (no VM) when the user sets
+// ECO_BUILDER=host, or when no VM driver is available. Correct for node builds
+// because the artifact (dist / JS bundle / Bun binary) is platform-agnostic —
+// the CT installs its own linux-x64 runtime deps (or runs the Bun binary).
+fn builder_is_host() -> bool {
+    util::env_var_or("ECO_BUILDER", "") == "host"
+}
+
+// Where node builds land: the VM (/home/ubuntu/build) or the host cache.
+fn builder_build_root() -> String {
+    if builder_is_host() {
+        format!("{}/.cache/eco/build", util::home_dir())
+    } else {
+        "/home/ubuntu/build".to_string()
+    }
+}
+
+fn builder_cmd() -> Vec<String> {
+    let cmd = util::env_var_or("ECO_BUILDER_CMD", "");
+    if !cmd.is_empty() {
+        return cmd.split_whitespace().map(|s| s.to_string()).collect();
+    }
+    vec!["multipass".to_string(), "exec".to_string(), builder_name(), "--".to_string()]
+}
+
+fn builder_exec(script: &str) -> Result<util::Captured, String> {
+    if builder_is_host() {
+        return run_capture("bash", &["-c".to_string(), script.to_string()], &util::current_dir());
+    }
+    let mut args = builder_cmd();
+    // Non-login shell: `bash -lc` (login) sources ~/.profile/~.bashrc, which
+    // makes `set -e; exit 0` report exit 1 on this Ubuntu image — corrupting
+    // every builder result. `bash -c` avoids the profile interference.
+    args.extend(["bash".to_string(), "-c".to_string(), script.to_string()]);
+    run_capture(&args[0], &args[1..], &util::current_dir())
+}
+
+fn builder_exec_ok(script: &str) -> Result<(), String> {
+    let result = builder_exec(script)?;
+    if result.code != 0 {
+        return Err(format!("builder command failed ({}): {}", result.code, result.stderr.trim()));
+    }
+    Ok(())
+}
+
+fn builder_available() -> bool {
+    if builder_is_host() {
+        return true;
+    }
+    let mut args = vec!["info".to_string(), builder_name()];
+    run_capture("multipass", &args, &util::current_dir()).map(|c| c.code == 0).unwrap_or(false)
+}
+
+fn skip_build_sync(name: &str) -> bool {
+    ["node_modules", "target", ".git", ".env"].contains(&name)
+}
+
+// Syncs a local tree into the build location (VM or host cache).
+fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
+    if builder_is_host() {
+        std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+        return copy_tree_excluding(local_dir, Path::new(dest), skip_build_sync);
+    }
+    let tar_path = std::env::temp_dir().join(format!("eco-builder-sync-{}.tar.gz", std::process::id()));
+    let _ = std::fs::remove_file(&tar_path);
+    run_command(
+        "tar",
+        &[
+            "czf".to_string(),
+            tar_path.display().to_string(),
+            "--exclude".to_string(),
+            "node_modules".to_string(),
+            "--exclude".to_string(),
+            "target".to_string(),
+            "--exclude".to_string(),
+            ".git".to_string(),
+            "--exclude".to_string(),
+            ".env".to_string(),
+            "-C".to_string(),
+            local_dir.display().to_string(),
+            ".".to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+    let remote_tar = format!("/tmp/eco-builder-sync-{}.tar.gz", std::process::id());
+    let mut transfer_args = vec!["transfer".to_string(), tar_path.display().to_string(), format!("{}:{}", builder_name(), remote_tar)];
+    run_command("multipass", &transfer_args, &util::current_dir())?;
+    builder_exec_ok(&format!("mkdir -p {} && tar xzf {} -C {}", shell_single_quote(dest), remote_tar, shell_single_quote(dest)))?;
+    let _ = std::fs::remove_file(&tar_path);
+    let _ = transfer_args;
+    Ok(())
+}
+
+// Copies the built output back from the build location (VM or host cache) into
+// a local artifacts/<service> dir, and Bun-compiles SSR node apps into a
+// single linux-x64 binary when the build produced a server entry.
+fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
+    std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
+    let subdirs = ["dist", "build", ".next", "output"];
+    let mut included: Vec<String> = Vec::new();
+    for sub in subdirs {
+        let path = Path::new(build_dir).join(sub);
+        let present = if builder_is_host() {
+            path.is_dir()
+        } else {
+            let c = builder_exec(&format!("test -d {} && echo yes || echo no", shell_single_quote(&path.display().to_string()))).ok();
+            c.map(|c| c.stdout.trim() == "yes").unwrap_or(false)
+        };
+        if present {
+            included.push(sub.to_string());
+        }
+    }
+    if included.is_empty() {
+        return Err(format!("builder produced no dist/build/.next/output under {build_dir}"));
+    }
+    if builder_is_host() {
+        for sub in &included {
+            copy_tree_excluding(&Path::new(build_dir).join(sub), &artifact_dir.join(sub), skip_none)?;
+        }
+    } else {
+        let remote_tar = format!("/tmp/eco-builder-artifact-{}.tar.gz", std::process::id());
+        builder_exec_ok(&format!(
+            "cd {} && tar czf {} {}",
+            shell_single_quote(build_dir),
+            remote_tar,
+            included.join(" ")
+        ))?;
+        let mut pull_args = vec!["transfer".to_string(), format!("{}:{}", builder_name(), remote_tar), "/tmp/eco-builder-artifact.tar.gz".to_string()];
+        run_command("multipass", &pull_args, &util::current_dir())?;
+        run_command("tar", &["xzf".to_string(), "/tmp/eco-builder-artifact.tar.gz".to_string(), "-C".to_string(), artifact_dir.display().to_string()], &util::current_dir())?;
+        builder_exec(&format!("rm -f {}", remote_tar))?;
+        let _ = pull_args;
+    }
+    // Bun-compile SSR node apps (host builder mode) into a single linux-x64
+    // binary so the CT needs no node_modules. The build output's server entry
+    // imports runtime deps from node_modules, so the compile runs where npm ci
+    // ran (the build dir), not in the copied artifact.
+    if builder_is_host() && util::command_on_path("bun") {
+        let server_entry = ["build/index.js", "build/server.js", "build/index.mjs", "build/index.cjs"]
+            .iter()
+            .map(|p| Path::new(build_dir).join(p))
+            .find(|p| p.is_file());
+        if let Some(entry) = server_entry {
+            let out = artifact_dir.join(service_name);
+            print_step(&format!("Bun-compiling {} (SSR node app) -> single linux-x64 binary", service_name));
+            // Entry path relative to the build dir so node_modules resolve.
+            let rel = entry.strip_prefix(Path::new(build_dir)).map(|p| p.display().to_string()).unwrap_or_else(|_| entry.display().to_string());
+            run_command(
+                "bun",
+                &[
+                    "build".to_string(),
+                    "--compile".to_string(),
+                    "--target=bun-linux-x64".to_string(),
+                    rel,
+                    "--outfile".to_string(),
+                    out.display().to_string(),
+                ],
+                Path::new(build_dir),
+            )?;
+            std::fs::write(artifact_dir.join(".eco-bun"), service_name).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_frontend_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if path.is_dir() {
+            if ["target", "node_modules", ".git", ".next", "dist", "build", ".cache", ".eco"].contains(&name.as_str()) {
+                continue;
+            }
+            collect_frontend_inputs(&path, out)?;
+        } else {
+            if [".env", ".env.local"].contains(&name.as_str()) || name.ends_with(".log") {
+                continue;
+            }
+            out.push(path.display().to_string());
+        }
+    }
+    Ok(())
+}
+
+fn compute_frontend_input_hash(service_dir: &Path) -> Result<String, String> {
+    let mut inputs: Vec<String> = Vec::new();
+    collect_frontend_inputs(service_dir, &mut inputs)?;
+    for manifest in ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"] {
+        let path = service_dir.join(manifest);
+        if path.is_file() {
+            inputs.push(path.display().to_string());
+        }
+    }
+    inputs.sort();
+    let mut combined = String::new();
+    for path in &inputs {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+        let digest = sha2::Sha256::digest(&bytes);
+        combined.push_str(&format!("{}  {path}\n", crate::registry::hex_encode(&digest)));
+    }
+    Ok(if combined.is_empty() {
+        String::new()
+    } else {
+        format!("{:x}", sha2::Sha256::digest(combined.as_bytes()))
+    })
+}
+
+pub fn run_up_remote(args: &[String]) -> Result<(), String> {
+    let (options, positionals) = parse_options(args);
+    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let cwd = util::current_dir();
+    let deployment = load_project_deployment(&input, &cwd)?;
+    let api_url = util::env_var_or("ECO_API_URL", "");
+    if api_url.is_empty() {
+        return Err(
+            "eco up --remote requires ECO_API_URL pointing at the eco serve agent on the Proxmox host (e.g. http://host:8790).".to_string(),
+        );
+    }
+    let api_key = util::env_var_or("ECO_API_KEY", "");
+    if api_key.is_empty() {
+        return Err("eco up --remote requires ECO_API_KEY (generate one on the host with `eco serve gen-key --write`).".to_string());
+    }
+    let base = api_url.trim_end_matches('/').to_string();
+    let staging = options.get("staging").map(|v| v == "true").unwrap_or(false);
+    let staging_config = ecompose::parse_staging(&deployment.content);
+    if staging && staging_config.get("ct").map(|s| s.is_empty()).unwrap_or(true) {
+        return Err(format!(
+            "--staging requested for {}, but ecompose.yml has no staging.ct declared. Add a staging: block (staging.ct: 1000).",
+            deployment.project
+        ));
+    }
+    let deploy_query = if staging { "?staging=1" } else { "" };
+    let estate_root = deployment
+        .project_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| deployment.project_dir.clone());
+    let project_dir_str = deployment.project_dir.display().to_string();
+
+    // Pair each declared Rust service with its local crate directory and its
+    // CT-relative path (where the binary and .eco-rust-hash live on the CT).
+    let mut rust_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
+    for service in deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+    {
+        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let candidates = [estate_root.join(&rel), deployment.project_dir.join(&rel)];
+        let Some(dir) = candidates.iter().find(|c| c.join("Cargo.toml").is_file()) else {
+            return Err(format!(
+                "Cannot find local crate for Rust service {} (looked in {} and {})",
+                service.name,
+                candidates[0].display(),
+                candidates[1].display()
+            ));
+        };
+        rust_targets.push((service.clone(), rel, dir.clone()));
+    }
+    if rust_targets.is_empty() {
+        // Not necessarily an error any more: an estate may ship only Node
+        // frontends (built on the local builder) with no Rust services.
+        print_step("no Rust services to cross-compile (continuing with Node/other artifacts)");
+    }
+
+    // Node/frontend services: built on the local Linux builder VM (so npm
+    // native modules come out linux-x64 and match the production CTs), and
+    // the built dist ships to the CT so it never runs `npm run build`.
+    let mut frontend_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
+    for service in deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")))
+    {
+        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let candidates = [estate_root.join(&rel), deployment.project_dir.join(&rel)];
+        let Some(dir) = candidates.iter().find(|c| c.join("package.json").is_file()) else {
+            return Err(format!(
+                "Cannot find local package.json for Node service {} (looked in {} and {})",
+                service.name,
+                candidates[0].display(),
+                candidates[1].display()
+            ));
+        };
+        frontend_targets.push((service.clone(), rel, dir.clone()));
+    }
+    if rust_targets.is_empty() && frontend_targets.is_empty() {
+        return Err("eco up --remote found no Rust or Node services in ecompose.yml to build and ship.".to_string());
+    }
+
+    if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
+        print_step(&format!("remote deploy plan for {}{} (dry-run)", deployment.project, if staging { " (staging)" } else { "" }));
+        if staging {
+            print_step(&format!("target CT: {} (staging footprint)", staging_config.get("ct").cloned().unwrap_or_default()));
+        }
+        print_step(&format!("agent: {base}"));
+        print_step("cross-toolchain: x86_64-unknown-linux-musl via cargo-zigbuild");
+        for (service, _, dir) in &rust_targets {
+            print_step(&format!("cross-compile {} from {} and ship binary", service.name, dir.display()));
+        }
+        for (service, _, dir) in &frontend_targets {
+            print_step(&format!(
+                "build {} on local builder ({}): npm ci + npm run build, ship dist",
+                service.name,
+                builder_name()
+            ));
+            print_step(&format!("  local source: {}", dir.display()));
+        }
+        return Ok(());
+    }
+
+    let zig_dir = ensure_cross_toolchain()?;
+    let mut build_env: Vec<(String, String)> = vec![("SQLX_OFFLINE".to_string(), "true".to_string())];
+    if let Some(zig_dir) = &zig_dir {
+        let path = std::env::var("PATH").unwrap_or_default();
+        build_env.push(("PATH".to_string(), format!("{}:{path}", zig_dir.display())));
+    }
+
+    // Only crates that use the compile-time sqlx macros (query!/query_as!/...)
+    // need committed .sqlx/ offline metadata; runtime sqlx::query(&str) API
+    // builds fine offline. Refuse only when macros are present and metadata is
+    // missing, so estates that never use the macros (e.g. the getecosphere
+    // platform) are not blocked.
+    for (service, _, dir) in &rust_targets {
+        if crate_uses_sqlx_query_macros(dir) && !dir.join(".sqlx").is_dir() {
+            return Err(format!(
+                "{} uses sqlx::query!/query_as! macros but has no committed .sqlx/ offline metadata in {}. Run `cargo sqlx prepare` once against the estate database and commit the .sqlx/ directory so remote builds can use SQLX_OFFLINE=true.",
+                service.name,
+                dir.display()
+            ));
+        }
+    }
+
+    // Best-effort: pull each service's generated .env from the CT so the local
+    // compile sees the same values as production (build.rs inputs, feature
+    // flags, PUBLIC_* build-time vars for frontends). The CT .env is generated
+    // state on the CT and never leaves the host.
+    for (service, _, dir) in rust_targets.iter().chain(frontend_targets.iter()) {
+        let url = format!(
+            "{base}/v1/estates/{}/services/{}/env{deploy_query}",
+            project_path_segment(&deployment.project),
+            project_path_segment(&service.name)
+        );
+        let mut env_text = match agent_client_get(&url, &api_key) {
+            Ok(t) => Some(t),
+            Err(_) => None,
+        };
+        // First staging deploy: the staging service has no .env yet (404), so
+        // the frontend build would fail on required PUBLIC_* vars. Fall back
+        // to the production .env for the same service so the artifact builds;
+        // the gateway still serves the staging hostname.
+        if env_text.is_none() && staging {
+            let prod_url = format!(
+                "{base}/v1/estates/{}/services/{}/env",
+                project_path_segment(&deployment.project),
+                project_path_segment(&service.name)
+            );
+            if let Ok(t) = agent_client_get(&prod_url, &api_key) {
+                env_text = Some(t);
+                print_step(&format!("Staging has no .env for {} yet — using production .env for the build", service.name));
+            }
+        }
+        if let Some(text) = env_text {
+            for line in text.lines() {
+                if let Some((key, value)) = parse_env_line(line) {
+                    if !build_env.iter().any(|(existing, _)| existing == &key) {
+                        build_env.push((key, value));
+                    }
+                }
+            }
+            print_step(&format!("Using CT .env for {} build environment", service.name));
+        } else {
+            print_step(&format!("No CT .env for {} yet — building with SQLX_OFFLINE only", service.name));
+        }
+        // Frontends: also export every key the frontend declares in its own
+        // .env.example, so $env/static/public always resolves the exports the
+        // source imports (e.g. a freshly renamed PUBLIC_STORAGE_URL) even on a
+        // first deploy where the CT .env was generated from an older example.
+        // Empty values fall back to the code's defaults; CT-provided values win.
+        let is_frontend = frontend_targets.iter().any(|(s, _, _)| s.name == service.name);
+        if is_frontend {
+            let example_path = dir.join(".env.example");
+            if let Ok(text) = std::fs::read_to_string(&example_path) {
+                for line in text.lines() {
+                    if let Some((key, value)) = parse_env_line(line) {
+                        if !build_env.iter().any(|(existing, _)| existing == &key) {
+                            build_env.push((key, value));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Cross-compile each service and collect artifacts + source hashes.
+    let mut artifacts: Vec<(String, PathBuf)> = Vec::new();
+    let mut hash_lines: Vec<String> = Vec::new();
+    for (service, rel, dir) in &rust_targets {
+        let cargo_text = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|e| format!("read {}: {e}", dir.join("Cargo.toml").display()))?;
+        let Some(package) = cargo_package_name(&cargo_text) else {
+            print_step(&format!("Skipping {}: no [package] binary name", service.name));
+            continue;
+        };
+        print_step(&format!("Cross-compiling {} ({package}) for x86_64-unknown-linux-musl", service.name));
+        // Workspace members cannot be built from the member dir alone ("current
+        // package believes it's in a workspace when it's not"). Detect the
+        // workspace root via cargo metadata and build with `-p <package>` from
+        // there; standalone crates build from their own dir as before.
+        let (build_cwd, build_args) = match cargo_workspace_root(dir) {
+            Some(root) if PathBuf::from(&root) != *dir => {
+                let args: Vec<String> = ["zigbuild", "--release", "-p", &package, "--target", "x86_64-unknown-linux-musl"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                (PathBuf::from(&root), args)
+            }
+            _ => {
+                let args: Vec<String> = ["zigbuild", "--release", "--target", "x86_64-unknown-linux-musl"].iter().map(|s| s.to_string()).collect();
+                (dir.clone(), args)
+            }
+        };
+        run_command_env("cargo", &build_args, &build_cwd, &build_env)?;
+        // Cargo workspaces write artifacts to the workspace target directory
+        // (not the member's own target/), so resolve the real target dir the
+        // same way configure.sh does, then fall back to the member-local path.
+        let mut binary = dir
+            .join("target")
+            .join("x86_64-unknown-linux-musl")
+            .join("release")
+            .join(&package);
+        if let Some(target_dir) = resolve_cargo_target_dir(dir) {
+            let workspace_binary = Path::new(&target_dir).join("x86_64-unknown-linux-musl").join("release").join(&package);
+            if workspace_binary.is_file() {
+                binary = workspace_binary;
+            }
+        }
+        if !binary.is_file() {
+            return Err(format!("cross-compiled binary not found: {}", binary.display()));
+        }
+        artifacts.push((package.clone(), binary));
+        let hash = compute_rust_input_hash(dir)?;
+        hash_lines.push(format!("{rel} {hash}"));
+    }
+    if artifacts.is_empty() && frontend_targets.is_empty() {
+        return Err("no Rust binaries or frontend dist were produced; aborting remote deploy.".to_string());
+    }
+
+    // Build each Node/frontend service on the local Linux builder VM and
+    // collect the built dist (plus a frontend source hash for the CT-side
+    // skip). npm native modules are linux-x64 because the builder is x86_64.
+    let mut frontend_artifacts: Vec<(String, PathBuf)> = Vec::new();
+    let mut frontend_hash_lines: Vec<String> = Vec::new();
+    for (service, rel, dir) in &frontend_targets {
+        if !builder_available() {
+            return Err(format!(
+                "{} is a Node service but no local builder is reachable. Provision the eco-builder VM (see docs/guide/dev-toolchain-free-cts.md) or set ECO_BUILDER.",
+                service.name
+            ));
+        }
+        let hash = compute_frontend_input_hash(dir)?;
+        frontend_hash_lines.push(format!("{rel} {hash}"));
+        let build_dir = format!("{}/{}", builder_build_root(), service.name);
+        let build_loc = if builder_is_host() { "on this machine (host builder)".to_string() } else { format!("on local builder ({})", builder_name()) };
+        print_step(&format!("Building {} {}: npm ci + npm run build", service.name, build_loc));
+        sync_dir_to_builder(dir, &build_dir)?;
+        let mut exports = String::from("set -euo pipefail\n");
+        for (key, value) in &build_env {
+            // Only shell-valid identifier keys can be exported; keys like
+            // `cors.allowed-origins` (dots) are not usable in bash.
+            if is_shell_ident(key) {
+                exports.push_str(&format!("export {}={}\n", key, shell_single_quote(value)));
+            }
+        }
+        // Hash-skip: if this frontend's source hash matches the last built
+        // hash, reuse the existing output instead of npm ci + build again
+        // (mirrors .eco-rust-hash).
+        let script = format!(
+            "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash",
+            shell_single_quote(&build_dir)
+        );
+        builder_exec_ok(&script)?;
+        let artifact_dir = std::env::temp_dir().join(format!("eco-frontend-artifact-{}-{}", service.name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&artifact_dir);
+        copy_frontend_artifact_from_builder(&build_dir, &artifact_dir, &service.name)?;
+        frontend_artifacts.push((service.name.clone(), artifact_dir));
+        print_step(&format!("Built {} artifact -> ship", service.name));
+    }
+
+    // Build the deploy payload: source (project + domains), artifacts, hashes.
+    let payload_dir = std::env::temp_dir().join(format!("eco-remote-payload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&payload_dir);
+    std::fs::create_dir_all(&payload_dir).map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
+        let source_dir = payload_dir.join("source");
+        copy_tree_excluding(&deployment.project_dir, &source_dir, should_skip_remote_source)?;
+        let domains: Vec<String> = deployment
+            .services
+            .iter()
+            .filter(|s| !s.path.is_empty())
+            .filter_map(|s| s.path.split('/').next().map(|p| p.to_string()))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let project_base = deployment.project_dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        for domain in domains {
+            if domain == project_base {
+                continue;
+            }
+            let domain_dir = estate_root.join(&domain);
+            if domain_dir.is_dir() {
+                copy_tree_excluding(&domain_dir, &source_dir.join(&domain), should_skip_remote_source)?;
+            }
+        }
+        let artifacts_dir = payload_dir.join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).map_err(|e| e.to_string())?;
+        for (package, binary) in &artifacts {
+            std::fs::copy(binary, artifacts_dir.join(package)).map_err(|e| format!("copy {}: {e}", binary.display()))?;
+        }
+        for (service_name, artifact_dir) in &frontend_artifacts {
+            let dest = artifacts_dir.join(service_name);
+            std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+            copy_tree_excluding(artifact_dir, &dest, skip_none)?;
+        }
+        std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
+        std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
+        let tar_path = payload_dir.join("payload.tar.gz");
+        run_command(
+            "tar",
+            &[
+                "czf".to_string(),
+                tar_path.display().to_string(),
+                "-C".to_string(),
+                payload_dir.display().to_string(),
+                "source".to_string(),
+                "artifacts".to_string(),
+                "rust-hashes".to_string(),
+                "frontend-hashes".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
+        let bytes = std::fs::read(&tar_path).map_err(|e| format!("read payload: {e}"))?;
+        let project_segment = project_path_segment(&deployment.project);
+        // When ECO_SSH is set (e.g. root@100.85.173.92), ship the payload over
+        // scp — SSH sustains large transfers on lossy links where the HTTP POST
+        // drops — then tell the agent to deploy the uploaded file.
+        let ssh = util::env_var_or("ECO_SSH", "");
+        if !ssh.is_empty() {
+            print_step(&format!("Shipping remote deploy payload for {} via scp to {ssh}", deployment.project));
+            let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
+            run_command("scp", &["-o".to_string(), "StrictHostKeyChecking=no".to_string(), tar_path.display().to_string(), format!("{ssh}:{remote_path}")], &util::current_dir())?;
+            let deploy_file_url = format!("{base}/v1/estates/{project_segment}/deploy-file{deploy_query}");
+            let summary = agent_client_post(&deploy_file_url, &api_key, b"")?;
+            util::println_stdout(&summary);
+        } else {
+            print_step(&format!("Shipping remote deploy payload for {} to {base}", deployment.project));
+            let summary = agent_client_post(
+                &format!("{base}/v1/estates/{project_segment}/deploy{deploy_query}"),
+                &api_key,
+                &bytes,
+            )?;
+            util::println_stdout(&summary);
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&payload_dir);
+    result
+}
+
+fn install_remote_rust_binaries(ctid: &str, deployment: &ProjectDeployment, artifacts_dir: &str, hashes_file: &str, estate_core: &str) -> Result<(), String> {
+    let mut hashes: HashMap<String, String> = HashMap::new();
+    if !hashes_file.is_empty() {
+        if let Ok(content) = std::fs::read_to_string(hashes_file) {
+            for line in content.lines() {
+                let mut parts = line.split_whitespace();
+                if let (Some(path), Some(hash)) = (parts.next(), parts.next()) {
+                    hashes.insert(path.to_string(), hash.to_string());
+                }
+            }
+        }
+    }
+    let rust_services: Vec<&ecompose::Service> = deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+        .collect();
+    let project_dir = deployment.project_dir.display().to_string();
+    for service in rust_services {
+        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir, estate_core);
+        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let host_manifest = Path::new(&deployment.project_dir).join(&rel).join("Cargo.toml");
+        let Some(cargo_text) = std::fs::read_to_string(&host_manifest).ok() else {
+            continue;
+        };
+        let Some(package) = cargo_package_name(&cargo_text) else {
+            continue;
+        };
+        let artifact = Path::new(artifacts_dir).join(&package);
+        if !artifact.is_file() {
+            return Err(format!("Remote artifact missing for {} (expected {})", service.name, artifact.display()));
+        }
+        let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &project_dir, estate_core);
+        // configure.sh resolves the binary from the cargo target dir, the
+        // project-root target/release, or the service target/release. Install
+        // to the last two so every layout finds the shipped artifact.
+        for target_dir in [format!("{service_dir}/target/release"), format!("{}/target/release", deployment.ct_project_root)] {
+            pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
+            run_command(
+                "pct",
+                &["push".to_string(), ctid.to_string(), artifact.display().to_string(), format!("{target_dir}/{package}.new")],
+                &util::current_dir(),
+            )?;
+            pct_exec(
+                ctid,
+                &format!(
+                    "mv -f {} {} && chmod 755 {}",
+                    shell_single_quote(&format!("{target_dir}/{package}.new")),
+                    shell_single_quote(&format!("{target_dir}/{package}")),
+                    shell_single_quote(&format!("{target_dir}/{package}"))
+                ),
+            )?;
+        }
+        if let Some(hash) = hashes.get(&rel) {
+            push_text_file_to_ct(ctid, &format!("{service_dir}/.eco-rust-hash"), hash, "eco-rust-hash")?;
+        }
+        print_step(&format!("[CT {ctid}] Installed remote Rust binary: {}", service.name));
+    }
+    Ok(())
+}
+
+// Installs the frontend dists that `eco up --remote` built on the local
+// builder into the CT, and marks each service `.eco-frontend-built` so
+// configure.sh skips `npm ci` + `npm run build` on the CT and serves the
+// shipped artifact. Returns the service names that got a shipped dist.
+fn install_remote_frontend_artifacts(ctid: &str, deployment: &ProjectDeployment, artifacts_dir: &str, hashes_file: &str, estate_core: &str) -> Result<Vec<String>, String> {
+    let mut bun_compiled = Vec::new();
+    if artifacts_dir.is_empty() || !Path::new(artifacts_dir).is_dir() {
+        return Ok(bun_compiled);
+    }
+    let mut hashes: HashMap<String, String> = HashMap::new();
+    if !hashes_file.is_empty() {
+        if let Ok(content) = std::fs::read_to_string(hashes_file) {
+            for line in content.lines() {
+                let mut parts = line.split_whitespace();
+                if let (Some(path), Some(hash)) = (parts.next(), parts.next()) {
+                    hashes.insert(path.to_string(), hash.to_string());
+                }
+            }
+        }
+    }
+    let project_dir = deployment.project_dir.display().to_string();
+    for entry in std::fs::read_dir(artifacts_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let fname = entry.file_name().to_string_lossy().to_string();
+        // A directory under artifacts/ is a shipped frontend (service name);
+        // flat files are the Rust binaries handled by install_remote_rust_binaries.
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(service) = deployment.services.iter().find(|s| s.name == fname) else {
+            continue;
+        };
+        let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &project_dir, estate_core);
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&service_dir)))?;
+        // Ship the built dist tree into the CT service dir.
+        let tar_path = std::env::temp_dir().join(format!("eco-frontend-{}-{}.tar.gz", service.name, std::process::id()));
+        let _ = std::fs::remove_file(&tar_path);
+        run_command(
+            "tar",
+            &[
+                "czf".to_string(),
+                tar_path.display().to_string(),
+                "-C".to_string(),
+                entry.path().display().to_string(),
+                ".".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
+        let remote_tar = format!("/tmp/eco-frontend-{}.tar.gz", service.name);
+        run_command(
+            "pct",
+            &["push".to_string(), ctid.to_string(), tar_path.display().to_string(), remote_tar.clone()],
+            &util::current_dir(),
+        )?;
+        pct_exec(ctid, &format!("tar xzf {} -C {}", shell_single_quote(&remote_tar), shell_single_quote(&service_dir)))?;
+        pct_exec(ctid, &format!("rm -f {}", shell_single_quote(&remote_tar)))?;
+        let _ = std::fs::remove_file(&tar_path);
+        // Marker + hash so configure.sh skips npm install/build and serves dist.
+        let is_bun = entry.path().join(".eco-bun").is_file();
+        if is_bun {
+            // Bun-compiled node backend: the artifact holds <service> (the
+            // linux-x64 single binary) + its assets. Install a marker so
+            // configure.sh generates a unit that runs the binary directly.
+            pct_exec(ctid, &format!("chmod 755 {}", shell_single_quote(&format!("{service_dir}/{}", service.name))))?;
+            pct_exec(ctid, &format!("touch {}", shell_single_quote(&format!("{service_dir}/.eco-bun"))))?;
+            push_text_file_to_ct(ctid, &format!("{service_dir}/.eco-bun-name"), &service.name, "eco-bun-name")?;
+            bun_compiled.push(service.name.clone());
+            print_step(&format!("[CT {ctid}] Installed Bun-compiled single binary: {}", service.name));
+        } else {
+            pct_exec(ctid, &format!("touch {}", shell_single_quote(&format!("{service_dir}/.eco-frontend-built"))))?;
+            print_step(&format!("[CT {ctid}] Installed shipped frontend dist: {}", service.name));
+        }
+        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir, estate_core);
+        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        if let Some(hash) = hashes.get(&rel) {
+            push_text_file_to_ct(ctid, &format!("{service_dir}/.eco-frontend-hash"), hash, "eco-frontend-hash")?;
+        }
+    }
+    Ok(bun_compiled)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// eco serve agent handlers (run on the Proxmox host).
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn agent_list_estates() -> Vec<serde_json::Value> {
+    let root = Path::new("/opt/projects");
+    let mut estates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        let mut projects: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        projects.sort();
+        for project in projects {
+            let manifest = root.join(&project).join("ecompose.yml");
+            if !manifest.is_file() {
+                continue;
+            }
+            let mut entry = serde_json::Map::new();
+            entry.insert("project".to_string(), serde_json::Value::String(project.clone()));
+            if let Ok(content) = std::fs::read_to_string(&manifest) {
+                let ct = ecompose::parse_ct_metadata(&content);
+                if let Some(id) = ct.get("id") {
+                    entry.insert("ctid".to_string(), serde_json::Value::String(id.clone()));
+                }
+            }
+            estates.push(serde_json::Value::Object(entry));
+        }
+    }
+    estates
+}
+
+pub fn agent_read_service_env(project: &str, service_name: &str, staging: bool) -> Result<String, String> {
+    let cwd = util::current_dir();
+    let project_path = format!("/opt/projects/{project}");
+    let deployment = load_project_deployment(&project_path, &cwd)?;
+    let ctid = if staging {
+        let staging_config = ecompose::parse_staging(&deployment.content);
+        let ct = staging_config.get("ct").cloned().unwrap_or_default();
+        if ct.is_empty() {
+            return Err(format!("no staging.ct declared for {project}"));
+        }
+        ct
+    } else {
+        deployment.ctid.clone()
+    };
+    ensure_ct_running(&ctid)?;
+    let service = deployment
+        .services
+        .iter()
+        .find(|s| s.name == service_name)
+        .ok_or_else(|| format!("service not found: {service_name}"))?;
+    let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), "");
+    let env_path = format!("{service_dir}/.env");
+    let output = pct_exec_capture(
+        &ctid,
+        &format!(
+            "if [ -f {} ]; then cat {}; else printf '%%ECO_MISSING_ENV%%'; fi",
+            shell_single_quote(&env_path),
+            shell_single_quote(&env_path)
+        ),
+    )?;
+    if output.contains("%ECO_MISSING_ENV%") {
+        return Err(format!("no .env generated yet for {service_name} on CT {ctid}"));
+    }
+    Ok(output)
+}
+
+pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Result<String, String> {
+    let tmp = std::env::temp_dir().join(format!("eco-agent-deploy-{}-{}", project, std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("create temp dir: {e}"))?;
+    let tar_path = tmp.join("payload.tar.gz");
+    std::fs::write(&tar_path, tar_gz).map_err(|e| format!("write payload: {e}"))?;
+    let result = (|| -> Result<String, String> {
+        run_command(
+            "tar",
+            &["xzf".to_string(), tar_path.display().to_string(), "-C".to_string(), tmp.display().to_string()],
+            &util::current_dir(),
+        )?;
+        let source_dir = tmp.join("source");
+        if !source_dir.is_dir() {
+            return Err("payload is missing source/ — build the tarball with `eco up --remote`".to_string());
+        }
+        let artifacts_dir = tmp.join("artifacts");
+        let hashes_file = tmp.join("rust-hashes");
+        let frontend_hashes_file = tmp.join("frontend-hashes");
+        let host_project = Path::new("/opt/projects").join(project);
+        let _ = std::fs::remove_dir_all(&host_project);
+        std::fs::create_dir_all(&host_project).map_err(|e| format!("stage /opt/projects: {e}"))?;
+        copy_tree_excluding(&source_dir, &host_project, skip_none)?;
+        let cwd = util::current_dir();
+        let project_path = host_project.display().to_string();
+        let deployment = load_project_deployment(&project_path, &cwd)?;
+        let mut options = HashMap::new();
+        options.insert("remote".to_string(), "true".to_string());
+        if artifacts_dir.is_dir() {
+            options.insert("remote-artifacts".to_string(), artifacts_dir.display().to_string());
+        }
+        if hashes_file.is_file() {
+            options.insert("remote-hashes".to_string(), hashes_file.display().to_string());
+        }
+        if frontend_hashes_file.is_file() {
+            options.insert("remote-frontend-hashes".to_string(), frontend_hashes_file.display().to_string());
+        }
+        let staging_config = ecompose::parse_staging(&deployment.content);
+        let deploy_ctid = if staging {
+            staging_config.get("ct").cloned().unwrap_or_else(|| deployment.ctid.clone())
+        } else {
+            deployment.ctid.clone()
+        };
+        provision_estate(&deployment, &options, staging, &staging_config)?;
+        Ok(format!("Remote deploy of {project} completed on CT {deploy_ctid}."))
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+// Installs `lxs:` services for an estate: pulls each versioned LXS binary from
+// the registry, installs it into the CT's target/release, and writes a service
+// marker dir (start.sh + .env.example from the LXS contract) so configure.sh
+// discovers it as a normal service — port allocation, PM2, and gateway routing
+// then work unchanged.
+fn install_lxs_services(ctid: &str, deployment: &ProjectDeployment) -> Result<Vec<String>, String> {
+    let lxs_services: Vec<&ecompose::Service> = deployment.services.iter().filter(|s| !s.lxs.is_empty()).collect();
+    if lxs_services.is_empty() {
+        return Ok(Vec::new());
+    }
+    // LXS is resolved from the remote registry, not repos.json: fast-forward
+    // the local registry clone before resolving so estates install the
+    // current published versions even if nobody remembered to `git pull`.
+    crate::commands::lxs::ensure_registry_synced()?;
+    let registry = crate::commands::lxs::registry_root()?;
+    if !registry.is_dir() {
+        return Err(format!(
+            "services declare lxs: refs but the LXS registry is not available at {} (set ECO_LXS_REGISTRY)",
+            registry.display()
+        ));
+    }
+    let mut installed = Vec::new();
+    for service in lxs_services {
+        let (name, version) = crate::commands::lxs::parse_lxs_ref(&service.lxs)?;
+        let manifest = crate::commands::lxs::load_manifest(&registry.join(&name).join(&version).join("lxs.yml"))?;
+        let artifact = manifest
+            .artifacts
+            .get("linux/amd64")
+            .ok_or_else(|| format!("{name}@{version} has no linux/amd64 artifact (targets: {:?})", manifest.targets))?;
+        let src = registry.join(&name).join(&version).join(&artifact.path);
+        if !src.is_file() {
+            return Err(format!("LXS artifact missing: {}", src.display()));
+        }
+        let tmp = std::env::temp_dir().join(format!("eco-lxs-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        let local_bin = tmp.join(&name);
+        std::fs::copy(&src, &local_bin).map_err(|e| format!("copy {}: {e}", src.display()))?;
+
+        let target_dir = format!("{}/target/release", deployment.ct_project_root);
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
+        run_command(
+            "pct",
+            &["push".to_string(), ctid.to_string(), local_bin.display().to_string(), format!("{target_dir}/{name}.new")],
+            &util::current_dir(),
+        )?;
+        pct_exec(
+            ctid,
+            &format!(
+                "mv -f {} {} && chmod 755 {}",
+                shell_single_quote(&format!("{target_dir}/{name}.new")),
+                shell_single_quote(&format!("{target_dir}/{name}")),
+                shell_single_quote(&format!("{target_dir}/{name}"))
+            ),
+        )?;
+
+        let service_dir = format!("{}/{}", deployment.ct_project_root, service.name);
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&service_dir)))?;
+        let binary_path = format!("{target_dir}/{name}");
+        let start_sh = format!(
+            "#!/bin/bash\nset -a\n. \"$(dirname \"$0\")/.env\" 2>/dev/null || true\nset +a\nif [ -z \"${{SERVER_PORT:-}}\" ] && [ -n \"${{PORT:-}}\" ]; then export SERVER_PORT=\"$PORT\"; fi\nexec {}\n",
+            shell_single_quote(&binary_path)
+        );
+        push_text_file_to_ct(ctid, &format!("{service_dir}/start.sh"), &start_sh, "lxs-start")?;
+        pct_exec(ctid, &format!("chmod 755 {}", shell_single_quote(&format!("{service_dir}/start.sh"))))?;
+
+        let mut env_example = String::new();
+        for key in manifest.contract.env.required.iter().chain(manifest.contract.env.optional.iter()) {
+            let value = manifest.contract.env.defaults.get(key).cloned().unwrap_or_default();
+            env_example.push_str(&format!("{key}={value}\n"));
+        }
+        push_text_file_to_ct(ctid, &format!("{service_dir}/.env.example"), &env_example, "lxs-env-example")?;
+        // Seed .env with contract defaults (values configure.sh must preserve,
+        // e.g. S3_BUCKET) and granted-secret placeholders. Runs before
+        // configure.sh, which then adds the rest (ports, DB URIs, shared
+        // secrets) via sync_env_from_example / set_env.
+        let mut env_seed = String::new();
+        for (key, value) in &manifest.contract.env.defaults {
+            env_seed.push_str(&format!("{key}={value}\n"));
+        }
+        for key in &service.grants_secrets {
+            if !manifest.contract.env.defaults.contains_key(key) {
+                env_seed.push_str(&format!("{key}=\n"));
+            }
+        }
+        if !env_seed.is_empty() {
+            push_text_file_to_ct(ctid, &format!("{service_dir}/.env"), &env_seed, "lxs-env")?;
+        }
+
+        // The LXS contract declares the database it needs. configure.sh's data
+        // bootstrap is driven by runtimes, which `lxs:` services no longer
+        // declare, so eco provisions the DB itself from the contract.
+        match manifest.contract.db.as_str() {
+            "mongodb@7" => provision_lxs_mongodb(ctid, &service_dir)?,
+            "postgresql@15" => provision_lxs_postgres(ctid, &service_dir, &service.name, &deployment.project)?,
+            _ => {}
+        }
+        if manifest.contract.env.required.iter().any(|k| k == "REDIS_URL") || manifest.runtime.dependencies.iter().any(|d| d == "redis") {
+            provision_lxs_redis(ctid, &service_dir)?;
+        }
+
+        print_step(&format!("[CT {ctid}] Installed LXS {}@{} as service {}", name, version, service.name));
+        installed.push(service.name.clone());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    Ok(installed)
+}
+
+// Ensures mongod runs and that configure.sh treats MONGODB_URI as managed
+// (ECO_MANAGED_MONGODB_URI=true forces it to write the estate-scoped URI).
+fn provision_lxs_mongodb(ctid: &str, service_dir: &str) -> Result<(), String> {
+    pct_exec(
+        ctid,
+        "if command -v systemctl >/dev/null 2>&1; then systemctl restart mongod 2>/dev/null || true; elif command -v service >/dev/null 2>&1; then service mongod restart 2>/dev/null || true; fi",
+    )?;
+    let example = format!("{service_dir}/.env.example");
+    pct_exec(
+        ctid,
+        &format!(
+            "sed -i '/^ECO_MANAGED_MONGODB_URI=/d' {} && echo 'ECO_MANAGED_MONGODB_URI=true' >> {}",
+            shell_single_quote(&example),
+            shell_single_quote(&example)
+        ),
+    )?;
+    Ok(())
+}
+
+// Replicates the postgres data-bootstrap for an LXS service: create the role +
+// database, grant permissions, and write DATABASE_* into the service .env.
+fn provision_lxs_postgres(ctid: &str, service_dir: &str, service_name: &str, project: &str) -> Result<(), String> {
+    let db_name = format!("{}_{}", service_name.replace('-', "_"), project);
+    let db_role = format!("{project}_user");
+    let env_file = format!("{service_dir}/.env");
+    let env_q = shell_single_quote(&env_file);
+    let db_q = shell_single_quote(&db_name);
+    let script = format!(
+        r#"set -e
+touch {env_q}
+if [[ -z "${{DATABASE_PASSWORD:-}}" ]]; then
+  db_password="$(grep -E '^DATABASE_PASSWORD=' {env_q} 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || true)"
+  if [[ -z "$db_password" ]]; then
+    echo "ERROR: DATABASE_PASSWORD not available for {service_name}; set it in the CT's ~/.bashrc" >&2
+    exit 1
+  fi
+else
+  db_password="${{DATABASE_PASSWORD}}"
+fi
+sed -i '/^DATABASE_PASSWORD=/d' {env_q}
+printf 'DATABASE_PASSWORD=%s\n' "$db_password" >> {env_q}
+runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{db_role}') THEN CREATE ROLE {db_role} WITH LOGIN; END IF; END \$\$;"
+runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c "ALTER ROLE {db_role} WITH LOGIN PASSWORD '$db_password';"
+runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname = '{db_name}'" | grep -q 1 || runuser -u postgres -- createdb -O {db_role} {db_q}
+runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {db_q} -c "GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_role};"
+runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d {db_q} -c "GRANT ALL ON SCHEMA public TO {db_role};"
+sed -i '/^DATABASE_USERNAME=/d' {env_q}
+printf 'DATABASE_USERNAME=%s\n' "{db_role}" >> {env_q}
+sed -i '/^DATABASE_URL=/d' {env_q}
+printf 'DATABASE_URL=postgresql://{db_role}:%s@127.0.0.1:5432/{db_name}\n' "$db_password" >> {env_q}
+"#
+    );
+    pct_exec(ctid, &format!("export LANG=C.UTF-8 LC_ALL=C.UTF-8 PERL_BADLANG=0\n{script}"))?;
+    Ok(())
+}
+
+// Ensures redis runs and writes the estate-local REDIS_URL for an LXS whose
+// contract requires it (chat, notifications fan-out, etc).
+fn provision_lxs_redis(ctid: &str, service_dir: &str) -> Result<(), String> {
+    pct_exec(
+        ctid,
+        "if command -v systemctl >/dev/null 2>&1; then systemctl enable redis-server >/dev/null 2>&1 || true; systemctl restart redis-server 2>/dev/null || systemctl restart redis 2>/dev/null || true; elif command -v service >/dev/null 2>&1; then service redis-server restart 2>/dev/null || true; fi",
+    )?;
+    let env_file = format!("{service_dir}/.env");
+    pct_exec(
+        ctid,
+        &format!(
+            "sed -i '/^REDIS_URL=/d' {} && echo 'REDIS_URL=redis://127.0.0.1:6379' >> {}",
+            shell_single_quote(&env_file),
+            shell_single_quote(&env_file)
+        ),
+    )?;
+    Ok(())
+}
+
+fn rand_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill(&mut bytes);
+    crate::registry::hex_encode(&bytes)
+}
+
+pub fn run_up(args: &[String]) -> Result<(), String> {
+    if args.first().map(|s| s.as_str()) == Some("dev") {
+        return run_up_dev(&args[1..]);
+    }
+    if args.iter().any(|a| a == "--remote") {
+        // Cross-compile the Rust services on this (developer) machine and ship
+        // the Linux binaries to the Proxmox host via the eco serve agent.
+        return run_up_remote(args);
+    }
+
+    if !is_on_proxmox_host() {
+        let input = args.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| ".".to_string());
+        if is_ct_estate_context(&input) {
+            return Err(
+                "This looks like a deployed estate inside a container (no 'pct' here), so 'eco up' would fall back to local dev mode and rebuild/restart the production estate as if it were a dev machine.\nRun 'eco up' from the Proxmox host (where pct is available), or trigger the estate's GitHub deploy webhook (redeploy.sh) instead."
+                    .to_string(),
+            );
+        }
+        util::println_stdout("Not on a Proxmox host (pct not found) — running in dev mode.");
+        return run_up_dev(args);
+    }
+
+    let (options, positionals) = parse_options(args);
+    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let cwd = util::current_dir();
+    let deployment = load_project_deployment(&input, &cwd)?;
+    let staging_config = ecompose::parse_staging(&deployment.content);
+
+    if options.get("staging").map(|v| v == "true").unwrap_or(false) {
+        if staging_config.get("ct").map(|s| s.is_empty()).unwrap_or(true) {
+            return Err(format!(
+                "--staging requested for {}, but ecompose.yml has no staging.ct declared. Add a staging: block (staging.ct: 1000).",
+                deployment.project
+            ));
+        }
+        return provision_estate(&deployment, &options, true, &staging_config);
+    }
+
+    provision_estate(&deployment, &options, false, &staging_config)?;
+    if staging_config.contains_key("ct") && !options.get("prod-only").map(|v| v == "true").unwrap_or(false) {
+        util::println_stdout(&format!(
+            "\n[eco up] staging block declared (ct {}) — provisioning the staging footprint.",
+            staging_config.get("ct").cloned().unwrap_or_default()
+        ));
+        provision_estate(&deployment, &options, true, &staging_config)?;
+    }
+    Ok(())
+}
+
+pub fn run_expose(args: &[String]) -> Result<(), String> {
+    let (options, positionals) = parse_options(args);
+    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let cwd = util::current_dir();
+    let deployment = load_project_deployment(&input, &cwd)?;
+
+    if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
+        let exposure_plan = expose_via_proxy_ct(true, &deployment.expose, &deployment.project, &deployment.ctid, &deployment.ct_config_path)?;
+        util::println_stdout("eco expose plan");
+        util::println_stdout(&format!("Manifest: {}", deployment.file_path));
+        util::println_stdout(&format!("Project root: {}\n", deployment.project_dir.display()));
+        for c in &exposure_plan {
+            util::println_stdout(c);
+        }
+        return Ok(());
+    }
+
+    ensure_ct_running(&deployment.ctid)?;
+    expose_via_proxy_ct(false, &deployment.expose, &deployment.project, &deployment.ctid, &deployment.ct_config_path)?;
+    Ok(())
+}
+

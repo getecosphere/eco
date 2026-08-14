@@ -1,0 +1,37 @@
+{
+  "name": "eco",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private CLI for Ecology DDD orchestration",
+  "type": "module",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "init.sh",
+    "configure.sh",
+    "provision.sh",
+    "git.sh",
+    "repos.json"
+  ],
+  "bin": {
+    "eco": "./bin/ecology-ddd.js"
+  },
+  "scripts": {
+    "start": "node ./bin/ecology-ddd.js",
+    "lint": "node ./bin/ecology-ddd.js help"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ddd",
+    "proxmox",
+    "cli",
+    "orchestration"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "sql.js": "^1.14.1"
+  }
+}

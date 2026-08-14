@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+tmp/
+
+# build toolchain + artifacts
+/.zig/
+/dist/
