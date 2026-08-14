@@ -1,18 +1,20 @@
 #!/usr/bin/env sh
 # install.sh — install the eco binary via curl.
 #
-#   curl -fsSL https://getecosphere.com/install.sh | sh
+#   curl -fsSL https://github.com/ecosphere-creator/eco/releases/latest/download/install.sh | sh
 #
-# Downloads the matching static binary for the caller's OS/arch, installs it
-# to /usr/local/bin (falling back to ~/.local/bin), and prints eco help.
+# Downloads the matching static binary for the caller's OS/arch from GitHub
+# Releases, installs it to /usr/local/bin (falling back to ~/.local/bin), and
+# prints eco help.
 #
 # Override:
-#   ECO_INSTALL_BASE     download origin (default: https://getecosphere.com)
+#   ECO_INSTALL_BASE     download origin (default: GitHub Releases latest)
+#   ECO_INSTALL_URL      full download URL (highest priority)
 #   ECO_INSTALL_VERSION  pinned version tag (default: latest)
 #   ECO_INSTALL_DIR      install directory (default: /usr/local/bin or ~/.local/bin)
 set -eu
 
-BASE_URL="${ECO_INSTALL_BASE:-https://getecosphere.com}"
+BASE_URL="${ECO_INSTALL_BASE:-https://github.com/ecosphere-creator/eco/releases/latest/download}"
 VERSION="${ECO_INSTALL_VERSION:-latest}"
 TARGET="${ECO_INSTALL_TARGET:-}"
 
@@ -63,9 +65,9 @@ mkdir -p "$INSTALL_DIR"
 DEST="$INSTALL_DIR/eco$EXE_SUFFIX"
 
 # --- download ---------------------------------------------------------------
-# URL layout: <base>/downloads/<target>/eco[.exe], or <base>/eco-<target>
-# (the estate web root layout chosen by eco; see docs/releasing.md).
-URL="${ECO_INSTALL_URL:-$BASE_URL/downloads/$TARGET/eco$EXE_SUFFIX}"
+# GitHub Releases layout: <base>/eco-<triple>[.exe] (stable asset names).
+# The legacy estate layout <base>/downloads/<target>/eco is the fallback.
+URL="${ECO_INSTALL_URL:-$BASE_URL/eco-$TARGET$EXE_SUFFIX}"
 
 printf 'eco install: fetching %s\n' "$URL"
 if command -v curl >/dev/null 2>&1; then

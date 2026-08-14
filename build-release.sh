@@ -81,7 +81,11 @@ build_target() {
   mkdir -p "$out"
   cp "$src" "$out/eco"
   [[ "$target" == *windows* ]] && mv "$out/eco" "$out/eco.exe"
-  log "dist/$target/eco ready"
+  # GitHub Releases asset with a stable name: eco-<triple>[.exe]
+  local asset_name="eco-${target}"
+  [[ "$target" == *windows* ]] && asset_name="${asset_name}.exe"
+  cp "$out/eco" "$DIST_DIR/$asset_name" 2>/dev/null || cp "$src" "$DIST_DIR/$asset_name"
+  log "dist/$target/eco ready (+ $asset_name)"
 }
 
 build_host() {
@@ -90,7 +94,8 @@ build_host() {
   local out="$DIST_DIR/$HOST_TARGET"
   mkdir -p "$out"
   cp "$RUST_DIR/target/release/eco" "$out/eco"
-  log "dist/$HOST_TARGET/eco ready"
+  cp "$RUST_DIR/target/release/eco" "$DIST_DIR/eco-${HOST_TARGET}"
+  log "dist/$HOST_TARGET/eco ready (+ eco-${HOST_TARGET})"
 }
 
 main() {
