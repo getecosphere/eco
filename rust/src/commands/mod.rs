@@ -1,3 +1,4 @@
+pub mod account;
 pub mod help;
 pub mod wrappers;
 pub mod install;

@@ -1,5 +1,12 @@
 use crate::commands;
 
+fn prepend(head: &str, rest: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(rest.len() + 1);
+    out.push(head.to_string());
+    out.extend(rest.iter().cloned());
+    out
+}
+
 pub fn run_cli(argv: &[String]) -> Result<(), String> {
     let (command, rest) = match argv.first() {
         Some(c) => (c.as_str(), &argv[1..]),
@@ -8,6 +15,10 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
 
     match command {
         "help" | "--help" | "-h" => commands::help::show_help(),
+        "signup" => commands::account::run_account(&prepend("signup", rest)),
+        "login" => commands::account::run_account(&prepend("login", rest)),
+        "logout" => commands::account::run_account(&["logout".to_string()]),
+        "whoami" => commands::account::run_account(&["whoami".to_string()]),
         "version" | "--version" | "-v" => {
             println!("eco {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -47,6 +58,16 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
                 return Err("usage: eco __bundle-configure-sh <dest>".to_string());
             }
             crate::embedded::materialize_configure_sh(&dest)
+        }
+        // internal: materialize every bundled script (configure.sh, provision.sh,
+        // init.sh, git.sh, tree.sh, install-*.sh) into a directory, so the CT
+        // runs the shipped versions even when the bundle predates this deploy.
+        "__bundle-scripts" => {
+            let dest = rest.first().cloned().unwrap_or_default();
+            if dest.is_empty() {
+                return Err("usage: eco __bundle-scripts <dir>".to_string());
+            }
+            crate::embedded::materialize_bundled_scripts(&dest)
         }
         _ => Err(format!(
             "Unknown command: {command}\n\nRun \"eco help\" for usage."

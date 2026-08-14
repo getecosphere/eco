@@ -885,6 +885,10 @@ OVERRIDE
     ffmpeg)
       apt-get update -qq && apt-get install -y -qq ffmpeg
       ;;
+    leptos)
+      # Leptos/Rust frontend — a static wasm site (trunk dist). No runtime to
+      # provision; python3 (the static server) is standard on Debian.
+      ;;
     *)
       fail "Unsupported runtime token for Linux: $token"
       ;;

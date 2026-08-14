@@ -641,7 +641,7 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let secs = now.as_secs();
     let days = secs / 86400;

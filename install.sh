@@ -81,6 +81,26 @@ fi
 
 chmod +x "$DEST" 2>/dev/null || true
 
+# --- ensure the install dir is on PATH --------------------------------------
+# If eco landed in a directory not on PATH, add it to the user's shell rc so
+# `eco` works immediately after install (no manual PATH edits).
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *)
+    RC_FILE=""
+    if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
+      RC_FILE="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+      RC_FILE="$HOME/.bashrc"
+    fi
+    if [ -n "$RC_FILE" ] && ! grep -qs "export PATH=\"\$HOME/.local/bin" "$RC_FILE"; then
+      printf '\n# added by eco installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$RC_FILE"
+      printf 'eco install: added %s to PATH in %s\n' "$INSTALL_DIR" "$RC_FILE"
+      printf '  (run `source %s` in this shell, or open a new terminal)\n' "$RC_FILE"
+    fi
+    ;;
+esac
+
 printf '\neco installed to %s\n' "$DEST"
 if "$DEST" help >/dev/null 2>&1; then
   "$DEST" help | sed -n '1,3p'

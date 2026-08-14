@@ -1899,6 +1899,11 @@ _scan_dir_rec() {
     if [[ -f "$scan_dir/pom.xml" ]]; then
       svc_name+=("$rel_name"); svc_type+=("spring-boot"); svc_dir+=("$scan_dir")
       svc_port_var+=("SERVER_PORT"); svc_env+=("$scan_dir/.env"); svc_cmd+=("mvn spring-boot:run")
+    elif [[ -f "$scan_dir/Cargo.toml" ]] && [[ -f "$scan_dir/index.html" ]]; then
+      # Leptos/Rust frontend: the built static dist is shipped (trunk build);
+      # serve it as a static site, not a rust binary.
+      svc_name+=("$rel_name"); svc_type+=("static"); svc_dir+=("$scan_dir")
+      svc_port_var+=("PORT"); svc_env+=("$scan_dir/.env"); svc_cmd+=("serve-dist")
     elif [[ -f "$scan_dir/Cargo.toml" ]]; then
       svc_name+=("$rel_name"); svc_type+=("rust"); svc_dir+=("$scan_dir")
       svc_port_var+=("SERVER_PORT"); svc_env+=("$scan_dir/.env")
@@ -3397,7 +3402,17 @@ EOF
 
     # Resolve script to absolute path
     local script_path interpreter
-    if [[ "$script" == "mvn" ]]; then
+    if [[ "$script" == "serve-dist" ]]; then
+      # Leptos/static frontend: serve the shipped dist/ as a static site.
+      local static_start_script="$dir/.eco-static-start.sh"
+      cat > "$static_start_script" <<STATICSTART
+#!/bin/bash
+exec python3 -m http.server ${port} --directory "\$(dirname "\$0")/dist" --bind 0.0.0.0
+STATICSTART
+      script_path="$static_start_script"
+      args=""
+      interpreter="bash"
+    elif [[ "$script" == "mvn" ]]; then
       if is_prod_mode; then
         # Do not put a multi-word `bash -lc '… java …'` command in PM2's
         # string-form args. PM2's argument handling can detach the JVM from

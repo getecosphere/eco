@@ -96,18 +96,55 @@ pub fn run_tree(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn update_asset_for_platform() -> Result<String, String> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    match (os, arch) {
+        ("macos", "x86_64") => Ok("eco-x86_64-apple-darwin".to_string()),
+        ("macos", "aarch64") => Ok("eco-aarch64-apple-darwin".to_string()),
+        ("linux", "x86_64") => Ok("eco-x86_64-unknown-linux-musl".to_string()),
+        ("windows", "x86_64") => Ok("eco-x86_64-pc-windows-gnu.exe".to_string()),
+        _ => Err(format!("eco update has no prebuilt asset for {os}/{arch} yet")),
+    }
+}
+
 pub fn run_update(_args: &[String]) -> Result<(), String> {
-    let package_root = embedded::package_root();
-    let package_root_str = package_root.display().to_string();
-    util::println_stdout(&format!("Updating eco from {package_root_str}"));
-    util::run_command("git", &["fetch".to_string(), "origin".to_string()], &package_root)?;
-    let cwd = util::current_dir();
-    util::run_capture("git", &["reset".to_string(), "--hard".to_string(), "origin/main".to_string()], &package_root)
-        .map_err(|e| format!("git reset failed: {e}"))?;
-    util::run_capture("git", &["clean".to_string(), "-xfd".to_string()], &package_root)
-        .map_err(|e| format!("git clean failed: {e}"))?;
-    let _ = cwd;
-    util::println_stdout("eco is up to date and clean.");
+    let asset = update_asset_for_platform()?;
+    let url = format!("https://github.com/ecosphere-creator/eco/releases/latest/download/{asset}");
+    let exe = std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
+    util::println_stdout(&format!("Updating eco to the latest release ({asset})"));
+
+    // Download the latest release binary for this platform (over HTTP, so the
+    // CLI self-updates anywhere — no git clone of the source needed).
+    let bytes = {
+        let mut req = ureq::get(&url).set("User-Agent", "eco-cli");
+        match req.timeout(std::time::Duration::from_secs(180)).call() {
+            Ok(resp) => {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                resp.into_reader().read_to_end(&mut buf).map_err(|e| format!("read {url}: {e}"))?;
+                buf
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                return Err(format!("update failed (HTTP {code}): {}", body.chars().take(160).collect::<String>()));
+            }
+            Err(ureq::Error::Transport(t)) => return Err(format!("update network error: {t}")),
+        }
+    };
+
+    // Write to a sibling temp + rename over the running binary (rename is safe
+    // on Unix/Windows while the process runs — the old inode stays alive).
+    let tmp = exe.with_extension(format!("{}.new", exe.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()));
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        let _ = std::fs::set_permissions(&tmp, perms);
+    }
+    std::fs::rename(&tmp, &exe).map_err(|e| format!("replace {}: {e}", exe.display()))?;
+    util::println_stdout("eco updated — restart any running eco to use the new version.");
     Ok(())
 }
 

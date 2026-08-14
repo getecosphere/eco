@@ -86,6 +86,19 @@ pub fn materialize_configure_sh(dest: &str) -> Result<(), String> {
     std::fs::write(dest, CONFIGURE_SH).map_err(|e| format!("write {dest}: {e}"))
 }
 
+/// Write every bundled script (configure.sh, provision.sh, init.sh, git.sh,
+/// tree.sh, install-*.sh) into a directory — the CT's eco root — so the CT
+/// always runs the shipped script versions, even when its bundle predates the
+/// deploy (e.g. provision.sh gains a new runtime token).
+pub fn materialize_bundled_scripts(dest: &str) -> Result<(), String> {
+    let dir = Path::new(dest);
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    for (name, content) in BUNDLED {
+        std::fs::write(dir.join(name), content).map_err(|e| format!("write {}: {e}", dir.join(name).display()))?;
+    }
+    Ok(())
+}
+
 /// Resolve the on-disk path for a bundled script by name (already extracted).
 pub fn bundled_script_path(name: &str) -> Result<PathBuf, String> {
     let root = ensure_bundled()?;

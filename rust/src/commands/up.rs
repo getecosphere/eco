@@ -574,7 +574,8 @@ fn is_self_domain(domain: &str, project: &str, project_dir: &str) -> bool {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    domain == project || domain == base
+    // "." / "" mean the estate root itself (a `path: .` service) — self-domain.
+    domain == project || domain == base || domain == "." || domain.is_empty()
 }
 
 async fn _noop() {}
@@ -651,6 +652,12 @@ fn resolve_deploy_github_repos_for_project(
 ) -> Result<Vec<GithubRepoPlan>, String> {
     let mut repos = Vec::new();
     for domain in domains {
+        // "." / "" = the estate root itself (a `path: .` service). Its source
+        // is the app, shipped by `eco up --remote`; there is no git repo to
+        // clone or sync.
+        if domain == "." || domain.is_empty() {
+            continue;
+        }
         if is_self_domain(domain, project, &project_dir.display().to_string()) {
             let git = resolve_project_git(project_dir, project, content)?;
             let coords = github::parse_github_repo_coordinates(&git)?;
@@ -865,9 +872,14 @@ fn build_deploy_receiver_files(
     lines.push("# integration tests and records any failures -- see".to_string());
     lines.push("# run_test_gates_before_deploy in configure.sh)".to_string());
     lines.push(format!("cd {}", shell_single_quote("/opt/projects")));
+    // Customer estates (a `path: .` service = the whole app) must be scanned
+    // as the only project — no sibling discovery on the shared CT. ECO_INIT=1
+    // tells configure.sh to scan only the project root.
+    let is_customer_app = services.iter().any(|s| s.path == "." || s.path.is_empty());
     lines.push(format!(
-        "ECO_BIN=/usr/local/bin/eco ECO_DEPLOY_MODE=prod ECO_NON_INTERACTIVE=1 {} ECO_RUN_TESTS_BEFORE_DEPLOY=1 PROJECT_DIR={} PROJECT_NAME={} PM2_DIR={} bash {}",
+        "ECO_BIN=/usr/local/bin/eco ECO_DEPLOY_MODE=prod ECO_NON_INTERACTIVE=1 {}{} ECO_RUN_TESTS_BEFORE_DEPLOY=1 PROJECT_DIR={} PROJECT_NAME={} PM2_DIR={} bash {}",
         systemd_env(),
+        if is_customer_app { " ECO_INIT=1" } else { "" },
         shell_single_quote(ct_project_root),
         shell_single_quote(project),
         shell_single_quote(ct_project_root),
@@ -1274,7 +1286,21 @@ pub fn load_project_deployment(input: &str, start_dir: &Path) -> Result<ProjectD
             name
         }
     };
-    let ct = ecompose::parse_ct_metadata(&deployment.content);
+    let mut ct = ecompose::parse_ct_metadata(&deployment.content);
+    // Customer model: a user estate doesn't declare its own CT — the platform
+    // ships everything to the shared app CT (101). Fill platform defaults when
+    // the ct: block is absent so ecompose.yml stays customer-focused.
+    if ct.get("id").map(|s| s.is_empty()).unwrap_or(true) {
+        ct.insert("id".to_string(), "101".to_string());
+    }
+    if ct.get("template").map(|s| s.is_empty()).unwrap_or(true) {
+        ct.insert("template".to_string(), FALLBACK_CT_TEMPLATE.to_string());
+    }
+    for (k, v) in [("storage", "local-lvm"), ("disk", "16"), ("bridge", "vmbr0"), ("ip", "dhcp"), ("cores", "1"), ("memory", "1024"), ("swap", "512"), ("unprivileged", "1")] {
+        if ct.get(k).map(|s| s.is_empty()).unwrap_or(true) {
+            ct.insert(k.to_string(), v.to_string());
+        }
+    }
     let deploy = ecompose::parse_deploy(&deployment.content);
     let expose = ecompose::parse_expose(&deployment.content);
     let services = ecompose::parse_services(&deployment.content);
@@ -1632,7 +1658,9 @@ fn build_delete_declared_pm2_apps_command(config_path: &str) -> String {
 }
 
 fn systemd_mode() -> bool {
-    util::env_var_or("ECO_SYSTEMD", "") == "1"
+    // We are on systemd now — PM2 is legacy. Default to systemd; opt out with
+    // ECO_SYSTEMD=0 only for a legacy PM2-only CT.
+    util::env_var_or("ECO_SYSTEMD", "1") != "0"
 }
 
 // Env prefix passed into configure.sh on the CT so it emits systemd units
@@ -3111,16 +3139,25 @@ fn provision_estate(
     // staging.<hostname>) so a staging footprint derives its own webhook
     // hostname (hooks-staging.<hostname>) instead of the prod one.
     let github_deploy = resolve_deploy_github_config(&deployment.project, &expose, &deployment.deploy);
-    let github_repos = match &github_deploy {
-        Some(gd) => resolve_deploy_github_repos_for_project(
-            &domains,
-            &deployment.project,
-            &deployment.project_dir,
-            &gd.branch,
-            &domain_branch_overrides,
-            &deployment.content,
-        )?,
-        None => Vec::new(),
+    let remote_mode = options.get("remote").map(|v| v == "true").unwrap_or(false);
+    // In remote mode the source is shipped from the dev machine (authoritative),
+    // so no git clone/sync is needed — the legacy webhook-receiver repo plans
+    // are not required. Skip resolution so shared domains (e.g. auth) that have
+    // no git remote in the manifest don't fail the deploy.
+    let github_repos = if remote_mode {
+        Vec::new()
+    } else {
+        match &github_deploy {
+            Some(gd) => resolve_deploy_github_repos_for_project(
+                &domains,
+                &deployment.project,
+                &deployment.project_dir,
+                &gd.branch,
+                &domain_branch_overrides,
+                &deployment.content,
+            )?,
+            None => Vec::new(),
+        }
     };
     let webhook_secret = match &github_deploy {
         Some(_) => resolve_estate_webhook_secret(&ctid, &deployment.ct_project_root, &rand_secret())?,
@@ -3142,6 +3179,11 @@ fn provision_estate(
     });
 
     let mut repo_clone_steps: Vec<(String, String)> = Vec::new();
+    // Remote mode ships the source (dev source is authoritative) and never
+    // force-syncs domains, so don't resolve per-domain git sources eagerly —
+    // shared domains (auth, photos, etc.) have no git remote in the manifest
+    // and would fail the deploy.
+    if !remote_mode {
     for domain in &domains {
         if is_self_domain(domain, &deployment.project, &deployment.project_dir.display().to_string()) {
             continue;
@@ -3162,6 +3204,7 @@ fn provision_estate(
                 false,
             ),
         ));
+    }
     }
 
     // Services whose dist was built on the local builder and shipped in the
@@ -3472,6 +3515,17 @@ fn provision_estate(
         push_text_file_to_ct(&ctid, &staging_ecompose_path, &staging_ecompose_content, "staging-ecompose")?;
     }
     print_step(&format!("[CT {ctid}] Provisioning runtimes for {}", deployment.project));
+    // Refresh the CT's bundled scripts from the shipped binary first, so
+    // provision.sh (and configure.sh) are the current versions. The CT's own
+    // /usr/local/bin/eco may be stale (no __bundle-scripts), so use the
+    // agent's binary pushed in.
+    pct_exec(&ctid, "mkdir -p /usr/local/bin")?;
+    run_command(
+        "pct",
+        &["push".to_string(), ctid.to_string(), "/usr/local/bin/eco".to_string(), "/tmp/eco-bundle-bin".to_string()],
+        &util::current_dir(),
+    )?;
+    pct_exec(&ctid, &format!("chmod +x /tmp/eco-bundle-bin && /tmp/eco-bundle-bin __bundle-scripts {} && rm -f /tmp/eco-bundle-bin", shell_single_quote(&deployment.ct_eco_root)))?;
     pct_exec(
         &ctid,
         &format!(
@@ -3532,10 +3586,6 @@ fn provision_estate(
                     rust_build_failures.push(e);
                 }
             }
-            if let Err(e) = install_remote_frontend_artifacts(&ctid, deployment, &remote_artifacts, &remote_frontend_hashes, &estate_core) {
-                util::eprintln_stderr(&format!("\n[eco up] WARNING: Installing shipped frontend dists failed, continuing: {e}\n"));
-                rust_build_failures.push(e);
-            }
         } else if external_rust_builder {
             print_step(&format!("[CT {dedicated_rust_builder_ctid}] Building Rust artifacts for {} via dedicated builder", deployment.project));
             let steps = build_dedicated_rust_steps(
@@ -3568,6 +3618,14 @@ fn provision_estate(
                     }
                 }
             }
+        }
+    }
+    // Frontend dists are shipped in the payload regardless of whether the
+    // estate has any Rust services.
+    if remote_mode {
+        if let Err(e) = install_remote_frontend_artifacts(&ctid, deployment, &remote_artifacts, &remote_frontend_hashes, &estate_core) {
+            util::eprintln_stderr(&format!("\n[eco up] WARNING: Installing shipped frontend dists failed, continuing: {e}\n"));
+            rust_build_failures.push(e);
         }
     }
     if let Some(installed) = (|| -> Result<Option<Vec<String>>, String> {
@@ -4300,15 +4358,17 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
-    let api_url = util::env_var_or("ECO_API_URL", "");
+    // API URL + key: explicit env wins, else the `eco login`-stored auth
+    // (defaulting the URL to the public api.getecosphere.com).
+    let (api_url, api_key) = crate::commands::account::resolve_api_credentials()?;
+    let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
     if api_url.is_empty() {
         return Err(
             "eco up --remote requires ECO_API_URL pointing at the eco serve agent on the Proxmox host (e.g. http://host:8790).".to_string(),
         );
     }
-    let api_key = util::env_var_or("ECO_API_KEY", "");
     if api_key.is_empty() {
-        return Err("eco up --remote requires ECO_API_KEY (generate one on the host with `eco serve gen-key --write`).".to_string());
+        return Err("eco up --remote requires an API key (run `eco login`, or set ECO_API_KEY).".to_string());
     }
     let base = api_url.trim_end_matches('/').to_string();
     let staging = options.get("staging").map(|v| v == "true").unwrap_or(false);
@@ -4361,14 +4421,24 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     for service in deployment
         .services
         .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")))
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@") || r == "leptos"))
     {
         let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
         let rel = if rel.is_empty() { service.path.clone() } else { rel };
         let candidates = [estate_root.join(&rel), deployment.project_dir.join(&rel)];
-        let Some(dir) = candidates.iter().find(|c| c.join("package.json").is_file()) else {
+        // Node frontends have package.json; Leptos/Rust frontends have
+        // Cargo.toml + index.html (the trunk CSR entry).
+        let is_leptos = service.runtimes.iter().any(|r| r == "leptos");
+        let Some(dir) = candidates.iter().find(|c| {
+            if is_leptos {
+                c.join("Cargo.toml").is_file() && c.join("index.html").is_file()
+            } else {
+                c.join("package.json").is_file()
+            }
+        }) else {
             return Err(format!(
-                "Cannot find local package.json for Node service {} (looked in {} and {})",
+                "Cannot find local {} for service {} (looked in {} and {})",
+                if is_leptos { "Cargo.toml + index.html (Leptos)" } else { "package.json" },
                 service.name,
                 candidates[0].display(),
                 candidates[1].display()
@@ -4567,7 +4637,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         frontend_hash_lines.push(format!("{rel} {hash}"));
         let build_dir = format!("{}/{}", builder_build_root(), service.name);
         let build_loc = if builder_is_host() { "on this machine (host builder)".to_string() } else { format!("on local builder ({})", builder_name()) };
-        print_step(&format!("Building {} {}: npm ci + npm run build", service.name, build_loc));
+        let is_leptos = dir.join("index.html").is_file() && !dir.join("package.json").is_file();
+        print_step(&format!(
+            "Building {} {}: {}",
+            service.name,
+            build_loc,
+            if is_leptos { "trunk build --release (Leptos wasm)" } else { "npm ci + npm run build" }
+        ));
         sync_dir_to_builder(dir, &build_dir)?;
         let mut exports = String::from("set -euo pipefail\n");
         for (key, value) in &build_env {
@@ -4578,12 +4654,18 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             }
         }
         // Hash-skip: if this frontend's source hash matches the last built
-        // hash, reuse the existing output instead of npm ci + build again
-        // (mirrors .eco-rust-hash).
-        let script = format!(
-            "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash",
-            shell_single_quote(&build_dir)
-        );
+        // hash, reuse the existing output instead of building again.
+        let script = if is_leptos {
+            format!(
+                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\nif ! command -v trunk >/dev/null 2>&1; then cargo install trunk --locked; fi && rustup target add wasm32-unknown-unknown 2>/dev/null || true; trunk build --release && printf '{hash}' > .eco-frontend-hash",
+                shell_single_quote(&build_dir)
+            )
+        } else {
+            format!(
+                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash",
+                shell_single_quote(&build_dir)
+            )
+        };
         builder_exec_ok(&script)?;
         let artifact_dir = std::env::temp_dir().join(format!("eco-frontend-artifact-{}-{}", service.name, std::process::id()));
         let _ = std::fs::remove_dir_all(&artifact_dir);
@@ -4614,6 +4696,9 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             .collect();
         let project_base = deployment.project_dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         for domain in domains {
+            if domain == "." || domain.is_empty() {
+                continue;
+            }
             if domain == project_base {
                 continue;
             }

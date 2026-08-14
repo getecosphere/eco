@@ -435,6 +435,7 @@ fn run_init_tunnel(positionals: &[String], options: &std::collections::HashMap<S
     }
     let hostname = hostname.unwrap();
     let dry_run = options.get("dry-run").map(|v| v == "true").unwrap_or(false);
+    let service_url = options.get("service").cloned().unwrap_or_else(|| "http://127.0.0.1:80".to_string());
 
     let ctid = resolve_ct_input(&target)?;
     let tunnel_name = options.get("name").cloned().unwrap_or_else(|| cloudflare::slugify_tunnel_name(&hostname));
@@ -457,7 +458,7 @@ fn run_init_tunnel(positionals: &[String], options: &std::collections::HashMap<S
         } else {
             format!("Create DNS route {hostname} -> tunnel {tunnel_name}")
         },
-        format!("Write {config_path} in CT {ctid} with placeholder ingress http://127.0.0.1:80"),
+        format!("Write {config_path} in CT {ctid} with ingress {service_url}"),
         format!("Install {service_name}.service in CT {ctid}"),
         format!("Enable and restart {service_name} in CT {ctid}"),
         format!("Verify {service_name} status in CT {ctid}"),
@@ -493,8 +494,8 @@ fn run_init_tunnel(positionals: &[String], options: &std::collections::HashMap<S
             util::println_stdout(&format!("[eco proxy] Reusing remote tunnel {remote_name} ({tunnel_id})"));
         }
         cloudflare::overwrite_dns_record_for_tunnel(&hostname, &tunnel_id, &account)?;
-        cloudflare::put_remote_tunnel_config(&tunnel_id, &hostname, "http://127.0.0.1:80", &account)?;
-        write_tunnel_config(&ctid, &tunnel_id, &tunnel_token, remote_name, &hostname, "http://127.0.0.1:80", &config_path)?;
+        cloudflare::put_remote_tunnel_config(&tunnel_id, &hostname, &service_url, &account)?;
+        write_tunnel_config(&ctid, &tunnel_id, &tunnel_token, remote_name, &hostname, &service_url, &config_path)?;
         install_ct_cloudflared_service(&ctid, &tunnel_token, &service_name, &config_path)?;
         pct_exec(&ctid, &format!("systemctl daemon-reload && systemctl enable {service_name} && systemctl restart {service_name}"))?;
         verify_cloudflared_service(&ctid, &service_name)?;
@@ -642,7 +643,7 @@ fn parse_proxy_options(args: &[String]) -> Result<(std::collections::HashMap<Str
             i += 1;
             continue;
         }
-        if key == "name" || key == "account" || key == "target" {
+        if key == "name" || key == "account" || key == "target" || key == "service" {
             let value = args.get(i + 1).cloned().ok_or_else(|| format!("Missing value for option --{key}"))?;
             if value.starts_with("--") {
                 return Err(format!("Missing value for option --{key}"));
