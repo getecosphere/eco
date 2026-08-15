@@ -46,8 +46,7 @@ pub fn resolve_service_exec(
     binary_override: &str,
 ) -> Result<(String, String, bool), String> {
     let artifacts = format!("{release_dir}/artifacts");
-    // LXS / source rust service: a binary named `binary:` (or the manifest lxs
-    // name). Frontends are a dist/ dir.
+    // Source Rust service: binary named `binary:` (or service/lxs name).
     if service.runtimes.iter().any(|r| r == "rust") {
         let bin = if !binary_override.is_empty() {
             binary_override.to_string()
@@ -58,6 +57,13 @@ pub fn resolve_service_exec(
         } else {
             service.name.clone()
         };
+        let bin_path = format!("{artifacts}/{bin}");
+        return Ok((bin_path, release_dir.to_string(), true));
+    }
+    // LXS-only service (no runtimes declared): a registry binary named by the
+    // lxs package name, shipped into artifacts/<name>.
+    if !service.lxs.is_empty() {
+        let bin = service.lxs.split('@').next().unwrap_or("").to_string();
         let bin_path = format!("{artifacts}/{bin}");
         return Ok((bin_path, release_dir.to_string(), true));
     }

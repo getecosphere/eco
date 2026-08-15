@@ -3727,6 +3727,23 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
             copy_tree_excluding(artifact_dir, &dest, &(skip_none as fn(&str) -> bool))?;
         }
+        // Ship the env contract and migrations with each source service's
+        // artifact so the server can generate `.env` and run migrations without
+        // ever seeing source. Artifacts are keyed by service name for
+        // frontends and by package name for rust binaries; we key the
+        // contract under the SERVICE name dir.
+        for (service, _rel, dir) in rust_targets.iter().chain(frontend_targets.iter()) {
+            let service_artifact = artifacts_dir.join(&service.name);
+            std::fs::create_dir_all(&service_artifact).map_err(|e| e.to_string())?;
+            let example = dir.join(".env.example");
+            if example.is_file() {
+                let _ = std::fs::copy(&example, service_artifact.join(".env.example"));
+            }
+            let migrations = dir.join("migrations");
+            if migrations.is_dir() {
+                copy_tree_excluding(&migrations, &service_artifact.join("migrations"), &(skip_none as fn(&str) -> bool))?;
+            }
+        }
         std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("ecompose.yml"), &deployment.content).map_err(|e| e.to_string())?;
@@ -4356,6 +4373,16 @@ fn install_lxs_services_release(ctid: &str, deployment: &ProjectDeployment, ct_r
                 shell_single_quote(&format!("{target_dir}/{name}"))
             ),
         )?;
+        // Ship the LXS env contract so the server can generate `.env` without
+        // source: write artifacts/<service.name>/.env.example from the contract.
+        let contract_dir = format!("{target_dir}/{}", service.name);
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&contract_dir)))?;
+        let mut env_example = String::new();
+        for key in manifest.contract.env.required.iter().chain(manifest.contract.env.optional.iter()) {
+            let value = manifest.contract.env.defaults.get(key).cloned().unwrap_or_default();
+            env_example.push_str(&format!("{key}={value}\n"));
+        }
+        push_text_file_to_ct(ctid, &format!("{contract_dir}/.env.example"), &env_example, "lxs-env-example")?;
         print_step(&format!("[CT {ctid}] Installed LXS {}@{} as {}", name, version, service.name));
         installed.push(service.name.clone());
     }
