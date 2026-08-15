@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "eco"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aes-gcm",
  "base64",
