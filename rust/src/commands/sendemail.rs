@@ -40,9 +40,9 @@ fn shell(ssh_host: &str, cmd: &str) -> Result<String, String> {
     Ok(result.stdout.trim().to_string())
 }
 
-fn resolve_brevo_credential(key_name: &str) -> Result<String, String> {
+fn resolve_brevo_credential(host: &str, key_name: &str) -> Result<String, String> {
     let cmd = format!("bash -lc 'echo ${{{key_name}}}'");
-    shell("prox", &cmd)
+    shell(host, &cmd)
 }
 
 pub fn run_sendemail(args: &[String]) -> Result<(), String> {
@@ -100,9 +100,9 @@ pub fn run_sendemail(args: &[String]) -> Result<(), String> {
 
     util::println_stdout(&format!("Sending email to {to}…"));
 
-    let api_key = resolve_brevo_credential("BREVO_API_KEY")?;
-    let from_email = resolve_brevo_credential("MAIL_FROM_EMAIL")?;
-    let from_name = resolve_brevo_credential("MAIL_FROM_NAME")?;
+    let api_key = resolve_brevo_credential(&host, "BREVO_API_KEY")?;
+    let from_email = resolve_brevo_credential(&host, "MAIL_FROM_EMAIL")?;
+    let from_name = resolve_brevo_credential(&host, "MAIL_FROM_NAME")?;
 
     if api_key.is_empty() {
         return Err("BREVO_API_KEY is not set on the Proxmox host.".to_string());
