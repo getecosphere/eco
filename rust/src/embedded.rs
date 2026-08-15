@@ -6,7 +6,6 @@ use crate::util;
 // Embedded bundled assets (mirrors the files shipped with the Node package).
 pub const CONFIGURE_SH: &str = include_str!("../../configure.sh");
 pub const PROVISION_SH: &str = include_str!("../../provision.sh");
-pub const INIT_SH: &str = include_str!("../../init.sh");
 pub const GIT_SH: &str = include_str!("../../git.sh");
 pub const TREE_SH: &str = include_str!("../../tree.sh");
 pub const INSTALL_MINIO_SH: &str = include_str!("../../install-minio.sh");
@@ -18,7 +17,6 @@ pub const ECOLOGY_MARK: &[u8] = include_bytes!("../../assets/ecology-mark.webp")
 const BUNDLED: &[(&str, &str)] = &[
     ("configure.sh", CONFIGURE_SH),
     ("provision.sh", PROVISION_SH),
-    ("init.sh", INIT_SH),
     ("git.sh", GIT_SH),
     ("tree.sh", TREE_SH),
     ("install-minio.sh", INSTALL_MINIO_SH),
@@ -88,7 +86,7 @@ pub fn materialize_configure_sh(dest: &str) -> Result<(), String> {
     std::fs::write(dest, CONFIGURE_SH).map_err(|e| format!("write {dest}: {e}"))
 }
 
-/// Write every bundled script (configure.sh, provision.sh, init.sh, git.sh,
+/// Write every bundled script (configure.sh, provision.sh, git.sh,
 /// tree.sh, install-*.sh) into a directory — the CT's eco root — so the CT
 /// always runs the shipped script versions, even when its bundle predates the
 /// deploy (e.g. provision.sh gains a new runtime token).

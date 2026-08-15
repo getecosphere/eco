@@ -126,8 +126,8 @@ Commands:
                       align composed-domain branch placement in ecompose.yml
   finish <name>       merge <name> back into main in all repos (pulls latest
                       origin/main first, merges, pushes main, and deletes the
-                      local + remote feature branch). Pushing main triggers the
-                      prod deploy webhook.
+                      local + remote feature branch). Deploy with
+                      `eco up --remote` from the estate root.
 
 Examples:
   $(basename "$0") status
@@ -346,9 +346,8 @@ case "$CMD" in
         echo "  → merging $finish_name into main"
         git merge --no-ff "$finish_name" -m "merge: $finish_name into main" 2>&1
         echo -e "  ${GREEN}✓ merged $finish_name into main${RESET}"
-        # 4. Push main (triggers the prod deploy webhook) and remove the
-        #    feature branch locally + remotely so finished branches never
-        #    clutter the remote.
+        # 4. Push main and remove the feature branch locally + remotely so
+        #    finished branches never clutter the remote.
         echo "  → pushing main"
         git push origin main 2>&1
         echo -e "  ${GREEN}✓ pushed main to origin${RESET}"
@@ -367,7 +366,7 @@ case "$CMD" in
       echo -e "${RED}finish completed with failures in some repos.${RESET}"
       exit 1
     fi
-    echo -e "${GREEN}Done. main pushed to origin (prod deploy triggered where a webhook is configured) and feature branches removed.${RESET}"
+    echo -e "${GREEN}Done. main pushed to origin. Deploy with eco up --remote from the estate root.${RESET}"
     ;;
   *)
     echo -e "${RED}Unknown command: $CMD${RESET}"

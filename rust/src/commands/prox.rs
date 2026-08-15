@@ -7,9 +7,6 @@ fn help_text() {
     let text = r#"eco prox
 
 Usage:
-  eco prox prepare rust-builder <ctid-or-hostname> [--dry-run]
-  eco prox createct rust-builder <name> [options]
-  eco prox clear-rust <builder-ctid-or-name> [--yes] [--dry-run]
   eco prox remove-tunnel [domain|*.domain] [--target <ctid-or-hostname>] [--account <name>] [--dry-run]
   eco prox clearenv [--dry-run]
   eco prox showports
@@ -20,19 +17,12 @@ Usage:
   eco prox archive <vm-or-ct> --output <external-directory> [--format qcow2]
   eco prox unarchive <archive-directory-or-vzdump-archive> --id <new-id> [--storage <storage>]
 
-Rust builder preparation installs Eco's shared Rust toolchain and sccache in
-an existing CT. That CT may also run applications; use its name or ID in
-ECO_RUST_DEDICATED_BUILDER when running production eco up.
-
 VM archive default: compressed QCOW2 images written directly to external storage.
 Eco stops a running VM temporarily for a consistent archive, then starts it again.
 CT archives remain native vzdump archives. Use --format vzdump when a native VM
 snapshot/suspend backup is explicitly required.
 
 Examples:
-  eco prox prepare rust-builder deveko
-  eco prox createct rust-builder rust-builder --id 1000
-  eco prox clear-rust deveko
   eco prox remove-tunnel
   eco prox remove-tunnel app.example.com --target proxy
   eco prox remove-tunnel '*.example.com' --target proxy
@@ -228,211 +218,6 @@ fn resolve_ct_by_reference(reference: &str) -> Result<(String, String), String> 
     let ctid = find_ct_by_hostname(reference)
         .ok_or_else(|| format!("No CT with hostname \"{reference}\" exists."))?;
     Ok((ctid, reference.to_string()))
-}
-
-fn install_rust_builder(ctid: &str) -> Result<(), String> {
-    util::println_stdout(&format!("[CT {ctid}] Installing Rust build toolchain and shared compiler cache..."));
-    let command = [
-        "export DEBIAN_FRONTEND=noninteractive",
-        "apt-get update",
-        "apt-get install -y curl ca-certificates build-essential pkg-config libssl-dev",
-        "mkdir -p /usr/local/rustup /usr/local/cargo /opt/eco-rust-builds",
-        "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo bash -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path'",
-        "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /usr/local/cargo/bin/rustup toolchain install stable --profile minimal",
-        "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /usr/local/cargo/bin/rustup default stable",
-        "if [ ! -x /usr/local/bin/sccache ]; then arch=$(dpkg --print-architecture); [ \"$arch\" = amd64 ] || { echo \"Eco rust-builder requires an amd64 sccache binary (found: $arch)\" >&2; exit 1; }; version=v0.16.0; tmpdir=$(mktemp -d); trap 'rm -rf \"$tmpdir\"' EXIT; curl --proto '=https' --tlsv1.2 -sSfL \"https://github.com/mozilla/sccache/releases/download/$version/sccache-$version-x86_64-unknown-linux-musl.tar.gz\" -o \"$tmpdir/sccache.tar.gz\"; tar xzf \"$tmpdir/sccache.tar.gz\" -C \"$tmpdir\"; install -m 0755 \"$tmpdir/sccache-$version-x86_64-unknown-linux-musl/sccache\" /usr/local/bin/sccache; rm -rf \"$tmpdir\"; trap - EXIT; fi",
-        "install -d -m 0777 /usr/local/sccache-cache",
-        "rm -f /usr/local/bin/cargo /usr/local/bin/rustc /usr/local/bin/rustup",
-        "printf '%s\\n' '#!/bin/sh' 'export RUSTUP_HOME=/usr/local/rustup' 'export CARGO_HOME=/usr/local/cargo' 'exec /usr/local/cargo/bin/cargo \"$@\"' > /usr/local/bin/cargo",
-        "printf '%s\\n' '#!/bin/sh' 'export RUSTUP_HOME=/usr/local/rustup' 'export CARGO_HOME=/usr/local/cargo' 'exec /usr/local/cargo/bin/rustc \"$@\"' > /usr/local/bin/rustc",
-        "printf '%s\\n' '#!/bin/sh' 'export RUSTUP_HOME=/usr/local/rustup' 'export CARGO_HOME=/usr/local/cargo' 'exec /usr/local/cargo/bin/rustup \"$@\"' > /usr/local/bin/rustup",
-        "chmod 755 /usr/local/bin/cargo /usr/local/bin/rustc /usr/local/bin/rustup",
-        "printf '%s\\n' 'export RUSTUP_HOME=/usr/local/rustup' 'export CARGO_HOME=/usr/local/cargo' 'export PATH=/usr/local/cargo/bin:$PATH' 'export RUSTC_WRAPPER=/usr/local/bin/sccache' 'export SCCACHE_DIR=/usr/local/sccache-cache' > /etc/profile.d/eco-rust.sh",
-        "chmod 644 /etc/profile.d/eco-rust.sh",
-        "install -d -m 755 /etc/eco",
-        "printf '%s\\n' 'role=rust-builder' 'rustup_home=/usr/local/rustup' 'cargo_home=/usr/local/cargo' 'build_root=/opt/eco-rust-builds' > /etc/eco/rust-builder.env",
-        "/usr/local/bin/cargo --version",
-        "/usr/local/bin/sccache --version",
-    ]
-    .join(" && ");
-    run("pct", &["exec".to_string(), ctid.to_string(), "--".to_string(), "bash".to_string(), "-lc".to_string(), command], false)?;
-    Ok(())
-}
-
-fn prepare_rust_builder(positionals: &[String], options: &std::collections::HashMap<String, String>) -> Result<(), String> {
-    let reference = positionals.get(2).cloned().ok_or("Usage: eco prox prepare rust-builder <ctid-or-hostname> [--dry-run]")?;
-    let (ctid, hostname) = resolve_ct_by_reference(&reference)?;
-
-    if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
-        let out = format!(
-            "eco prox prepare rust-builder plan\n  CT: {ctid} ({hostname})\n  Ensure running\n  Install/refresh: curl, CA certificates, build-essential, pkg-config, libssl-dev\n  Install/refresh: Rust stable minimal toolchain in /usr/local/rustup and /usr/local/cargo\n  Install/refresh: sccache in /usr/local/bin and its shared cache directory\n  Mark role: /etc/eco/rust-builder.env\n\nUse after success:\n  export ECO_RUST_DEDICATED_BUILDER={hostname}\n"
-        );
-        print!("{out}");
-        return Ok(());
-    }
-    ensure_ct_running(&ctid)?;
-    wait_for_ct_exec(&ctid, 30, 1000)?;
-    install_rust_builder(&ctid)?;
-    util::println_stdout(&format!(
-        "Rust builder CT {ctid} ({hostname}) is ready.\n\nFor this shell:\n  export ECO_RUST_DEDICATED_BUILDER={hostname}\n\nPersist it in the Proxmox host environment before running eco up. The builder may also be an application CT; Eco builds in place when it is the destination CT.\n"
-    ));
-    Ok(())
-}
-
-const RUST_CLEANUP_REPORT: &str = "set -euo pipefail\npaths=(/usr/local/rustup /usr/local/cargo /usr/local/sccache-cache)\nbefore_managed=0\nfor path in \"${paths[@]}\"; do [ -e \"$path\" ] || continue; size=$(du -sk \"$path\" 2>/dev/null | awk '{print $1}'); before_managed=$((before_managed + ${size:-0})); done\nbefore_root=$(df -Pk / | awk 'NR == 2 {print $3}')\nrm -rf /usr/local/rustup /usr/local/cargo /usr/local/sccache-cache\nrm -f /usr/local/bin/cargo /usr/local/bin/rustc /usr/local/bin/rustup /usr/local/bin/sccache /etc/profile.d/cargo.sh /etc/profile.d/eco-rust.sh /etc/eco/rust-builder.env\nafter_managed=0\nfor path in \"${paths[@]}\"; do [ -e \"$path\" ] || continue; size=$(du -sk \"$path\" 2>/dev/null | awk '{print $1}'); after_managed=$((after_managed + ${size:-0})); done\nafter_root=$(df -Pk / | awk 'NR == 2 {print $3}')\nprintf 'ECO_RUST_CLEANUP before_managed_kb=%s after_managed_kb=%s before_root_kb=%s after_root_kb=%s\\n' \"$before_managed\" \"$after_managed\" \"$before_root\" \"$after_root\"";
-
-fn human_kib(kb: i64) -> String {
-    if kb >= 1024 * 1024 {
-        format!("{:.2} GiB", kb as f64 / (1024.0 * 1024.0))
-    } else if kb >= 1024 {
-        format!("{:.1} MiB", kb as f64 / 1024.0)
-    } else {
-        format!("{kb} KiB")
-    }
-}
-
-fn cleanup_metrics(text: &str) -> Result<(i64, i64, i64, i64), String> {
-    let marker = "ECO_RUST_CLEANUP";
-    let Some(idx) = text.find(marker) else {
-        return Err(format!("Rust cleanup completed but did not return a size report.\n{text}"));
-    };
-    let rest = &text[idx + marker.len()..];
-    let mut vals = [0i64; 4];
-    let mut found = 0;
-    for key in ["before_managed_kb", "after_managed_kb", "before_root_kb", "after_root_kb"] {
-        let Some(k) = rest.find(key) else { break };
-        let after = &rest[k + key.len()..].trim_start();
-        let num = after
-            .split(|c: char| !c.is_ascii_digit() && c != '-' && c != '+')
-            .next()
-            .unwrap_or("0");
-        if let Ok(n) = num.parse::<i64>() {
-            vals[found] = n;
-        }
-        found += 1;
-    }
-    if found != 4 {
-        return Err(format!("Rust cleanup completed but did not return a size report.\n{text}"));
-    }
-    Ok((vals[0], vals[1], vals[2], vals[3]))
-}
-
-fn parse_pct_list(output: &str) -> Vec<(String, String, String)> {
-    output
-        .split('\n')
-        .filter_map(|line| {
-            let line = line.trim();
-            let mut parts = line.split_whitespace();
-            let id = parts.next()?.to_string();
-            if !id.chars().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            let status = parts.next().unwrap_or("").to_string();
-            let hostname = parts.collect::<Vec<_>>().join(" ");
-            Some((id, status, hostname))
-        })
-        .collect()
-}
-
-fn clear_rust(args: &[String], options: &std::collections::HashMap<String, String>) -> Result<(), String> {
-    let builder_reference = args
-        .get(1)
-        .cloned()
-        .or_else(|| std::env::var("ECO_RUST_DEDICATED_BUILDER").ok())
-        .ok_or("Usage: eco prox clear-rust <builder-ctid-or-name> [--yes] [--dry-run]")?;
-    let (builder_ctid, builder_hostname) = resolve_ct_by_reference(&builder_reference)?;
-    let listed = parse_pct_list(&run("pct", &["list".to_string()], true)?.stdout);
-    let targets: Vec<(String, String)> = listed
-        .iter()
-        .filter(|(id, status, _)| id != &builder_ctid && status == "running")
-        .map(|(id, _, name)| (id.clone(), name.clone()))
-        .collect();
-    let skipped: Vec<String> = listed
-        .iter()
-        .filter(|(id, status, _)| id != &builder_ctid && status != "running")
-        .map(|(id, _, _)| id.clone())
-        .collect();
-
-    if targets.is_empty() {
-        util::println_stdout(&format!(
-            "No running CT needs cleanup; builder CT {builder_ctid} was preserved.{}",
-            if skipped.is_empty() {
-                String::new()
-            } else {
-                format!(" Stopped CTs were not started: {}.", skipped.join(", "))
-            }
-        ));
-        return Ok(());
-    }
-
-    if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
-        let out = format!(
-            "eco prox clear-rust plan\n  Preserve builder: CT {builder_ctid} ({builder_hostname})\n  Clean managed Rust toolchains/caches: {}\n  Preserve application binaries and target/ directories.{}",
-            targets.iter().map(|(id, name)| format!("CT {id} ({name})")).collect::<Vec<_>>().join(", "),
-            if skipped.is_empty() {
-                String::new()
-            } else {
-                format!("\n  Skip stopped CTs (never start them implicitly): {}", skipped.iter().map(|id| format!("CT {id}")).collect::<Vec<_>>().join(", "))
-            }
-        );
-        util::println_stdout(&out);
-        return Ok(());
-    }
-
-    if options.get("yes").map(|v| v == "true").unwrap_or(false) {
-        // proceed
-    } else {
-        let answer = crate::checklist::prompt_line(&format!(
-            "Remove Eco-managed Rust toolchains and caches from CT {}? Type CLEAR-RUST to continue: ",
-            targets.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
-        ))?;
-        if answer.trim() != "CLEAR-RUST" {
-            util::println_stdout("Rust cleanup cancelled.");
-            return Ok(());
-        }
-    }
-
-    let mut totals = (0i64, 0i64, 0i64, 0i64);
-    for (id, _) in &targets {
-        util::println_stdout(&format!("[CT {id}] Removing Eco-managed Rust toolchain and cache..."));
-        let result = run("pct", &["exec".to_string(), id.clone(), "--".to_string(), "bash".to_string(), "-lc".to_string(), RUST_CLEANUP_REPORT.to_string()], true)?;
-        let metrics = cleanup_metrics(&format!("{}\n{}", result.stdout, result.stderr))?;
-        totals.0 += metrics.0;
-        totals.1 += metrics.1;
-        totals.2 += metrics.2;
-        totals.3 += metrics.3;
-        let reclaimed = metrics.0 - metrics.1;
-        let managed_pct = if metrics.0 > 0 { reclaimed as f64 / metrics.0 as f64 * 100.0 } else { 0.0 };
-        let root_saved = (metrics.2 - metrics.3).max(0);
-        let root_pct = if metrics.2 > 0 { root_saved as f64 / metrics.2 as f64 * 100.0 } else { 0.0 };
-        util::println_stdout(&format!(
-            "  managed Rust: {} → {}; reclaimed {} ({:.1}%)\n  root filesystem: {} used → {} used; reduced {} ({:.1}%)",
-            human_kib(metrics.0),
-            human_kib(metrics.1),
-            human_kib(reclaimed),
-            managed_pct,
-            human_kib(metrics.2),
-            human_kib(metrics.3),
-            human_kib(root_saved),
-            root_pct
-        ));
-    }
-    let reclaimed = totals.0 - totals.1;
-    let managed_pct = if totals.0 > 0 { reclaimed as f64 / totals.0 as f64 * 100.0 } else { 0.0 };
-    let root_saved = (totals.2 - totals.3).max(0);
-    let root_pct = if totals.2 > 0 { root_saved as f64 / totals.2 as f64 * 100.0 } else { 0.0 };
-    util::println_stdout(&format!(
-        "\nRust cleanup total (excluding builder CT {builder_ctid}):\n  managed Rust: {} → {}; reclaimed {} ({:.1}%)\n  root filesystem used: {} → {}; reduced {} ({:.1}%)",
-        human_kib(totals.0),
-        human_kib(totals.1),
-        human_kib(reclaimed),
-        managed_pct,
-        human_kib(totals.2),
-        human_kib(totals.3),
-        human_kib(root_saved),
-        root_pct
-    ));
-    Ok(())
 }
 
 fn parse_tunnel_configs(text: &str) -> Vec<(String, String, String, Vec<String>)> {
@@ -1591,7 +1376,6 @@ pub fn run_prox(args: &[String]) -> Result<(), String> {
         ("attach", Some("minio")) => attach_minio(&positionals, &options),
         ("archive", _) => archive_workload(&positionals, &options),
         ("unarchive", _) => unarchive_workload(&positionals, &options),
-        ("clear-rust", _) => clear_rust(&positionals, &options),
         ("remove-tunnel", _) => remove_tunnel(&positionals, &options),
         ("clearenv", _) => clear_env(&positionals, &options),
         ("showports", _) => show_ports(),
@@ -1604,57 +1388,6 @@ pub fn run_prox(args: &[String]) -> Result<(), String> {
         ("shrink-pct", _) => shrink_pct(&positionals),
         ("size-pct", _) => size_pct(),
         ("set-ct", _) => set_ct_resources(&positionals, &options),
-        ("prepare", Some("rust-builder")) => prepare_rust_builder(&positionals, &options),
-        ("createct", Some("rust-builder")) => {
-            let requested_name = positionals.get(2).cloned().or_else(|| options.get("hostname").cloned()).unwrap_or_else(|| "rust-builder".to_string());
-            let hostname = options.get("hostname").cloned().unwrap_or_else(|| requested_name.clone());
-            let template = resolve_installed_template(options.get("template").map(|s| s.as_str()))?;
-            let known_id = options.get("id").cloned().or_else(|| {
-                if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
-                    None
-                } else {
-                    find_ct_by_hostname(&hostname)
-                }
-            });
-            let id = known_id.or_else(|| {
-                if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
-                    Some("<next-available-id>".to_string())
-                } else {
-                    next_id().ok()
-                }
-            }).ok_or("cannot determine CT id")?;
-            let mut merged = options.clone();
-            merged.insert("disk".to_string(), options.get("disk").cloned().unwrap_or_else(|| "60".to_string()));
-            merged.insert("cores".to_string(), options.get("cores").cloned().unwrap_or_else(|| "4".to_string()));
-            merged.insert("memory".to_string(), options.get("memory").cloned().unwrap_or_else(|| "8192".to_string()));
-            let create = pct_create_args(&id, &merged, &template, &hostname);
-            if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
-                let out = format!(
-                    "eco prox createct rust-builder plan\n  Template: {template}\n  pct {}\n  pct start {id}\n  pct exec {id} -- install managed Rust toolchain\n",
-                    create.join(" ")
-                );
-                print!("{out}");
-                return Ok(());
-            }
-            let existing_hostname = existing_ct_hostname(&id);
-            if let Some(eh) = existing_hostname.as_ref() {
-                if eh != &hostname {
-                    return Err(format!("CT {id} already belongs to hostname \"{eh}\". Refusing to modify it; choose another --id."));
-                }
-            }
-            if existing_hostname.is_none() {
-                util::println_stdout(&format!("[CT {id}] Creating {hostname}..."));
-                run("pct", &create, false)?;
-            }
-            ensure_ct_running(&id)?;
-            wait_for_ct_exec(&id, 30, 1000)?;
-            install_rust_builder(&id)?;
-            util::println_stdout(&format!(
-                "Rust builder CT {id} is ready ({}). Set ECO_RUST_DEDICATED_BUILDER={hostname} before running eco up.",
-                if existing_hostname.is_some() { "reused" } else { "created" }
-            ));
-            Ok(())
-        }
         ("createct", Some("minio")) => {
             let requested_name = positionals.get(2).cloned().or_else(|| options.get("hostname").cloned()).unwrap_or_else(|| "minio".to_string());
             let hostname = options.get("hostname").cloned().unwrap_or_else(|| requested_name.clone());

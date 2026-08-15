@@ -283,16 +283,11 @@ is_token_satisfied() {
       need_cmd go
       ;;
     rust)
-      # `cargo` is often rustup's shim.  Its presence alone does not mean a
-      # compiler is usable: an existing/shared CT can have the shim while its
-      # selected RUSTUP_HOME has no default toolchain.  Probe it using Eco's
-      # CT-wide homes so `eco up` repairs that state instead of skipping Rust.
-      if is_prod_mode; then
-        RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
-          PATH="/usr/local/cargo/bin:$PATH" cargo --version >/dev/null 2>&1
-      else
-        need_cmd cargo && cargo --version >/dev/null 2>&1
-      fi
+      # Rust is only provisioned on the developer machine (build farm); the
+      # production CT never compiles and does not install a Rust toolchain.
+      # `cargo` is often rustup's shim -- its presence alone does not mean a
+      # compiler is usable, so probe an actual `cargo --version`.
+      need_cmd cargo && cargo --version >/dev/null 2>&1
       ;;
     *)
       return 1
@@ -569,50 +564,20 @@ ensure_brew() {
   need_cmd brew || fail "Homebrew is required on macOS. Install it first: https://brew.sh/"
 }
 
-# Installs Rust system-wide (RUSTUP_HOME/CARGO_HOME under /usr/local) rather
-# than into the invoking user's $HOME, so cargo/rustc are on PATH for every
-# user the same way apt/brew-installed runtimes are -- rustup's default
-# per-user install would only be visible to whichever user ran provision.sh,
-# not necessarily the user PM2 runs services as.
+# Installs the Rust toolchain on the developer machine (the build farm) as a
+# normal per-user install (~/.cargo, ~/.rustup) so cargo/rustc resolve from
+# the invoking user's PATH the way brew-installed runtimes do.
+#
+# Rust is only provisioned on the developer machine (the build farm): the
+# production CT never compiles and does not install a Rust toolchain, so this
+# always installs the normal per-user way (~/.cargo, ~/.rustup, rustup's own
+# default). configure.sh's dev-mode PM2 env deliberately leaves
+# RUSTUP_HOME/CARGO_HOME unset so PM2 inherits whatever the user's own shell
+# resolves.
 install_rust_system_wide() {
-  # Always select the CT-wide rustup homes before probing cargo. Without this,
-  # `/usr/local/bin/cargo` can resolve rustup's shim against root's empty
-  # per-user ~/.rustup directory and report that no default toolchain exists.
-  if is_prod_mode; then
-    export RUSTUP_HOME=/usr/local/rustup
-    export CARGO_HOME=/usr/local/cargo
-    export PATH="/usr/local/cargo/bin:$PATH"
-  fi
-
   if need_cmd cargo && cargo --version >/dev/null 2>&1; then
     ok "Rust already installed: $(cargo --version)"
-  elif is_prod_mode; then
-    log "Installing Rust (rustup, system-wide under /usr/local)..."
-    $SUDO mkdir -p /usr/local/rustup /usr/local/cargo
-    RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
-      $SUDO bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
-    $SUDO chmod -R a+rX /usr/local/rustup /usr/local/cargo
-
-    if [[ ! -f /etc/profile.d/cargo.sh ]]; then
-      echo 'export RUSTUP_HOME=/usr/local/rustup
-export CARGO_HOME=/usr/local/cargo
-export PATH="/usr/local/cargo/bin:$PATH"' | $SUDO tee /etc/profile.d/cargo.sh >/dev/null
-    fi
-
-    # Symlink into a directory already on PATH for the rest of this script
-    # (and non-login shells) without requiring a fresh login.
-    $SUDO ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo
-    $SUDO ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc
-    export PATH="/usr/local/cargo/bin:$PATH"
   else
-    # Dev machine, not a shared CT -- install the normal per-user way
-    # (~/.cargo, ~/.rustup, rustup's own default). No sudo, and critically
-    # no RUSTUP_HOME/CARGO_HOME override: configure.sh's dev-mode PM2 env
-    # deliberately leaves those unset so PM2 inherits whatever the user's
-    # own shell already resolves cargo/rustup to. Installing system-wide
-    # here would just recreate the CT-only /usr/local/rustup path that
-    # PM2 in dev mode no longer points at, silently breaking the very
-    # thing this branch exists to fix on a machine with no rust at all.
     log "Installing Rust (rustup, per-user under \$HOME)..."
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     # shellcheck disable=SC1091
@@ -623,13 +588,7 @@ export PATH="/usr/local/cargo/bin:$PATH"' | $SUDO tee /etc/profile.d/cargo.sh >/
   # PATH but no selected compiler, causing every PM2 Rust service to crash
   # with "rustup could not choose a version". Explicitly establish stable
   # after every provisioning run; rustup makes this a cheap no-op once ready.
-  if is_prod_mode && [[ -x /usr/local/cargo/bin/rustup ]]; then
-    log "Ensuring Rust stable toolchain is selected system-wide..."
-    $SUDO env RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
-      /usr/local/cargo/bin/rustup toolchain install stable --profile minimal
-    $SUDO env RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
-      /usr/local/cargo/bin/rustup default stable
-  elif need_cmd rustup; then
+  if need_cmd rustup; then
     log "Ensuring Rust stable toolchain is selected..."
     rustup toolchain install stable --profile minimal
     rustup default stable
@@ -649,13 +608,13 @@ export PATH="/usr/local/cargo/bin:$PATH"' | $SUDO tee /etc/profile.d/cargo.sh >/
   # just failing once at provision time.
   #
   # This check runs unconditionally (not just in the fresh-install
-  # branch above), since a CT can already have cargo installed from an
+  # branch above), since a machine can already have cargo installed from an
   # earlier provision run while still being missing the toolchain --
   # exactly the state that produced the crash loop this fixes.
   ensure_c_toolchain
 
   # Every rust-runtime domain is its own independent Cargo project with
-  # its own target/ dir, so a from-scratch CT recompiles shared
+  # its own target/ dir, so a from-scratch machine recompiles shared
   # dependencies (aws-lc-rs, serde_json, tower-service, ...) once per
   # domain instead of once total. sccache caches compiled objects by
   # (source, flags) across all of them, so only the first domain to
@@ -1164,12 +1123,9 @@ main() {
   fi
 
   for token in "${TOKENS[@]:-}"; do
-    if [[ "$token" == "rust" && is_prod_mode && -n "${ECO_RUST_DEDICATED_BUILDER:-}" ]]; then
-      ok "Rust is built by dedicated CT ${ECO_RUST_DEDICATED_BUILDER}; target CT will not install Rust."
-      continue
-    fi
     if [[ "$token" == "rust" && is_prod_mode ]]; then
-      warn "No ECO_RUST_DEDICATED_BUILDER is set; Rust will be installed and built in this application CT."
+      ok "Rust is built on the developer machine and shipped as binaries; production CT does not install or build Rust."
+      continue
     fi
     if token_is_skipped "$token"; then
       warn "Skipping $token (declared only by a dev-optional domain that can't run locally)."

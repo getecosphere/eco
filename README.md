@@ -6,21 +6,18 @@ Private CLI and primary implementation for the Ecology DDD workflow.
 
 Proxmox CT provides the infrastructure boundary; `eco` provides the application composition boundary. Services run natively inside CTs — one CT may host one or more application estates, each declared by its own `ecompose.yml`.
 
-## Implementation Status: Node → Rust
+## Implementation: a compiled Rust binary
 
-`eco` has been migrated from a Node.js CLI to a **compiled Rust binary** (see
-`rust/`). All command logic is implemented in Rust, and every bundled Bash
-workflow script (`configure.sh`, `provision.sh`, `init.sh`, `git.sh`,
-`install-*.sh`, `tree.sh`, `repos.json`, and the starter `ecology-mark.webp`)
-is **embedded inside the binary** via `include_str!`/`include_bytes!`, then
-extracted to `~/.cache/eco/bundled/` (or `$ECO_BUNDLED_ROOT`) on first run and
-executed through `bash`.
+`eco` is a **compiled Rust binary** (see `rust/`). All command logic is
+implemented in Rust, and every bundled Bash workflow script (`configure.sh`,
+`provision.sh`, `git.sh`, `install-*.sh`, `tree.sh`, and the
+starter `ecology-mark.webp`) is **embedded inside the binary** via
+`include_str!`/`include_bytes!`, then extracted to `~/.cache/eco/bundled/` (or
+`$ECO_BUNDLED_ROOT`) on first run and executed through `bash`.
 
 No Node.js runtime is needed to run the CLI. The former
-`src/bin/registry-cli.js` is now the internal `eco registry` subcommand, and
-the webhook receiver (`src/runtime/github-webhook-receiver.js`) is the internal
-`eco webhook-server` subcommand. `package.json` and the old `src/` tree remain
-only for reference during the transition; new work targets `rust/`.
+`src/bin/registry-cli.js` is now the internal `eco registry` subcommand. The
+old Node `src/` tree and `package.json` were removed after the migration.
 
 Build: `cd rust && cargo build --release` → `rust/target/release/eco`.
 
@@ -38,8 +35,7 @@ cross-linking) so nothing is hand-installed:
 
 Artifacts land in `dist/<target-triple>/eco[.exe]`. The host runs the Linux
 binary (see [docs/releasing.md](docs/releasing.md)); a CT keeps its own copy
-of the binary for `eco up` and the `eco webhook-server`, refreshed inside the
-CT by the deploy script rather than `npm install && npm link`.
+of the binary for `eco up`, refreshed inside the CT by the deploy script.
 
 ## When you change eco (the daily loop)
 
@@ -53,7 +49,7 @@ copied into the bundle at `bin/eco` (see `rust/src/embedded.rs`) and pushed as
 `temp-tar:eco`, then installed onto the CT's PATH. A code change is **not live**
 until the host runs the new build. Order of operations:
 
-1. **Change the code** in `rust/` (or an embedded `*.sh` script, or `repos.json`).
+1. **Change the code** in `rust/` (or an embedded `*.sh` script).
 2. **Compile.** For local dev on a Mac: `cd rust && cargo build --release` →
    `rust/target/release/eco` (macOS build — enough to test `eco show`,
    `eco up dev`, etc.). For the host/CTs: `./build-release.sh` →
@@ -62,7 +58,9 @@ until the host runs the new build. Order of operations:
 3. **Put the new binary on the host.** Publish `dist/` and run
    `curl -fsSL https://getecosphere.com/install.sh | sh` on the host, **or**
    scp the Linux build straight to the host: `scp dist/x86_64-unknown-linux-musl/eco host:/usr/local/bin/eco`.
-   Verify with `eco --version` on the host.
+   Verify with `eco --version` on the host. The `eco serve` agent is a
+   long-lived process — restart it after any binary swap
+   (`systemctl restart eco-serve` or `pkill -f 'eco serve'` + relaunch).
 4. **Commit and push** the eco repo changes.
 
 **Without step 3 the host keeps deploying the old binary into CTs** — the code
@@ -194,21 +192,19 @@ Rules that matter:
 
 ### Working with the registry
 
-- LXS is resolved **from the remote registry**, never from `repos.json`.
-  `eco lxs search/list/pull/verify` and `eco up` (for `lxs:` services) all
-  fast-forward the local `ECO_LXS_REGISTRY` clone from
-  `https://github.com/getecosphere/lxs-registry.git` first — cloning it on
-  first use if it does not exist. A host that is offline keeps serving the
-  last-synced clone (with a warning). The old "remember to `git pull`" step is
-  no longer needed for reading.
+- LXS is resolved **from the remote registry**. `eco lxs search/list/pull/verify`
+  and `eco up` (for `lxs:` services) all fast-forward the local
+  `ECO_LXS_REGISTRY` clone from `https://github.com/getecosphere/lxs-registry.git`
+  first — cloning it on first use if it does not exist. A host that is offline
+  keeps serving the last-synced clone (with a warning). The old "remember to
+  `git pull`" step is no longer needed for reading.
 - `eco lxs build` / `publish` still write into `ECO_LXS_REGISTRY`
   (default `~/projects/lxs-registry`); publishing requires a real
   `getecosphere/lxs-registry` clone on that origin, and the operator still
   pushes it after `eco lxs publish`.
-- `repos.json` remains the source of truth **only for source-composed
-  domains** (`domains:` entries and `path:` first segments) — legacy monolith
-  and in-development domains that are not (yet) published as LXS. A service
-  declared `lxs: <name>@<version>` is never looked up in `repos.json`.
+- Source-composed domains (`path:` services) ship from the developer workspace
+  via `eco up --remote`; there is no central `repos.json` catalog anymore. A
+  service declared `lxs: <name>@<version>` is resolved purely from the registry.
 - To publish a new LXS version: bump the domain, `eco lxs build` +
   `eco lxs publish <name>@<version>`, then push the registry. The public CI
   loop is the same for community contributions.
@@ -261,9 +257,9 @@ Community contributions keep the fork → PR → merge → `v*` tag loop; the re
 | **Tailscale Admin Access** — operator SSH access, subnet router setup, gotchas | [docs/tailscale.md](docs/tailscale.md) |
 | **Dev vs Prod URL Policy** — generated URL differences, adding frontend frameworks, LAN access for remote dev CTs | [docs/dev-vs-prod-url.md](docs/dev-vs-prod-url.md) |
 | **`eco up` Contract** — what a successful `eco up` guarantees | [docs/eco-up-contract.md](docs/eco-up-contract.md) |
-| **CI/CD** — webhook-driven deploys, debounce, fan-out for shared domains, per-estate branch overrides | [docs/cicd.md](docs/cicd.md) |
+| **CI/CD** — deploys are dev/CI-initiated via `eco up --remote`; no GitHub webhooks | [docs/cicd.md](docs/cicd.md) |
 | **Database & Port Troubleshooting** — PostgreSQL setup, gateway port stability, service port collisions, high-load crash loops | [docs/database-and-ports.md](docs/database-and-ports.md) |
-| **Rust Build** — dedicated builder CT, hash-based skip, git-clean fix, release binary preference, remote dev-machine builds (`eco up --remote`) | [docs/rust.md](docs/rust.md) |
+| **Rust Build** — build on the developer machine, ship binaries (`eco up --remote`), no in-CT compile, hash-based skip | [docs/rust.md](docs/rust.md) |
 | **Remote Deploy (eco serve agent)** — host-side HTTP agent + API keys, `eco up --remote` cross-compile on the dev machine, `.sqlx` offline requirement, `.env` handling | [docs/agent.md](docs/agent.md) |
 | **LXS Registry & Public Domains** — public `getecosphere` repos, publisher identity, contribution loop + CI publish, publish contract | this page ("LXS Registry & Public Domains") |
 | **Releasing & Installing** — cross-compile for macOS/Linux/Windows, `install.sh`, host install, eco inside a CT | [docs/releasing.md](docs/releasing.md) |

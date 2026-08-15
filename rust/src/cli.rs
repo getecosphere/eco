@@ -61,8 +61,8 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
             crate::embedded::materialize_configure_sh(&dest)
         }
         // internal: materialize every bundled script (configure.sh, provision.sh,
-        // init.sh, git.sh, tree.sh, install-*.sh) into a directory, so the CT
-        // runs the shipped versions even when the bundle predates this deploy.
+        // git.sh, tree.sh, install-*.sh) into a directory, so the CT runs the
+        // shipped versions even when the bundle predates this deploy.
         "__bundle-scripts" => {
             let dest = rest.first().cloned().unwrap_or_default();
             if dest.is_empty() {

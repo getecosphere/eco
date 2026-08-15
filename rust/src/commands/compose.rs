@@ -226,7 +226,7 @@ fn resolve_compose_target(target: &str, estate_root: &Path, workspace_root: &Pat
     }
     if !path_exists(&candidate) {
         return Err(format!(
-            "\"{target}\" isn't a known repo in eco/repos.json, and no directory was found at it either \
+            "\"{target}\" is neither a known LXS/domain nor a directory \
 (checked relative to the current directory and to the estate root {}).",
             estate_root.display()
         ));
@@ -289,7 +289,7 @@ fn pick_targets_interactively(manifest_content: &str) -> Result<Vec<String>, Str
         .collect();
 
     if items.is_empty() {
-        util::println_stdout("Every repo in eco/repos.json is already composed into this estate.");
+        util::println_stdout("Every known domain is already composed into this estate.");
         return Ok(Vec::new());
     }
     let (requires_by, required_by) = checklist::build_repo_dependency_maps(&catalog);

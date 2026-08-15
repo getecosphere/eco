@@ -37,7 +37,6 @@ Usage:
   eco serve stop <subdomain>
   eco serve list
   eco expose [path] [--dry-run]
-  eco webhook-clean [path] [--dry-run]
   eco sync [--host <hostname>] [--ct <ctid>] [--service <name>] [--staging] [--dry-run]
   eco sync-staging [--host <hostname>] [--service <name>] [--dry-run]
   eco dev flushdns
@@ -91,8 +90,6 @@ Current command groups:
              localhost, and records serve.subdomain in ecompose.yml. Host-side
              agent: "eco serve --port <port>" / "eco serve gen-key".
   expose      Publish the configured public hostname through the proxy CT
-  webhook-clean Remove broken GitHub deploy webhooks and malformed DNS records
-               left behind by changed hook hostnames
   sync       Sync production MongoDB and PostgreSQL data from the estate's
              application CT to the local dev machine via SSH (mongodump /
              mongorestore, pg_dump / pg_restore). Reads ecompose.yml to
@@ -157,7 +154,6 @@ Cloudflare automation env:
   since one tunnel can only belong to one Cloudflare account.
 
 GitHub automation env:
-  GITHUB_TOKEN   GitHub token (used by legacy webhook sync; eco up --remote needs none)
   ECO_GITHUB_API_KEY
                  GitHub token used by startproject to create and push the
                  estate core repo, <project>_core, owning ecompose.yml

@@ -121,7 +121,7 @@ pub fn run_rust(args: &[String]) -> Result<(), String> {
     match subcommand {
         "" | "help" | "--help" => {
             util::print_stdout(
-                "eco rust\n\nUsage:\n  eco rust cleartarget [--dry-run]  Remove all Rust target/ directories and .eco-rust-hash files to force a full recompile on next eco up.\n",
+                "eco rust\n\nUsage:\n  eco rust cleartarget [--dry-run]  Remove Rust target/ directories and .eco-rust-hash files to force a full recompile on the next local build.\n",
             );
             Ok(())
         }
@@ -157,7 +157,7 @@ pub fn run_rust(args: &[String]) -> Result<(), String> {
                 }
             }
             util::println_stdout(&format!(
-                "\n{}Done. Run eco up to trigger a full recompile.",
+                "\n{}Done. Run eco up dev to trigger a full recompile.",
                 if dry_run { "[dry-run] " } else { "" }
             ));
             Ok(())

@@ -486,25 +486,9 @@ fn build_ecompose_content(
         String::new(),
     ];
 
-    if details.deploy_enabled {
-        lines.push("deploy:".to_string());
-        lines.push("  github:".to_string());
-        lines.push("    enabled: true".to_string());
-        lines.push(format!("    branch: {}", details.deploy_branch));
-        lines.push("    debounce_ms: 15000".to_string());
-        lines.push("    webhook_path: /__eco/github/deploy".to_string());
-        lines.push(String::new());
-    } else {
-        lines.push("deploy:".to_string());
-        lines.push("  github:".to_string());
-        lines.push("    enabled: false".to_string());
-        lines.push(String::new());
-    }
-
     if details.staging_enabled {
         lines.push("# Staging footprint: a second deployment on a separate CT, exposed at".to_string());
-        lines.push("# a staging-<hostname> and redeployed by a webhook that accepts any".to_string());
-        lines.push("# branch except the prod deploy branch (see docs/cicd.md).".to_string());
+        lines.push("# a staging-<hostname> and deployed explicitly with eco up --remote --staging.".to_string());
         lines.push("staging:".to_string());
         lines.push(format!("  ct: {}", details.staging_ct));
         lines.push(String::new());
@@ -552,7 +536,7 @@ fn build_ecompose_content(
         lines.push(String::new());
         lines.push("# The composition repository is this estate's own project repo, not a".to_string());
         lines.push("# shared catalog domain: its git address lives here so a fresh host can".to_string());
-        lines.push("# clone it without committing a project-specific entry to eco/repos.json.".to_string());
+        lines.push("# clone it without a central catalog entry.".to_string());
         lines.push("composition:".to_string());
         lines.push(format!("  git: {composition_git}"));
         lines.push("  branch: main".to_string());
@@ -1037,8 +1021,6 @@ struct EstateDetails {
     hostname: String,
     cloudflare_account: String,
     expose_service: String,
-    deploy_enabled: bool,
-    deploy_branch: String,
     storage: Option<StorageDetails>,
     staging_ct: i64,
     staging_enabled: bool,
@@ -1086,14 +1068,11 @@ fn prompt_ecompose_details(
         let default_hostname = format!("{project_name}.jogjaitcamp.com");
         let hostname = flags.hostname.clone().unwrap_or(default_hostname);
         let cloudflare_account = flags.cloudflare_account.clone().unwrap_or_else(|| "jogjaitcamp".to_string());
-        let deploy_enabled = !flags.no_deploy;
-        let deploy_branch = "main".to_string();
         let staging_ct = flags.staging_ct.unwrap_or(1000);
         let staging_enabled = !flags.no_staging;
         let storage = prompt_storage_details(true, flags.no_storage)?;
         util::println_stdout(&format!(
-            "\n  ct.id: {ct_id}\n  expose.hostname: {hostname}\n  expose.cloudflare_account: {cloudflare_account}\n  expose.service: {frontend_service}\n  github deploy: {}\n  staging: {}\n  storage: {}\n",
-            if deploy_enabled { "enabled" } else { "disabled" },
+            "\n  ct.id: {ct_id}\n  expose.hostname: {hostname}\n  expose.cloudflare_account: {cloudflare_account}\n  expose.service: {frontend_service}\n  staging: {}\n  storage: {}\n",
             if staging_enabled { format!("ct {staging_ct}") } else { "disabled".to_string() },
             if storage.is_some() { format!("minio CT ({})", storage.as_ref().unwrap().ct) } else { "not configured".to_string() }
         ));
@@ -1102,8 +1081,6 @@ fn prompt_ecompose_details(
             hostname,
             cloudflare_account,
             expose_service: frontend_service.to_string(),
-            deploy_enabled,
-            deploy_branch,
             storage,
             staging_ct,
             staging_enabled,
@@ -1124,13 +1101,6 @@ fn prompt_ecompose_details(
     let cloudflare_account = checklist::prompt_line("  expose.cloudflare_account [jogjaitcamp]: ")?;
     let cloudflare_account = if cloudflare_account.trim().is_empty() { "jogjaitcamp".to_string() } else { cloudflare_account.trim().to_string() };
 
-    let deploy_enabled = checklist::confirm_with_single_key("  Enable GitHub deploy?", true)?;
-    let deploy_branch = if deploy_enabled {
-        let branch_input = checklist::prompt_line("  branch [main]: ")?;
-        if branch_input.trim().is_empty() { "main".to_string() } else { branch_input.trim().to_string() }
-    } else {
-        "main".to_string()
-    };
     let storage = prompt_storage_details(false, false)?;
     let staging_enabled = checklist::confirm_with_single_key("  Enable staging?", true)?;
     let staging_ct = if staging_enabled {
@@ -1152,8 +1122,6 @@ fn prompt_ecompose_details(
         hostname,
         cloudflare_account,
         expose_service: frontend_service.to_string(),
-        deploy_enabled,
-        deploy_branch,
         storage,
         staging_ct,
         staging_enabled,
@@ -1311,7 +1279,6 @@ fn confirm_plan(project_name: &str, target_root: &Path, current_dir_mode: bool, 
     out.push_str(&format!("  hostname:         {}\n", details.hostname));
     out.push_str(&format!("  cloudflare:       {}\n", details.cloudflare_account));
     out.push_str(&format!("  expose.service:   {}\n", details.expose_service));
-    out.push_str(&format!("  github deploy:    {}\n", if details.deploy_enabled { format!("enabled (branch: {})", details.deploy_branch) } else { "disabled".to_string() }));
     out.push_str(&format!("  staging:          {}\n", if details.staging_enabled { format!("ct {}", details.staging_ct) } else { "disabled".to_string() }));
     out.push_str(&format!("  object storage:   {}\n", if details.storage.is_some() { format!("minio CT ({})", details.storage.as_ref().unwrap().ct) } else { "not configured".to_string() }));
     if superadmin_setup {

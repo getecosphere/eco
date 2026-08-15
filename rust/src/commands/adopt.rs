@@ -278,7 +278,7 @@ pub fn run_adopt(args: &[String]) -> Result<(), String> {
 
     util::println_stdout(&format!("\nProposed {}:\n\n{content}\n", ecompose_path.display()));
     util::println_stdout(
-        "Note: expose/deploy blocks are intentionally left out -- add them by hand\n(see assessment/assessment_core/ecompose.yml or training/training_core/ecompose.yml\nfor examples) once this estate has a public hostname or webhook deploy set up.\n",
+        "Note: expose/deploy blocks are intentionally left out -- add them by hand\n(see assessment/assessment_core/ecompose.yml or training/training_core/ecompose.yml\nfor examples) once this estate has a public hostname set up.\n",
     );
 
     let confirmation = crate::checklist::prompt_line(&format!(

@@ -181,7 +181,6 @@ pub fn run_show(_args: &[String]) -> Result<(), String> {
     let ct = ecompose::parse_ct_metadata(&content);
     let services = ecompose::parse_services(&content);
     let expose = ecompose::parse_expose(&content);
-    let deploy = ecompose::parse_deploy(&content);
 
     let ecosystem_path = file_path.parent().unwrap_or(Path::new(".")).join("ecosystem.config.js");
     let ports = read_ports_from_ecosystem(&ecosystem_path);
@@ -278,22 +277,6 @@ pub fn run_show(_args: &[String]) -> Result<(), String> {
         }
         if !expose.service().is_empty() {
             let _ = writeln!(out, "    {}   {}", util::cyan("service"), expose.service());
-        }
-        let _ = writeln!(out);
-    }
-
-    let github = deploy.get("github").cloned().unwrap_or_default();
-    if util::to_bool(github.get("enabled").map(|s| s.as_str()).unwrap_or("")) {
-        let _ = writeln!(out, "  {}", util::bold("Deploy"));
-        if let Some(branch) = github.get("branch") {
-            if !branch.is_empty() {
-                let _ = writeln!(out, "    {}        {}", util::cyan("branch"), branch);
-            }
-        }
-        if let Some(wp) = github.get("webhook_port") {
-            if !wp.is_empty() {
-                let _ = writeln!(out, "    {}  {}", util::cyan("webhook_port"), wp);
-            }
         }
         let _ = writeln!(out);
     }
