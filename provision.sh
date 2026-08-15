@@ -396,6 +396,20 @@ parse_ecompose() {
       next
     }
 
+    # v2 ecompose: inline runtimes, e.g. `runtimes: [rust, postgresql@15]`
+    section == "services" && /^    runtimes:[[:space:]]*\[/ {
+      inline = $0
+      sub(/^[[:space:]]*runtimes:[[:space:]]*/, "", inline)
+      sub(/[[:space:]]*#.*$/, "", inline)
+      sub(/^\[/, "", inline)
+      sub(/\]$/, "", inline)
+      split(inline, parts, /,[[:space:]]*/)
+      for (i in parts) {
+        print "runtime\t" service "\t" trim(parts[i])
+      }
+      next
+    }
+
     section == "services" && /^    [A-Za-z0-9_-]+:/ {
       in_runtimes = 0
       next

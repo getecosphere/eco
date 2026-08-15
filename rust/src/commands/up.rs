@@ -2666,12 +2666,20 @@ fn deploy_estate(
         &util::current_dir(),
     )?;
     pct_exec(&ctid, "chmod +x /tmp/eco-provision.sh")?;
+    // v2 release-dir layout: provision against the staged manifest on the CT
+    // (immutable release dir), not the legacy /opt/projects source tree.
+    let provision_dir = if remote_mode {
+        ct_release_dir.clone()
+    } else {
+        deployment.ct_workspace_root.clone()
+    };
+    let provision_input = format!("{provision_dir}/ecompose.yml");
     pct_exec(
         &ctid,
         &format!(
             "cd {} && ECO_DEPLOY_MODE=prod bash /tmp/eco-provision.sh {}",
-            deployment.ct_workspace_root,
-            deployment.project
+            shell_single_quote(&provision_dir),
+            shell_single_quote(&provision_input)
         ),
     )?;
     let _ = std::fs::remove_dir_all(&eco_tmp_dir);
