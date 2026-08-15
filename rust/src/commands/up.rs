@@ -3843,14 +3843,22 @@ Larger payloads are a paid-plan limit."
         // drops — then tell the agent to deploy the uploaded file.
         let ssh = util::env_var_or("ECO_SSH", "");
         if !ssh.is_empty() {
-            print_step(&format!("Shipping remote deploy payload for {} via scp to {ssh}", deployment.project));
+            print_step(&format!(
+                "remote payload is {} MB — shipping via scp to {ssh}",
+                bytes.len() / (1024 * 1024)
+            ));
+            let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
             let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
             run_command("scp", &["-o".to_string(), "StrictHostKeyChecking=no".to_string(), tar_path.display().to_string(), format!("{ssh}:{remote_path}")], &util::current_dir())?;
             let deploy_file_url = format!("{base}/v1/estates/{project_segment}/deploy-file{deploy_query}");
             let summary = agent_client_post(&deploy_file_url, &api_key, b"")?;
             util::println_stdout(&summary);
         } else {
-            print_step(&format!("Shipping remote deploy payload for {} to {base}", deployment.project));
+            print_step(&format!(
+                "Shipping remote deploy payload for {} to {base} ({} MB)",
+                deployment.project,
+                bytes.len() / (1024 * 1024)
+            ));
             // Large payloads exceed Cloudflare's free-tier request limit
             // (100MB), so chunk the upload (<90MB per chunk) to the
             // deploy-upload endpoint, which reassembles + deploys.
