@@ -27,6 +27,8 @@ pub struct ServiceDeploy {
     pub http: bool,
     /// Primary HTTP port (allocated by the registry host-side).
     pub port: u16,
+    /// The env var name this service reads its port from (SERVER_PORT / PORT).
+    pub port_var: String,
 }
 
 /// Resolve the executable for a service inside a CT release dir.
@@ -60,12 +62,12 @@ pub fn resolve_service_exec(
         let bin_path = format!("{artifacts}/{bin}");
         return Ok((bin_path, release_dir.to_string(), true));
     }
-    // LXS-only service (no runtimes declared): a registry binary named by the
-    // lxs package name, shipped into artifacts/<name>.
+    // LXS-only service (no runtimes declared): a registry binary shipped into
+    // artifacts/<service.name>/bin/<name>.
     if !service.lxs.is_empty() {
         let bin = service.lxs.split('@').next().unwrap_or("").to_string();
-        let bin_path = format!("{artifacts}/{bin}");
-        return Ok((bin_path, release_dir.to_string(), true));
+        let bin_path = format!("{artifacts}/{}/bin/{bin}", service.name);
+        return Ok((bin_path, format!("{artifacts}/{}", service.name), true));
     }
     if service.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")) {
         // Frontend: served as a static dist via python http.server, or a
@@ -94,23 +96,25 @@ pub fn env_var_for(service: &ecompose::Service, default: &str) -> String {
         "SERVER_PORT".to_string()
     } else if service.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")) {
         "PORT".to_string()
+    } else if !service.lxs.is_empty() {
+        // LXS from the registry: most are Rust/Go binaries that read SERVER_PORT.
+        "SERVER_PORT".to_string()
     } else {
         default.to_string()
     }
 }
 
 /// Build systemd unit files for the estate. Returns Vec<(unit_filename, unit_text)>.
-/// `units_dir` is the target dir on the CT (/etc/systemd/system) — content is
-/// written to the host staging dir and pushed.
+/// `env_paths` maps service name -> absolute .env file path on the CT.
 pub fn build_systemd_units(
     project: &str,
     services: &[ServiceDeploy],
-    env_files: &HashMap<String, String>, // service -> .env path on the CT
+    env_paths: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
     let mut units = Vec::new();
     for s in services {
         let unit_name = format!("eco-{project}-{}.service", s.name);
-        let env_file = env_files.get(&s.name).cloned().unwrap_or_default();
+        let env_file = env_paths.get(&s.name).cloned().unwrap_or_default();
         let mut unit = String::from("[Unit]\n");
         unit.push_str(&format!("Description={project} {}\n", s.name));
         unit.push_str("After=network.target\n");
@@ -133,6 +137,9 @@ pub fn build_systemd_units(
 
 /// Build the `.env` for each service from its shipped `.env.example` contract.
 /// Returns service name -> env file text (host-generated values merged).
+/// Every key from the shipped `.env.example` contract is written; the port var
+/// (SERVER_PORT for rust, PORT for node/frontend) and JWT_SECRET are filled
+/// when the contract does not provide them.
 pub fn build_env_files(
     services: &[ServiceDeploy],
     project: &str,
@@ -144,7 +151,6 @@ pub fn build_env_files(
     for s in services {
         let port = ports.get(&s.name).copied().unwrap_or(0);
         let mut env = String::new();
-        // Start from the shipped contract.
         for line in s.env_example.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -153,23 +159,26 @@ pub fn build_env_files(
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
                 let v = v.trim().trim_matches('"').to_string();
-                // Fill from registry / port where known.
-                let port_var = env_var_for_by_name(&s.name, port, "PORT");
-                if k == port_var {
+                if k == s.port_var {
                     env.push_str(&format!("{k}={port}\n"));
                 } else if let Some(rv) = registry_values.get(k) {
                     env.push_str(&format!("{k}={rv}\n"));
+                } else if let Some(mv) = managed_env_value(&k, &s.name, project) {
+                    env.push_str(&format!("{k}={mv}\n"));
+                } else if v.is_empty() && k.starts_with("S3_") {
+                    // Grant-provided S3 secrets: leave a resolvable placeholder
+                    // so the service can start; real values come from grants.
+                    env.push_str(&format!("{k}=\n"));
                 } else {
                     env.push_str(&format!("{k}={v}\n"));
                 }
             }
         }
         // Guarantee the port var is present.
-        let port_var = env_var_for_by_name(&s.name, port, "PORT");
-        if !env.contains(&format!("{port_var}=")) {
-            env.push_str(&format!("{port_var}={port}\n"));
+        if !env.contains(&format!("{}=", s.port_var)) {
+            env.push_str(&format!("{}={port}\n", s.port_var));
         }
-        // Shared JWT + scope marker.
+        // Shared JWT.
         if !env.contains("JWT_SECRET=") {
             let jwt = configgen_shared_jwt(&scope, project);
             env.push_str(&format!("JWT_SECRET={jwt}\n"));
@@ -183,6 +192,20 @@ fn hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "ecosphere".to_string())
 }
 
+/// Managed env values Eco derives itself (mirrors configure.sh's managed
+/// providers): the estate-local MongoDB/Postgres/Redis URIs. The DB name for a
+/// service follows the historical convention `<service>_<project>`.
+fn managed_env_value(key: &str, service: &str, project: &str) -> Option<String> {
+    match key {
+        "MONGODB_URI" => Some(format!("mongodb://localhost:27017/{service}_{project}")),
+        "REDIS_URL" => Some("redis://127.0.0.1:6379".to_string()),
+        "DATABASE_URL" | "POSTGRES_URL" => {
+            Some(format!("postgresql://{project}_user@{service}_{project}", project = project, service = service))
+        }
+        _ => None,
+    }
+}
+
 /// Provisional shared-JWT derivation until the registry secret is plumbed.
 fn configgen_shared_jwt(_scope: &str, _project: &str) -> String {
     let mut b = [0u8; 32];
@@ -191,9 +214,7 @@ fn configgen_shared_jwt(_scope: &str, _project: &str) -> String {
     crate::registry::hex_encode(&b)
 }
 
-fn env_var_for_by_name(_name: &str, _port: u16, default: &str) -> String {
-    default.to_string()
-}/// Build the estate Caddyfile (gateway) for one public hostname.
+/// Build the estate Caddyfile (gateway) for one public hostname.
 pub fn build_caddyfile(
     hostname: &str,
     gateway_port: u16,
@@ -240,28 +261,33 @@ pub fn lookup_port(project: &str, service: &str, type_kind: &str) -> Result<u16,
         .map(|p| p.unwrap_or(0) as u16)
 }
 
-/// Materialize config files into a staging dir on the host, ready to push.
-/// Returns (files, unit_files) as relative path -> content.
+/// Materialize config files, ready to push into the CT.
+/// `read_dir` is where artifacts + .env.example live (the host release dir);
+/// `write_dir` is where .env files + systemd ExecStart paths must point (the
+/// CT release dir). Returns (files, unit_files) — files as relative path ->
+/// content, units as (unit_filename, unit_text).
 pub fn generate_all(
     project: &str,
-    release_dir: &str,
+    read_dir: &str,
+    write_dir: &str,
     services: &[ecompose::Service],
     expose_hostname: &str,
 ) -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
     let mut deploys: Vec<ServiceDeploy> = Vec::new();
     let mut ports: HashMap<String, u16> = HashMap::new();
     for svc in services {
-        let (exec, workdir, http) = resolve_service_exec(svc, release_dir, "")?;
+        let (exec, workdir, http) = resolve_service_exec(svc, write_dir, "")?;
         if exec.is_empty() {
             continue;
         }
-        let env_example = read_env_example(release_dir, svc);
+        let env_example = read_env_example(read_dir, svc);
         let port = if http {
             allocate_port(project, &svc.name, "service")?
         } else {
             0
         };
         ports.insert(svc.name.clone(), port);
+        let port_var = env_var_for(svc, "PORT");
         deploys.push(ServiceDeploy {
             name: svc.name.clone(),
             exec,
@@ -269,10 +295,16 @@ pub fn generate_all(
             env_example,
             http,
             port,
+            port_var,
         });
     }
     let env_files = build_env_files(&deploys, project, &ports, &HashMap::new());
-    let units = build_systemd_units(project, &deploys, &env_files);
+    // systemd EnvironmentFile must point at the .env file path on the CT.
+    let mut env_paths: HashMap<String, String> = HashMap::new();
+    for name in env_files.keys() {
+        env_paths.insert(name.clone(), format!("{write_dir}/.env/{name}.env"));
+    }
+    let units = build_systemd_units(project, &deploys, &env_paths);
     // .env files: relative path -> content
     let mut files: Vec<(String, String)> = Vec::new();
     for (name, env) in &env_files {

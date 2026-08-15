@@ -2705,8 +2705,11 @@ fn deploy_estate(
 
     // Generate config host-side (systemd units, .env, Caddyfile) and push the
     // finished files into the release dir; then point `current` at it.
+    // configgen reads artifacts/.env.example from the HOST release dir and
+    // writes paths that point at the CT release dir.
     print_step(&format!("[CT {ctid}] Generating estate config (host-side) for {}", deployment.project));
-    deploy_generate_config_host(&ctid, deployment, &ct_release_dir)?;
+    let host_release_dir = options.get("release-dir").cloned().unwrap_or_default();
+    deploy_generate_config_host(&ctid, deployment, &host_release_dir, &ct_release_dir)?;
     pct_exec(&ctid, &format!("ln -sfn {} {}", shell_single_quote(&ct_release_dir), shell_single_quote(&ct_current)))?;
     print_step(&format!("[CT {ctid}] current -> {}", ct_release_dir));
     // Clean up old releases beyond the keep limit (storage pricing hook).
@@ -2717,6 +2720,10 @@ fn deploy_estate(
         failures.push(("Building Rust".to_string(), failure));
     }
     for (name, command) in &build_steps {
+        if remote_mode {
+            // Remote deploys never build on the CT — artifacts are shipped.
+            break;
+        }
         match pct_exec(&ctid, &format!("cd {} && {}", deployment.ct_workspace_root, command)) {
             Ok(()) => print_step(&format!("[CT {ctid}] Building artifact: {name}")),
             Err(e) => {
@@ -2726,13 +2733,19 @@ fn deploy_estate(
         }
     }
     match (|| -> Result<(), String> {
-        print_step(&format!("[CT {ctid}] Starting services for {} ({})", deployment.project, if systemd_mode() { "systemd" } else { "pm2" }));
-        pct_exec(&ctid, &build_delete_declared_pm2_apps_command(&deployment.ct_config_path))?;
-        pct_exec(&ctid, &build_prune_conflicting_ports_command(&deployment.ct_config_path))?;
+        print_step(&format!("[CT {ctid}] Starting services for {} (systemd)", deployment.project));
         if systemd_mode() {
-            pct_exec(&ctid, &build_systemd_start_command(&deployment.ct_config_path))
+            // Pure-binary runtime: configgen wrote /etc/systemd/system/eco-<project>-*.service
+            // units whose ExecStart points at current/... — just reload, enable and
+            // restart them. No PM2, no ecosystem.config.js, no node.
+            let start = format!(
+                "systemctl daemon-reload\nfor unit in /etc/systemd/system/eco-{}-*.service; do\n  [ -f \"$unit\" ] || continue\n  name=\"$(basename \"$unit\")\"\n  systemctl enable \"$name\" 2>/dev/null || true\n  systemctl reset-failed \"$name\" 2>/dev/null || true\n  systemctl restart \"$name\" || true\ndone\nsleep 2\nfailed=\"\"\nfor unit in /etc/systemd/system/eco-{}-*.service; do\n  [ -f \"$unit\" ] || continue\n  name=\"$(basename \"$unit\")\"\n  if ! systemctl is-active --quiet \"$name\"; then failed=\"$failed $name\"; fi\ndone\nif [ -n \"$failed\" ]; then echo \"FAILED_TO_START:$failed\" >&2; exit 1; fi",
+                deployment.project,
+                deployment.project
+            );
+            pct_exec(&ctid, &start)
         } else {
-            pct_exec(&ctid, &format!("pm2 startOrReload {} --update-env", deployment.ct_config_path))
+            Err("pm2 is not supported on the CT — the runtime is systemd only.".to_string())
         }
     })() {
         Ok(()) => {}
@@ -4203,7 +4216,7 @@ pub fn run_expose(args: &[String]) -> Result<(), String> {
 /// Generate estate config (systemd units, .env, Caddyfile) on the HOST using
 /// the manifest + shipped artifacts + the resource registry, then push the
 /// finished files into the CT's release dir.
-fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, ct_release_dir: &str) -> Result<(), String> {
+fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, host_release_dir: &str, ct_release_dir: &str) -> Result<(), String> {
     use crate::configgen;
     let expose_hostname = deployment.expose.hostname();
     // Resolve the main estate's services (default: all declared services).
@@ -4223,7 +4236,9 @@ fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, ct_re
             .cloned()
             .collect()
     };
-    let (files, units) = configgen::generate_all(&deployment.project, ct_release_dir, &svc, &expose_hostname)?;
+    // read_dir = host release dir (artifacts + .env.example live there);
+    // write_dir = CT release dir (paths ExecStart/EnvironmentFile must point at).
+    let (files, units) = configgen::generate_all(&deployment.project, host_release_dir, ct_release_dir, &svc, &expose_hostname)?;
     // Push .env files + Caddyfile into the release dir.
     for (rel, content) in &files {
         let target = format!("{ct_release_dir}/{rel}");
@@ -4357,32 +4372,35 @@ fn install_lxs_services_release(ctid: &str, deployment: &ProjectDeployment, ct_r
         if name.is_empty() {
             return Err(format!("LXS {} has no name in its manifest", service.lxs));
         }
-        let target_dir = format!("{ct_release_dir}/artifacts");
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
+        // Install the binary under artifacts/<service.name>/bin/<name> and the
+        // env contract under artifacts/<service.name>/.env.example. Keeping the
+        // binary inside the service dir avoids the file-vs-directory collision
+        // when the lxs package name equals the service name.
+        let service_dir = format!("{ct_release_dir}/artifacts/{}", service.name);
+        let bin_dir = format!("{service_dir}/bin");
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&bin_dir)))?;
         run_command(
             "pct",
-            &["push".to_string(), ctid.to_string(), local_bin.display().to_string(), format!("{target_dir}/{name}.new")],
+            &["push".to_string(), ctid.to_string(), local_bin.display().to_string(), format!("{bin_dir}/{name}.new")],
             &util::current_dir(),
         )?;
         pct_exec(
             ctid,
             &format!(
                 "mv -f {} {} && chmod 755 {}",
-                shell_single_quote(&format!("{target_dir}/{name}.new")),
-                shell_single_quote(&format!("{target_dir}/{name}")),
-                shell_single_quote(&format!("{target_dir}/{name}"))
+                shell_single_quote(&format!("{bin_dir}/{name}.new")),
+                shell_single_quote(&format!("{bin_dir}/{name}")),
+                shell_single_quote(&format!("{bin_dir}/{name}"))
             ),
         )?;
         // Ship the LXS env contract so the server can generate `.env` without
         // source: write artifacts/<service.name>/.env.example from the contract.
-        let contract_dir = format!("{target_dir}/{}", service.name);
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&contract_dir)))?;
         let mut env_example = String::new();
         for key in manifest.contract.env.required.iter().chain(manifest.contract.env.optional.iter()) {
             let value = manifest.contract.env.defaults.get(key).cloned().unwrap_or_default();
             env_example.push_str(&format!("{key}={value}\n"));
         }
-        push_text_file_to_ct(ctid, &format!("{contract_dir}/.env.example"), &env_example, "lxs-env-example")?;
+        push_text_file_to_ct(ctid, &format!("{service_dir}/.env.example"), &env_example, "lxs-env-example")?;
         print_step(&format!("[CT {ctid}] Installed LXS {}@{} as {}", name, version, service.name));
         installed.push(service.name.clone());
     }
