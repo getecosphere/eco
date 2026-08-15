@@ -3316,13 +3316,27 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 trim_dev_artifact(&path, &artifact_dir);
             }
         }
-        // Next.js (`.next`) needs its node_modules on the CT at runtime. Ship
-        // the manifest files so the CT can `npm ci` (native modules are linux).
-        if included.iter().any(|s| s == ".next" || s == "app/.next") {
+        // Next.js (`.next`), Astro (`dist/server/entry.mjs`) and SvelteKit
+        // (`build/index.js`) SSR frontends need their node_modules on the CT at
+        // runtime. Ship the manifest files so the CT can `npm ci` (native
+        // modules are linux).
+        if included.iter().any(|s| s == ".next" || s == "app/.next")
+            || Path::new(build_dir).join("dist/server/entry.mjs").is_file()
+            || Path::new(build_dir).join("app/dist/server/entry.mjs").is_file()
+            || Path::new(build_dir).join("build/index.js").is_file()
+        {
             for f in ["package.json", "package-lock.json", "npm-shrinkwrap.json"] {
                 let src = Path::new(build_dir).join(f);
                 if src.is_file() {
                     std::fs::copy(&src, artifact_dir.join(f)).map_err(|e| e.to_string())?;
+                }
+            }
+            // Workspace layouts (Astro/SvelteKit under `app/`): ship the
+            // workspace member manifest too, or npm ci can't resolve deps.
+            for f in ["package.json", "package-lock.json"] {
+                let src = Path::new(build_dir).join("app").join(f);
+                if src.is_file() {
+                    std::fs::copy(&src, artifact_dir.join("app").join(f)).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -3640,7 +3654,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     }
 
     // Cross-compile each service and collect artifacts + source hashes.
-    let mut artifacts: Vec<(String, PathBuf)> = Vec::new();
+    let mut artifacts: Vec<(String, String, PathBuf)> = Vec::new();
     let mut hash_lines: Vec<String> = Vec::new();
     for (service, rel, dir) in &rust_targets {
         let cargo_text = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|e| format!("read {}: {e}", dir.join("Cargo.toml").display()))?;
@@ -3684,7 +3698,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         if !binary.is_file() {
             return Err(format!("cross-compiled binary not found: {}", binary.display()));
         }
-        artifacts.push((package.clone(), binary));
+        artifacts.push((service.name.clone(), package.clone(), binary));
         let hash = compute_rust_input_hash(dir)?;
         hash_lines.push(format!("{rel} {hash}"));
     }
@@ -3765,8 +3779,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let result = (|| -> Result<(), String> {
         let artifacts_dir = payload_dir.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir).map_err(|e| e.to_string())?;
-        for (package, binary) in &artifacts {
-            std::fs::copy(binary, artifacts_dir.join(package)).map_err(|e| format!("copy {}: {e}", binary.display()))?;
+        for (service_name, package, binary) in &artifacts {
+            // Binary lives at artifacts/<service.name>/bin/<package> so the
+            // service dir (.env.example, migrations) never collides with a
+            // flat binary file when service name == package name.
+            let service_bin_dir = artifacts_dir.join(service_name).join("bin");
+            std::fs::create_dir_all(&service_bin_dir).map_err(|e| e.to_string())?;
+            std::fs::copy(binary, service_bin_dir.join(package)).map_err(|e| format!("copy {}: {e}", binary.display()))?;
         }
         for (service_name, artifact_dir) in &frontend_artifacts {
             let dest = artifacts_dir.join(service_name);
@@ -4318,24 +4337,25 @@ fn install_remote_rust_binaries_release(
         } else {
             service.name.clone()
         };
-        let artifact = artifacts.join(&bin);
+        let artifact = artifacts.join(&service.name).join("bin").join(&bin);
         if !artifact.is_file() {
             return Err(format!("Remote artifact missing for {} (expected {})", service.name, artifact.display()));
         }
-        let target_dir = format!("{ct_release_dir}/artifacts");
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
+        let service_artifacts = format!("{ct_release_dir}/artifacts/{}", service.name);
+        let bin_dir = format!("{service_artifacts}/bin");
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&bin_dir)))?;
         run_command(
             "pct",
-            &["push".to_string(), ctid.to_string(), artifact.display().to_string(), format!("{target_dir}/{bin}.new")],
+            &["push".to_string(), ctid.to_string(), artifact.display().to_string(), format!("{bin_dir}/{bin}.new")],
             &util::current_dir(),
         )?;
         pct_exec(
             ctid,
             &format!(
                 "mv -f {} {} && chmod 755 {}",
-                shell_single_quote(&format!("{target_dir}/{bin}.new")),
-                shell_single_quote(&format!("{target_dir}/{bin}")),
-                shell_single_quote(&format!("{target_dir}/{bin}"))
+                shell_single_quote(&format!("{bin_dir}/{bin}.new")),
+                shell_single_quote(&format!("{bin_dir}/{bin}")),
+                shell_single_quote(&format!("{bin_dir}/{bin}"))
             ),
         )?;
         print_step(&format!("[CT {ctid}] Installed release binary: {}", service.name));
@@ -4390,15 +4410,80 @@ fn install_remote_frontend_artifacts_release(
         pct_exec(ctid, &format!("tar xzf {} -C {}", shell_single_quote(&remote_tar), shell_single_quote(&service_dir)))?;
         pct_exec(ctid, &format!("rm -f {}", shell_single_quote(&remote_tar)))?;
         let _ = std::fs::remove_file(&tar_path);
-        // Next.js SSR frontends ship a .next build plus package.json/package-lock;
-        // they need linux node_modules on the CT to run `next start`. Install
-        // natively so native modules (sharp etc.) match the linux arch.
-        if entry.path().join(".next").is_dir() {
-            let ci = pct_exec(ctid, &format!("cd {} && npm ci --no-audit --no-fund --legacy-peer-deps 2>/dev/null", shell_single_quote(&service_dir)));
-            if ci.is_err() {
-                pct_exec(ctid, &format!("cd {} && npm install --no-audit --no-fund --legacy-peer-deps 2>/dev/null", shell_single_quote(&service_dir)))?;
+        // SSR node frontends (Next.js `.next`, Astro `dist/server/entry.mjs`,
+        // SvelteKit `build/index.js`) import @astrojs/@sveltejs packages from
+        // node_modules at runtime, so they need linux node_modules on the CT.
+        // Install natively so native modules match the linux arch.
+        let ssr_marker = [
+            ".next",
+            "dist/server/entry.mjs",
+            "app/dist/server/entry.mjs",
+            "build/index.js",
+        ]
+        .iter()
+        .any(|m| entry.path().join(m).exists());
+        if ssr_marker {
+            // Build-time-only `file:` deps (e.g. `@articles/frontend`) are
+            // already bundled into the SSR output; a CT `npm ci` would try to
+            // resolve them against a source tree that isn't shipped and fail.
+            // Sanitize those deps out of a temporary copy of package.json
+            // before installing, so node_modules installs cleanly.
+            let install_dir = std::env::temp_dir().join(format!("eco-frontend-install-{}-{}", service.name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&install_dir);
+            std::fs::create_dir_all(&install_dir).map_err(|e| e.to_string())?;
+            // Pull manifests locally, sanitize file: deps, push back.
+            let pkg_tmp = std::env::temp_dir().join(format!("eco-frontend-pkg-{}-{}.json", service.name, std::process::id()));
+            let pkg_lock_tmp = std::env::temp_dir().join(format!("eco-frontend-lock-{}-{}.json", service.name, std::process::id()));
+            let _ = std::fs::remove_file(&pkg_tmp);
+            let _ = std::fs::remove_file(&pkg_lock_tmp);
+            run_command(
+                "pct",
+                &["pull".to_string(), ctid.to_string(), format!("{service_dir}/package.json"), pkg_tmp.display().to_string()],
+                &util::current_dir(),
+            )
+            .ok();
+            run_command(
+                "pct",
+                &["pull".to_string(), ctid.to_string(), format!("{service_dir}/package-lock.json"), pkg_lock_tmp.display().to_string()],
+                &util::current_dir(),
+            )
+            .ok();
+            let mut sanitized = String::new();
+            if let Ok(text) = std::fs::read_to_string(&pkg_tmp) {
+                let mut v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+                let strip = |obj: &mut serde_json::Map<String, serde_json::Value>| {
+                    let keys: Vec<String> = obj
+                        .iter()
+                        .filter(|(_, vv)| vv.as_str().map(|s| s.starts_with("file:")).unwrap_or(false))
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for k in keys {
+                        obj.remove(&k);
+                    }
+                };
+                if let Some(deps) = v.get_mut("dependencies").and_then(|d| d.as_object_mut()) {
+                    strip(deps);
+                }
+                if let Some(deps) = v.get_mut("devDependencies").and_then(|d| d.as_object_mut()) {
+                    strip(deps);
+                }
+                sanitized = serde_json::to_string(&v).unwrap_or_default();
             }
-            print_step(&format!("[CT {ctid}] Installed linux node_modules for Next.js: {}", service.name));
+            if !sanitized.is_empty() {
+                std::fs::write(&pkg_tmp, sanitized).map_err(|e| e.to_string())?;
+                run_command(
+                    "pct",
+                    &["push".to_string(), ctid.to_string(), pkg_tmp.display().to_string(), format!("{service_dir}/package.json")],
+                    &util::current_dir(),
+                )?;
+            }
+            let _ = std::fs::remove_file(&pkg_tmp);
+            let _ = std::fs::remove_file(&pkg_lock_tmp);
+            // npm install (not ci): the sanitized package.json diverges from
+            // the shipped lock, so ci would reject the mismatch.
+            let ci = pct_exec(ctid, &format!("cd {} && npm install --no-audit --no-fund --legacy-peer-deps 2>/dev/null", shell_single_quote(&service_dir)));
+            let _ = ci;
+            print_step(&format!("[CT {ctid}] Installed linux node_modules for SSR frontend: {}", service.name));
         }
         let is_bun = entry.path().join(".eco-bun").is_file();
         if is_bun {

@@ -69,7 +69,7 @@ pub fn resolve_service_exec(
         } else {
             service.name.clone()
         };
-        let bin_path = format!("{artifacts}/{bin}");
+        let bin_path = format!("{artifacts}/{}/bin/{bin}", service.name);
         return Ok((bin_path, release_dir.to_string(), true));
     }
     // LXS-only service (no runtimes declared): a registry binary shipped into
@@ -99,6 +99,23 @@ pub fn resolve_service_exec(
             let port_var = format!("${{{}}}", env_var_for(service, "PORT"));
             let exec = format!("{service_dir}/node_modules/.bin/next start -p {port_var}");
             return Ok((exec, service_dir.clone(), true));
+        }
+        // SvelteKit adapter-node build (build/index.js + build/client): served
+        // via `node build/index.js`. The builder ships the build/ tree as-is
+        // (bun-compiling embeds the server only and loses the client assets).
+        let sveltekit_entry = format!("{read_service_dir}/build/index.js");
+        if Path::new(&sveltekit_entry).is_file() {
+            let exec = format!("node {service_dir}/build/index.js");
+            return Ok((exec, service_dir.clone(), true));
+        }
+        // Astro SSR with @astrojs/node (standalone): dist/server/entry.mjs
+        // (or app/dist/server/entry.mjs in a workspace layout).
+        for astro_rel in ["dist/server/entry.mjs", "app/dist/server/entry.mjs"] {
+            let astro_entry = format!("{read_service_dir}/{astro_rel}");
+            if Path::new(&astro_entry).is_file() {
+                let exec = format!("node {service_dir}/{astro_rel}");
+                return Ok((exec, service_dir.clone(), true));
+            }
         }
         // Static dist served by python3 http.server on the allocated port.
         let dist = format!("{service_dir}/dist");
@@ -197,10 +214,21 @@ pub fn build_env_files(
         if !env.contains(&format!("{}=", s.port_var)) {
             env.push_str(&format!("{}={port}\n", s.port_var));
         }
-        // Shared JWT.
-        if !env.contains("JWT_SECRET=") {
+        // Shared JWT. The contract may ship `JWT_SECRET=` empty (the service
+        // only validates, the value comes from the estate) — treat an empty
+        // value as missing so the shared secret is injected, not a blank.
+        let jwt_present = env
+            .lines()
+            .any(|l| l.strip_prefix("JWT_SECRET=").map(|v| !v.trim().is_empty()).unwrap_or(false));
+        if !jwt_present {
             let jwt = configgen_shared_jwt(&scope, project);
-            env.push_str(&format!("JWT_SECRET={jwt}\n"));
+            let mut lines: Vec<String> = env
+                .lines()
+                .filter(|l| !l.trim().starts_with("JWT_SECRET="))
+                .map(|l| l.to_string())
+                .collect();
+            lines.push(format!("JWT_SECRET={jwt}\n"));
+            env = lines.join("\n");
         }
         // Guarantee the managed DB URL the service's runtime requires is
         // present even when the shipped contract omits it.
@@ -358,12 +386,31 @@ pub fn generate_all(
     for (name, env) in &env_files {
         files.push((format!(".env/{name}.env"), env.clone()));
     }
-    // Caddyfile
+    // Caddyfile — gateway routes by role, detected flexibly (not just the
+    // literal names `frontend`/`auth`/`backend`):
+    //   frontend: the HTTP service named `<project>-frontend` or `frontend`
+    //   auth:     the service whose name contains `auth`
+    //   api:      the source HTTP service (rust/npm) that is not the frontend
+    //             and not auth — i.e. the estate's own API/backend.
     let gateway_port = if expose_hostname.is_empty() { 0 } else { allocate_port(project, "gateway", "gateway")? };
-    let frontend_port = ports.get("frontend").copied().unwrap_or(0);
+    let frontend_port = deploys
+        .iter()
+        .filter(|d| d.http)
+        .find(|d| d.name == "frontend" || d.name == format!("{project}-frontend"))
+        .map(|d| d.port)
+        .unwrap_or(0);
     if gateway_port > 0 && frontend_port > 0 {
-        let auth_port = ports.get("auth").copied();
-        let api_port = ports.iter().find(|(k, _)| k.as_str() == "backend").map(|(k, v)| (k.clone(), *v));
+        let auth_port = deploys.iter().filter(|d| d.http).find(|d| d.name.contains("auth")).map(|d| d.port);
+        let api_port = deploys
+            .iter()
+            .filter(|d| d.http)
+            .find(|d| {
+                d.port != frontend_port
+                    && d.name != "frontend"
+                    && d.name != format!("{project}-frontend")
+                    && !d.name.contains("auth")
+            })
+            .map(|d| (d.name.clone(), d.port));
         let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port);
         files.push(("Caddyfile".to_string(), caddy));
         // Record the gateway port so host-side exposure can find it.
