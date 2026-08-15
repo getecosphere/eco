@@ -7,6 +7,30 @@ use std::process::{Child, Command, Stdio};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
+/// Wire protocol version between the `eco up --remote` client and the
+/// `eco serve` agent. This is an integer that bumps ONLY when the deploy
+/// contract changes incompatibly — the payload tarball layout, the endpoint
+/// shapes, or required request headers. It is NOT the semver release version.
+///
+/// The agent and the client must speak the same protocol: the agent rejects
+/// deploy requests whose `X-Eco-Protocol` does not match, so a stale client
+/// can't ship a payload the agent mis-reads (e.g. the artifacts/bin layout
+/// change). Bump this when you change what a deploy payload/request means.
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// HTTP header the client sends to declare its protocol version, and the
+/// semver release it was built from (for the upgrade hint in error messages).
+pub const PROTOCOL_HEADER: &str = "x-eco-protocol";
+pub const CLIENT_VERSION_HEADER: &str = "x-eco-client-version";
+
+/// Human-friendly upgrade instruction shown when client/agent protocols differ.
+pub fn protocol_mismatch_msg(client: &str, client_semver: &str, agent_semver: &str) -> String {
+    format!(
+        "Your eco ({client_semver}) speaks deploy protocol {client}, but the agent ({agent_semver}) speaks {PROTOCOL_VERSION}. \
+These are incompatible — a stale client can silently mis-deploy. Run `eco update` (or reinstall from getecosphere.com) and retry."
+    )
+}
+
 /// Human-readable summary of a process exit: "terminated by signal N" on
 /// Unix, otherwise "exited with code N". Portable across Windows.
 pub fn describe_status(command: &str, status: &std::process::ExitStatus) -> String {

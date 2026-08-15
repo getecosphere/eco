@@ -209,7 +209,11 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
         }
         if req.method == "GET" && req.url == "/v1/health" {
             log("health", &peer);
-            let _ = stream.write_all(&json_response(200, &serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})));
+            let _ = stream.write_all(&json_response(200, &serde_json::json!({
+                "ok": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocol": crate::util::PROTOCOL_VERSION,
+            })));
             continue;
         }
 
@@ -438,6 +442,28 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
         // this endpoint just triggers the deploy reading that file.
         if req.method == "POST" && segments.len() == 4 && segments[0] == "v1" && segments[1] == "estates" && segments[3] == "deploy-file" {
             let project = segments[2];
+            // Version gate: the client and agent must speak the same deploy
+            // protocol, or a stale client ships a payload the agent mis-reads
+            // (silent mis-deploy bugs are the worst). Reject mismatches loudly.
+            let client_protocol = req
+                .headers
+                .get(crate::util::PROTOCOL_HEADER)
+                .and_then(|v| v.parse::<u32>().ok());
+            let client_semver = req.headers.get(crate::util::CLIENT_VERSION_HEADER).cloned().unwrap_or_default();
+            let agent_protocol = crate::util::PROTOCOL_VERSION;
+            let mismatch = match client_protocol {
+                Some(p) => p != agent_protocol,
+                None => true, // older client that never sent the header
+            };
+            if mismatch {
+                let msg = crate::util::protocol_mismatch_msg(
+                    &client_protocol.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                    if client_semver.is_empty() { "(unknown)" } else { &client_semver },
+                    env!("CARGO_PKG_VERSION"),
+                );
+                let _ = stream.write_all(&text_response(400, &msg));
+                continue;
+            }
             let payload_path = format!("/tmp/eco-remote-{project}.tar.gz");
             log("deploy-file-start", &format!("{peer} {project}{} path={}", if staging { " (staging)" } else { "" }, payload_path));
             let bytes = match std::fs::read(&payload_path) {

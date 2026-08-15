@@ -2992,7 +2992,12 @@ fn project_path_segment(value: &str) -> String {
 }
 
 fn agent_client_get(url: &str, api_key: &str) -> Result<String, String> {
-    let response = match ureq::get(url).set("Authorization", &format!("Bearer {api_key}")).call() {
+    let response = match ureq::get(url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set(crate::util::PROTOCOL_HEADER, &crate::util::PROTOCOL_VERSION.to_string())
+        .set(crate::util::CLIENT_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
+        .call()
+    {
         Ok(response) => response,
         Err(ureq::Error::Status(_, response)) => response,
         Err(e) => return Err(format!("agent request failed: {e}")),
@@ -3015,6 +3020,8 @@ fn agent_client_post(url: &str, api_key: &str, body: &[u8]) -> Result<String, St
         let response = match agent
             .post(url)
             .set("Authorization", &format!("Bearer {api_key}"))
+            .set(crate::util::PROTOCOL_HEADER, &crate::util::PROTOCOL_VERSION.to_string())
+            .set(crate::util::CLIENT_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
             .set("Content-Type", "application/gzip")
             .send_bytes(body)
         {
@@ -3471,6 +3478,24 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     }
     let base = api_url.trim_end_matches('/').to_string();
     let staging = options.get("staging").map(|v| v == "true").unwrap_or(false);
+
+    // Fail fast on protocol mismatch BEFORE building the payload: ask the
+    // agent its protocol, and require an exact match (a stale client could
+    // otherwise ship a payload the agent mis-reads).
+    let health_url = format!("{base}/v1/health");
+    if let Ok(health_text) = agent_client_get(&health_url, &api_key) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&health_text) {
+            let agent_protocol = v.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+            if agent_protocol != 0 && agent_protocol != crate::util::PROTOCOL_VERSION {
+                let agent_semver = v.get("version").and_then(|s| s.as_str()).unwrap_or("(unknown)");
+                return Err(crate::util::protocol_mismatch_msg(
+                    &crate::util::PROTOCOL_VERSION.to_string(),
+                    env!("CARGO_PKG_VERSION"),
+                    agent_semver,
+                ));
+            }
+        }
+    }
     let staging_config = ecompose::parse_staging(&deployment.content);
     if staging && staging_config.get("ct").map(|s| s.is_empty()).unwrap_or(true) {
         return Err(format!(
