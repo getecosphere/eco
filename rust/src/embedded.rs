@@ -12,6 +12,7 @@ pub const TREE_SH: &str = include_str!("../../tree.sh");
 pub const INSTALL_MINIO_SH: &str = include_str!("../../install-minio.sh");
 pub const INSTALL_ONNXRUNTIME_SH: &str = include_str!("../../install-onnxruntime.sh");
 pub const INSTALL_REDIS_SH: &str = include_str!("../../install-redis.sh");
+pub const INSTALL_CLOUDFLARED_SH: &str = include_str!("../../install-cloudflared.sh");
 pub const ECOLOGY_MARK: &[u8] = include_bytes!("../../assets/ecology-mark.webp");
 
 const BUNDLED: &[(&str, &str)] = &[
@@ -23,6 +24,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("install-minio.sh", INSTALL_MINIO_SH),
     ("install-onnxruntime.sh", INSTALL_ONNXRUNTIME_SH),
     ("install-redis.sh", INSTALL_REDIS_SH),
+    ("install-cloudflared.sh", INSTALL_CLOUDFLARED_SH),
 ];
 
 /// The directory where embedded assets are materialized for execution.

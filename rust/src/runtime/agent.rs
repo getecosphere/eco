@@ -463,6 +463,68 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
             continue;
         }
 
+        // Temporary public URL for a locally-running dev app: `eco serve <sub>`.
+        // POST /v1/serve {subdomain, origin, port}  → reserve + DNS + tunnel token
+        // GET  /v1/serve                            → list active leases
+        // DELETE /v1/serve/<subdomain>              → release + cleanup
+        if req.method == "POST" && segments.as_slice() == ["v1", "serve"] {
+            log("serve-reserve", &format!("{peer} {}", req.body.len()));
+            let account = crate::runtime::serve::default_account();
+            let zone = crate::runtime::serve::default_zone();
+            let body: serde_json::Value = match serde_json::from_slice(&req.body) {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = stream.write_all(&json_response(400, &serde_json::json!({"error": "expected {\"subdomain\":...,\"origin\":...,\"port\":...}"})));
+                    continue;
+                }
+            };
+            let subdomain = body.get("subdomain").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let origin = body.get("origin").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let port = body.get("port").and_then(|v| v.as_u64()).unwrap_or(3000) as u16;
+            let owner = bearer_token(&req.headers)
+                .and_then(|t| crate::runtime::account::account_for_key(&t))
+                .map(|a| a.email)
+                .unwrap_or_else(|| "host-key".to_string());
+            match crate::runtime::serve::reserve_subdomain(&subdomain, &owner, &origin, port, &account, &zone) {
+                Ok((hostname, tunnel_token)) => {
+                    let _ = stream.write_all(&json_response(200, &serde_json::json!({
+                        "hostname": hostname,
+                        "tunnel_token": tunnel_token,
+                        "account": account,
+                        "url": format!("https://{hostname}")
+                    })));
+                }
+                Err(e) => {
+                    let _ = stream.write_all(&json_response(409, &serde_json::json!({"error": e})));
+                }
+            }
+            continue;
+        }
+        if req.method == "GET" && segments.as_slice() == ["v1", "serve"] {
+            log("serve-list", &peer);
+            let leases = crate::runtime::serve::list_leases();
+            let _ = stream.write_all(&json_response(200, &serde_json::json!({"serves": leases})));
+            continue;
+        }
+        if req.method == "DELETE" && segments.len() == 3 && segments[0] == "v1" && segments[1] == "serve" {
+            let subdomain = segments[2].to_string();
+            log("serve-release", &format!("{peer} {subdomain}"));
+            let account = crate::runtime::serve::default_account();
+            let zone = crate::runtime::serve::default_zone();
+            match crate::runtime::serve::release_subdomain(&subdomain, &account, &zone) {
+                Ok(Some(hostname)) => {
+                    let _ = stream.write_all(&json_response(200, &serde_json::json!({"released": hostname})));
+                }
+                Ok(None) => {
+                    let _ = stream.write_all(&json_response(404, &serde_json::json!({"error": "no lease for that subdomain"})));
+                }
+                Err(e) => {
+                    let _ = stream.write_all(&json_response(500, &serde_json::json!({"error": e})));
+                }
+            }
+            continue;
+        }
+
         log("not-found", &format!("{peer} {} {}", req.method, req.url));
         let _ = stream.write_all(&json_response(404, &serde_json::json!({"error": "Not found"})));
     }

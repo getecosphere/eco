@@ -243,6 +243,9 @@ fn ensure_ranges(db: &Connection, scope: &str) -> Result<(), String> {
 }
 
 fn open_db(path: &Path) -> Result<Connection, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir registry: {e}"))?;
+    }
     let db = if path.is_file() {
         Connection::open(path).map_err(|e| format!("open registry: {e}"))?
     } else {

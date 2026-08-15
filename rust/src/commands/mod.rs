@@ -20,3 +20,4 @@ pub mod sync;
 pub mod sendemail;
 pub mod registry_cmd;
 pub mod gitops;
+pub mod serve;

@@ -32,6 +32,10 @@ Usage:
   eco update
   eco up [path] [--dry-run]
   eco up dev [path] [--dry-run]
+  eco up --remote [--staging]
+  eco serve <subdomain> [--port <port>] [--release]
+  eco serve stop <subdomain>
+  eco serve list
   eco expose [path] [--dry-run]
   eco webhook-clean [path] [--dry-run]
   eco sync [--host <hostname>] [--ct <ctid>] [--service <name>] [--staging] [--dry-run]
@@ -81,6 +85,11 @@ Current command groups:
   update      Git pull the eco repository itself
   up          Create a CT and bootstrap the project in the current directory
              Use "eco up dev" for local dev bootstrap
+  serve       Expose a locally-running dev app through a temporary public URL
+             (e.g. https://<name>.getecosphere.com). Reserves the subdomain
+             host-side, checks conflicts, runs a cloudflared tunnel to your
+             localhost, and records serve.subdomain in ecompose.yml. Host-side
+             agent: "eco serve --port <port>" / "eco serve gen-key".
   expose      Publish the configured public hostname through the proxy CT
   webhook-clean Remove broken GitHub deploy webhooks and malformed DNS records
                left behind by changed hook hostnames

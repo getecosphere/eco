@@ -896,10 +896,29 @@ OVERRIDE
 }
 
 install_macos_redis_binary() {
+  # Prefer Homebrew (already used for MongoDB on this machine): a bottled
+  # redis formula is the fastest, cleanest path. MacPorts remains the fallback
+  # for hosts without Homebrew. Eco refuses to compile Redis from source.
+  if need_cmd brew; then
+    if ! redis_server_binary >/dev/null 2>&1; then
+      log "Installing Redis via Homebrew..."
+      brew install redis
+    fi
+    local server=""
+    server="$(redis_server_binary || true)"
+    [[ -n "$server" ]] || fail "Homebrew completed but redis-server was not added to PATH."
+    local version major
+    version="$("$server" --version 2>/dev/null)"
+    major="$(printf '%s' "$version" | sed -nE 's/.*v=([0-9]+)\..*/\1/p')"
+    [[ "$major" =~ ^[0-9]+$ ]] && [[ "$major" -ge 7 ]] || fail "Homebrew did not install Redis 7 or newer."
+    printf '%s' "$server"
+    return 0
+  fi
+
   # Force MacPorts binary-only mode. It downloads a signed, prebuilt archive
   # for the host OS and fails if an archive is unavailable; it can never fall
   # back to compiling Redis on a macOS 12 developer machine.
-  need_cmd port || fail "Redis on macOS requires MacPorts. Install MacPorts for your macOS version, then rerun eco provision; Eco refuses a source build."
+  need_cmd port || fail "Redis on macOS requires Homebrew or MacPorts. Install one of them, then rerun eco provision; Eco refuses a source build."
   log "Refreshing MacPorts metadata before resolving Redis archives..."
   if ! $SUDO port selfupdate; then
     fail "MacPorts metadata refresh failed; Redis was not installed."
@@ -932,6 +951,35 @@ start_managed_redis() {
     return 0
   fi
   "$server" --daemonize yes --port "$port" --bind 127.0.0.1 --appendonly yes --appendfsync everysec
+}
+
+start_managed_mongodb() {
+  local server=""
+  server="$(command -v mongod || true)"
+  [[ -n "$server" ]] || return 0
+  local port="${MONGODB_PORT:-27017}"
+  # A running instance is left untouched; `--fork` is only used for the first
+  # start. Data + log stay under the user's home so `eco up dev` is
+  # self-contained and needs no root.
+  local dbpath="${HOME}/.eco-mongodb/db"
+  local logpath="${HOME}/.eco-mongodb/mongod.log"
+  mkdir -p "$dbpath"
+  if pgrep -f "mongod.*$dbpath" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "Starting managed MongoDB (data: $dbpath)..."
+  "$server" --dbpath "$dbpath" --bind_ip 127.0.0.1 --port "$port" \
+    --logpath "$logpath" --fork --logappend
+  # Give it a moment, then verify it answers.
+  local attempt
+  for attempt in {1..15}; do
+    if mongosh --quiet --eval 'db.runCommand({ping:1}).ok' "mongodb://127.0.0.1:${port}" 2>/dev/null | grep -qx '1'; then
+      ok "Managed MongoDB ready."
+      return 0
+    fi
+    sleep 1
+  done
+  fail "Managed MongoDB did not become healthy. Check ${logpath}."
 }
 
 install_token_macos() {
@@ -980,6 +1028,7 @@ install_token_macos() {
     mongodb@7)
       brew tap mongodb/brew
       brew_install_formula mongodb-community@7.0
+      start_managed_mongodb
       ;;
     redis@7)
       local redis_server=""
@@ -1128,6 +1177,18 @@ main() {
     fi
     if is_token_satisfied "$token"; then
       ok "$token already installed."
+      # Dev-mode managed runtimes must be running even when the binary was
+      # installed on an earlier run; a present binary alone does not mean the
+      # daemon is up (or was started by a previous machine reboot).
+      if [[ "$token" == "mongodb@7" && ! is_prod_mode ]]; then
+        start_managed_mongodb
+      elif [[ "$token" == "redis@7" && ! is_prod_mode ]]; then
+        local redis_server=""
+        redis_server="$(redis_server_binary || true)"
+        if [[ -n "$redis_server" ]]; then
+          start_managed_redis "$redis_server"
+        fi
+      fi
       continue
     fi
     log "Provisioning $token ..."

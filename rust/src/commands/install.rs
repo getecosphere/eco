@@ -4,6 +4,7 @@ use crate::util;
 const INSTALLERS: &[(&str, &str)] = &[
     ("minio", "install-minio.sh"),
     ("onnxruntime", "install-onnxruntime.sh"),
+    ("cloudflared", "install-cloudflared.sh"),
 ];
 
 fn install_help() {
@@ -22,6 +23,9 @@ Usage:
   onnxruntime   Installs the onnxruntime shared library used by RAG/embedding
                 services (rag domain). On Linux/CTs it is placed at
                 /opt/eco-tools/libonnxruntime.so; on macOS via Homebrew.
+  cloudflared   Installs the cloudflared tunnel binary (prebuilt from Cloudflare).
+                Used by "eco serve" for temporary public *.getecosphere.com URLs
+                and by the proxy CT for managed Cloudflare tunnels.
 "#;
     print!("{text}");
 }
