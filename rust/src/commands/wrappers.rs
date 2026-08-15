@@ -108,11 +108,67 @@ fn update_asset_for_platform() -> Result<String, String> {
     }
 }
 
+// The latest release tag (e.g. "v0.3.2") for getecosphere/eco, fetched from the
+// GitHub releases API so the self-update can tell "already latest" apart from
+// "a newer version is available". Falls back to None when the API is unreachable
+// or the response can't be parsed — the update then proceeds to download the
+// latest release asset (which is the best we can do without the version info).
+fn latest_release_tag() -> Result<Option<String>, String> {
+    let url = "https://api.github.com/repos/getecosphere/eco/releases/latest";
+    let mut req = ureq::get(url).set("User-Agent", "eco-cli");
+    let text = match req.timeout(std::time::Duration::from_secs(20)).call() {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read {url}: {e}"))?,
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            return Err(format!("check latest release (HTTP {code}): {}", body.chars().take(160).collect::<String>()));
+        }
+        Err(ureq::Error::Transport(t)) => return Err(format!("network error checking latest release: {t}")),
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| "invalid GitHub releases response".to_string())?;
+    Ok(value.get("tag_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+}
+
+// Trivial semver compare of "v0.3.2"-style tags (also accepts the bare
+// "0.3.2"). Only numeric dot-separated segments are compared; anything that
+// doesn't parse is treated as older, so the update still happens.
+fn version_gt(a: &str, b: &str) -> bool {
+    fn segments(v: &str) -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .collect()
+    }
+    let a = segments(a);
+    let b = segments(b);
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        if av != bv {
+            return av > bv;
+        }
+    }
+    false
+}
+
 pub fn run_update(_args: &[String]) -> Result<(), String> {
     let asset = update_asset_for_platform()?;
-    let url = format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
     let exe = std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
-    util::println_stdout(&format!("Updating eco to the latest release ({asset})"));
+    let current = env!("CARGO_PKG_VERSION");
+
+    // Report the current version up front, then check whether a newer release
+    // exists before downloading anything.
+    let latest = latest_release_tag().ok().flatten();
+    match &latest {
+        Some(tag) if !version_gt(tag, current) => {
+            util::println_stdout(&format!("Already in latest version: eco {current}"));
+            return Ok(());
+        }
+        Some(tag) => util::println_stdout(&format!("Updating eco {current} → {} ({asset})", tag.trim_start_matches('v'))),
+        None => util::println_stdout(&format!("Updating eco {current} to the latest release ({asset})")),
+    }
+
+    let url = format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
 
     // Download the latest release binary for this platform (over HTTP, so the
     // CLI self-updates anywhere — no git clone of the source needed).
@@ -144,7 +200,10 @@ pub fn run_update(_args: &[String]) -> Result<(), String> {
         let _ = std::fs::set_permissions(&tmp, perms);
     }
     std::fs::rename(&tmp, &exe).map_err(|e| format!("replace {}: {e}", exe.display()))?;
-    util::println_stdout("eco updated — restart any running eco to use the new version.");
+    match &latest {
+        Some(tag) => util::println_stdout(&format!("eco updated to {} — version {}. Restart any running eco to use it.", tag.trim_start_matches('v'), tag.trim_start_matches('v'))),
+        None => util::println_stdout("eco updated — restart any running eco to use the new version."),
+    }
     Ok(())
 }
 
