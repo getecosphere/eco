@@ -1,6 +1,7 @@
 pub mod checklist;
 pub mod cli;
 pub mod cloudflare;
+pub mod configgen;
 pub mod ecompose;
 pub mod embedded;
 pub mod github;

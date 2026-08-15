@@ -247,6 +247,7 @@ pub struct Service {
     pub runtimes: Vec<String>,
     pub r#type: String,
     pub dir: String,
+    pub binary: String,
     pub grants_secrets: Vec<String>,
     pub grants_network: Vec<String>,
 }
@@ -283,6 +284,7 @@ pub fn parse_services(content: &str) -> Vec<Service> {
                 runtimes: Vec::new(),
                 r#type: String::new(),
                 dir: String::new(),
+                binary: String::new(),
                 grants_secrets: Vec::new(),
                 grants_network: Vec::new(),
             });
@@ -297,6 +299,11 @@ pub fn parse_services(content: &str) -> Vec<Service> {
             }
             if let Some(lxs_val) = match_indented_value(line, 4, "lxs") {
                 c.lxs = util::strip_quotes(lxs_val.trim());
+                in_runtimes = false;
+                continue;
+            }
+            if let Some(bin_val) = match_indented_value(line, 4, "binary") {
+                c.binary = util::strip_quotes(bin_val.trim());
                 in_runtimes = false;
                 continue;
             }

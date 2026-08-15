@@ -9,6 +9,91 @@ use std::path::{Path, PathBuf};
 
 const FALLBACK_CT_TEMPLATE: &str = "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst";
 
+// Release-dir storage: the CT is a pure runtime — no source, no /opt/projects
+// source layout. Each deploy is an immutable release directory under
+// /opt/eco/<estate>/releases/r<timestamp>/, and `current` is a symlink to the
+// active release. systemd ExecStart always points at `current/...`, so a
+// rollback is just re-pointing the symlink and restarting units. This also
+// gives storage-based pricing (how many releases are kept per estate).
+const CT_ECO_ROOT: &str = "/opt/eco";
+
+/// Release directory path on the CT for an estate's deploy.
+/// Returns (releases_root, release_dir, current_symlink).
+fn ct_release_paths(estate_id: &str) -> (String, String, String) {
+    let releases_root = format!("{CT_ECO_ROOT}/{estate_id}/releases");
+    // Timestamp-based release id: r<unix-seconds>. Collisions within the same
+    // second are handled by appending a counter.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let release_dir = format!("{releases_root}/r{ts}");
+    let current_symlink = format!("{CT_ECO_ROOT}/{estate_id}/current");
+    (releases_root, release_dir, current_symlink)
+}
+
+/// Generate a unique release dir, avoiding collisions in the same second.
+fn unique_release_dir(releases_root: &str) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = format!("{releases_root}/r{ts}");
+    // If r<ts> exists, append -1, -2, ... (local check; CT check happens via pct).
+    let mut candidate = base.clone();
+    let mut n = 1;
+    while Path::new(&candidate).exists() {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
+}
+
+/// Pick a unique release dir on the CT (via `ls`) so two deploys in the same
+/// second never collide.
+fn unique_ct_release_dir(ctid: &str, releases_root: &str) -> Result<String, String> {
+    let base = {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("{releases_root}/r{ts}")
+    };
+    let listing = pct_exec_capture(ctid, &format!("ls -1 {} 2>/dev/null || true", shell_single_quote(releases_root))).unwrap_or_default();
+    if !listing.contains("r") {
+        // nothing under releases yet
+        return Ok(base);
+    }
+    let mut candidate = base.clone();
+    let mut n = 1;
+    while listing.lines().any(|l| l.trim() == candidate.rsplit('/').next().unwrap_or("")) {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    Ok(candidate)
+}
+
+/// Delete old releases on the CT beyond the keep limit (default 5). This is
+/// the storage-pricing hook: how many immutable releases are retained.
+fn trim_old_ct_releases(ctid: &str, releases_root: &str, keep_release_dir: &str) -> Result<(), String> {
+    let keep: usize = util::env_var_or("ECO_RELEASES_KEEP", "5").parse().unwrap_or(5);
+    let listing = pct_exec_capture(ctid, &format!("ls -1d {}/*/ 2>/dev/null || true", shell_single_quote(releases_root))).unwrap_or_default();
+    let mut dirs: Vec<String> = listing
+        .split_whitespace()
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|d| !d.is_empty())
+        .collect();
+    dirs.sort();
+    if dirs.len() <= keep {
+        return Ok(());
+    }
+    let remove: Vec<String> = dirs[..dirs.len() - keep].iter().filter(|d| d.as_str() != keep_release_dir).cloned().collect();
+    for d in remove {
+        pct_exec(ctid, &format!("rm -rf {}", shell_single_quote(&d)))?;
+    }
+    Ok(())
+}
+
 fn parse_options(args: &[String]) -> (HashMap<String, String>, Vec<String>) {
     let mut options = HashMap::new();
     let mut positionals = Vec::new();
@@ -1480,47 +1565,6 @@ fn expose_via_proxy_ct(
     Ok(results)
 }
 
-fn tar_and_push_dir(ctid: &str, source_dir: &str, target_tar_name: &str) -> Result<(), String> {
-    let temp_dir = std::env::temp_dir().join(format!("eco-up-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&temp_dir);
-    let tar_path = temp_dir.join(format!("{target_tar_name}.tar"));
-    let source = Path::new(source_dir);
-    let parent_dir = source.parent().unwrap_or(Path::new("/")).display().to_string();
-    let base_name = source.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-
-    let mut tar_args: Vec<String> = vec!["-C".to_string(), parent_dir];
-    if base_name != target_tar_name {
-        tar_args.push("--transform".to_string());
-        tar_args.push(format!("s|^{base_name}|{target_tar_name}|"));
-    }
-    for exclude in [
-        ".env", "*/.env", ".env.local", "*/.env.local", ".env.*.local", "*/.env.*.local",
-        ".configure-state", "*/.configure-state",
-        "ecosystem.config.js", "*/ecosystem.config.js",
-        "ecosystem.config.cjs", "*/ecosystem.config.cjs",
-        "Caddyfile", "*/Caddyfile",
-        "node_modules", "*/node_modules",
-        "target", "*/target",
-        ".git", "*/.git",
-    ] {
-        tar_args.push("--exclude".to_string());
-        tar_args.push(exclude.to_string());
-    }
-    tar_args.push("-cf".to_string());
-    tar_args.push(tar_path.display().to_string());
-    tar_args.push(base_name);
-
-    let result = (|| -> Result<(), String> {
-        run_command("tar", &tar_args, &util::current_dir())?;
-        run_command(
-            "pct",
-            &["push".to_string(), ctid.to_string(), tar_path.display().to_string(), format!("/tmp/{target_tar_name}.tar")],
-            &util::current_dir(),
-        )
-    })();
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    result
-}
 
 fn is_on_proxmox_host() -> bool {
     util::command_on_path("pct")
@@ -2309,7 +2353,7 @@ fn derive_staging_ecompose_content(content: &str, staging_config: &HashMap<Strin
     )
 }
 
-fn provision_estate(
+fn deploy_estate(
     deployment: &ProjectDeployment,
     options: &HashMap<String, String>,
     staging: bool,
@@ -2404,8 +2448,6 @@ fn provision_estate(
     // target/release and the source hash is recorded so later builds skip.
     let remote_mode = options.get("remote").map(|v| v == "true").unwrap_or(false);
     let remote_artifacts = options.get("remote-artifacts").cloned().unwrap_or_default();
-    let remote_hashes = options.get("remote-hashes").cloned().unwrap_or_default();
-    let remote_frontend_hashes = options.get("remote-frontend-hashes").cloned().unwrap_or_default();
     // Frontends shipped as prebuilt dist (dirs under remote-artifacts) skip the
     // CT-side `npm run build`; the dist was built on the local builder.
     let shipped_frontends: std::collections::HashSet<String> = if remote_mode && !remote_artifacts.is_empty() {
@@ -2571,74 +2613,56 @@ fn provision_estate(
         print_step(&format!("[CT {}] MinIO is ready at its private bridge endpoint", minio.ctid));
         install_minio_client_config(&ctid, minio)?;
     }
-    pct_exec(&ctid, &format!("mkdir -p {}", deployment.ct_workspace_root))?;
-    print_step(&format!("[CT {ctid}] Pushing project repo: {}", deployment.project));
-    tar_and_push_dir(&ctid, &deployment.project_dir.display().to_string(), &deployment.project)?;
-    print_step(&format!("[CT {ctid}] Pushing eco repo"));
-    tar_and_push_dir(&ctid, &embedded::package_root().display().to_string(), "eco")?;
-    print_step(&format!("[CT {ctid}] Copying host SSH credentials"));
-    tar_and_push_dir(&ctid, &host_ssh_dir.display().to_string(), ".ssh")?;
-    pct_exec(
-        &ctid,
-        &format!(
-            "cd {} && tar -xf /tmp/{}.tar && tar -xf /tmp/eco.tar && rm -f /tmp/{}.tar /tmp/eco.tar && mkdir -p /root && tar -xf /tmp/.ssh.tar -C /root && rm -f /tmp/.ssh.tar && chmod 700 /root/.ssh && find /root/.ssh -type d -exec chmod 700 {{}} \\; && find /root/.ssh -type f -exec chmod 600 {{}} \\;",
-            deployment.ct_workspace_root,
-            deployment.project,
-            deployment.project
-        ),
-    )?;
-    if remote_mode {
-        // Remote deploys skip git force-sync (the shipped source is
-        // authoritative), so stale top-level files from an earlier deploy
-        // layout survive the tar merge. Remove them the way `git clean` would:
-        // anything on the CT that is not in the shipped source, preserving only
-        // eco-generated state (.eco, target/, the PM2 config, Caddyfile).
-        print_step(&format!("[CT {ctid}] Removing stale source files not present in the shipped source"));
-        remove_stale_ct_source(&ctid, deployment)?;
-    }
+
+    // Release-dir layout: the CT is a pure runtime. Each deploy is an immutable
+    // release under /opt/eco/<estate>/releases/r<ts>/, with `current` a symlink
+    // to the active release. systemd ExecStart points at current/... so a
+    // rollback is re-pointing the symlink + restarting units. No source, no
+    // /opt/projects source layout, no SSH keys, no eco binary on the CT.
+    let (ct_releases_root, ct_release_dir, ct_current) = ct_release_paths(&deployment.project);
+    let ct_release_dir = if remote_mode {
+        // unique on the CT (check via pct ls)
+        unique_ct_release_dir(&ctid, &ct_releases_root)?
+    } else {
+        ct_release_dir
+    };
+    pct_exec(&ctid, &format!("mkdir -p {}", shell_single_quote(&ct_release_dir)))?;
+    print_step(&format!("[CT {ctid}] Release dir: {}", ct_release_dir));
+
     if staging {
         print_step(&format!("[CT {ctid}] Writing staging ecompose.yml ({})", expose.hostname()));
-        push_text_file_to_ct(&ctid, &staging_ecompose_path, &staging_ecompose_content, "staging-ecompose")?;
+        push_text_file_to_ct(&ctid, &format!("{ct_release_dir}/ecompose.yml"), &staging_ecompose_content, "staging-ecompose")?;
+    } else {
+        push_text_file_to_ct(&ctid, &format!("{ct_release_dir}/ecompose.yml"), &deployment.content, "ecompose")?;
     }
+
+    // Runtime deps are installed by provision.sh (databases, redis, onnxruntime).
+    // In remote mode the eco binary is not needed on the CT — config is
+    // generated host-side. We still ship the eco binary's embedded provision.sh
+    // via pct so the CT provisions runtimes without a toolchain on the host.
     print_step(&format!("[CT {ctid}] Provisioning runtimes for {}", deployment.project));
-    // Refresh the CT's bundled scripts from the shipped binary first, so
-    // provision.sh (and configure.sh) are the current versions. The CT's own
-    // /usr/local/bin/eco may be stale (no __bundle-scripts), so use the
-    // agent's binary pushed in.
-    pct_exec(&ctid, "mkdir -p /usr/local/bin")?;
+    let eco_tmp_dir = std::env::temp_dir().join(format!("eco-bundle-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&eco_tmp_dir);
+    crate::embedded::materialize_bundled_scripts(&eco_tmp_dir.display().to_string()).map_err(|e| e.to_string())?;
     run_command(
         "pct",
-        &["push".to_string(), ctid.to_string(), "/usr/local/bin/eco".to_string(), "/tmp/eco-bundle-bin".to_string()],
+        &["push".to_string(), ctid.to_string(), eco_tmp_dir.join("provision.sh").display().to_string(), "/tmp/eco-provision.sh".to_string()],
         &util::current_dir(),
     )?;
-    pct_exec(&ctid, &format!("chmod +x /tmp/eco-bundle-bin && /tmp/eco-bundle-bin __bundle-scripts {} && rm -f /tmp/eco-bundle-bin", shell_single_quote(&deployment.ct_eco_root)))?;
+    pct_exec(&ctid, "chmod +x /tmp/eco-provision.sh")?;
     pct_exec(
         &ctid,
         &format!(
-            "cd {} && bash {}/provision.sh {}",
+            "cd {} && ECO_DEPLOY_MODE=prod bash /tmp/eco-provision.sh {}",
             deployment.ct_workspace_root,
-            deployment.ct_eco_root,
             deployment.project
         ),
     )?;
+    let _ = std::fs::remove_dir_all(&eco_tmp_dir);
     if expose.enabled() {
         print_step(&format!("[CT {ctid}] Ensuring caddy is installed for gateway"));
         ensure_ct_caddy(&ctid)?;
     }
-    for (name, command) in &dependency_install_steps {
-        print_step(&format!("[CT {ctid}] Installing npm dependencies: {name}"));
-        pct_exec(&ctid, &format!("cd {} && {}", deployment.ct_workspace_root, command))?;
-    }
-    print_step(&format!("[CT {ctid}] Installing eco CLI"));
-    // Install the CURRENT eco binary (the agent's own) so configure.sh and
-    // __bundle-configure-sh are the shipped versions, not a stale CT copy.
-    pct_exec(&ctid, "mkdir -p /usr/local/bin")?;
-    run_command(
-        "pct",
-        &["push".to_string(), ctid.to_string(), "/usr/local/bin/eco".to_string(), "/tmp/eco-agent-bin".to_string()],
-        &util::current_dir(),
-    )?;
-    pct_exec(&ctid, "install -m 0755 /tmp/eco-agent-bin /usr/local/bin/eco && rm -f /tmp/eco-agent-bin")?;
     for (index, command) in data_bootstrap_steps.iter().enumerate() {
         print_step(&format!("[CT {ctid}] Bootstrapping data service {}", index + 1));
         pct_exec(&ctid, &format!("export LANG=C.UTF-8 LC_ALL=C.UTF-8 PERL_BADLANG=0\n{}", command))?;
@@ -2647,16 +2671,13 @@ fn provision_estate(
         print_step(&format!("[CT {ctid}] Applying Rust migration set {}", index + 1));
         pct_exec(&ctid, &format!("{command}"))?;
     }
-    // Build Rust services. The binaries were cross-compiled on the developer
-    // machine and shipped in the deploy payload, so they are installed
-    // directly. Runs BEFORE configure.sh so it detects the release binaries
-    // and points PM2 at them instead of `cargo run`.
+    // Install the shipped binaries into the release dir.
     let mut rust_build_failures: Vec<String> = Vec::new();
     if !rust_services.is_empty() {
         if remote_mode {
             print_step(&format!("[CT {ctid}] Installing remotely-built Rust binaries for {}", deployment.project));
-            match install_remote_rust_binaries(&ctid, deployment, &remote_artifacts, &remote_hashes, &estate_core) {
-                Ok(()) => print_step(&format!("[CT {ctid}] Remote Rust binaries installed for {}", deployment.project)),
+            match install_remote_rust_binaries_release(&ctid, deployment, &remote_artifacts, &ct_release_dir, &estate_core) {
+                Ok(()) => print_step(&format!("[CT {ctid}] Remote Rust binaries installed into release")),
                 Err(e) => {
                     util::eprintln_stderr(&format!("\n[eco up] WARNING: Installing remote Rust binaries failed, continuing: {e}\n"));
                     rust_build_failures.push(e);
@@ -2664,10 +2685,8 @@ fn provision_estate(
             }
         }
     }
-    // Frontend dists are shipped in the payload regardless of whether the
-    // estate has any Rust services.
     if remote_mode {
-        if let Err(e) = install_remote_frontend_artifacts(&ctid, deployment, &remote_artifacts, &remote_frontend_hashes, &estate_core) {
+        if let Err(e) = install_remote_frontend_artifacts_release(&ctid, deployment, &remote_artifacts, &ct_release_dir, &estate_core) {
             util::eprintln_stderr(&format!("\n[eco up] WARNING: Installing shipped frontend dists failed, continuing: {e}\n"));
             rust_build_failures.push(e);
         }
@@ -2675,7 +2694,7 @@ fn provision_estate(
     if let Some(installed) = (|| -> Result<Option<Vec<String>>, String> {
         if deployment.services.iter().any(|s| !s.lxs.is_empty()) {
             print_step(&format!("[CT {ctid}] Installing LXS services for {}", deployment.project));
-            return Ok(Some(install_lxs_services(&ctid, deployment)?));
+            return Ok(Some(install_lxs_services_release(&ctid, deployment, &ct_release_dir)?));
         }
         Ok(None)
     })()? {
@@ -2683,22 +2702,15 @@ fn provision_estate(
             util::eprintln_stderr("[eco up] WARNING: no LXS installed for declared lxs: services");
         }
     }
-    print_step(&format!("[CT {ctid}] Generating ecosystem config for {}", deployment.project));
-    // Refresh configure.sh from the shipped binary first (remote mode ships a
-    // stale workspace copy otherwise).
-    pct_exec(&ctid, &format!("/usr/local/bin/eco __bundle-configure-sh {}", shell_single_quote(&format!("{}/configure.sh", deployment.ct_eco_root))))?;
-    pct_exec(
-        &ctid,
-        &format!(
-            "cd {} && ECO_BIN=/usr/local/bin/eco ECO_DEPLOY_MODE=prod ECO_NON_INTERACTIVE=1 {} PROJECT_DIR={} PROJECT_NAME={} PM2_DIR={} bash {}/configure.sh",
-            deployment.ct_workspace_root,
-            systemd_env(),
-            deployment.ct_project_root,
-            deployment.project,
-            deployment.ct_project_root,
-            deployment.ct_eco_root
-        ),
-    )?;
+
+    // Generate config host-side (systemd units, .env, Caddyfile) and push the
+    // finished files into the release dir; then point `current` at it.
+    print_step(&format!("[CT {ctid}] Generating estate config (host-side) for {}", deployment.project));
+    deploy_generate_config_host(&ctid, deployment, &ct_release_dir)?;
+    pct_exec(&ctid, &format!("ln -sfn {} {}", shell_single_quote(&ct_release_dir), shell_single_quote(&ct_current)))?;
+    print_step(&format!("[CT {ctid}] current -> {}", ct_release_dir));
+    // Clean up old releases beyond the keep limit (storage pricing hook).
+    trim_old_ct_releases(&ctid, &ct_releases_root, &ct_release_dir)?;
 
     let mut failures: Vec<(String, String)> = Vec::new();
     for failure in rust_build_failures {
@@ -2818,25 +2830,6 @@ fn collect_rust_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), String> 
 // skipped, so a tar extract only merges/overwrites: stale top-level entries
 // from an earlier deploy layout survive. Remove any top-level entry on the CT
 // that is not in the shipped source, preserving eco-generated state.
-fn remove_stale_ct_source(ctid: &str, deployment: &ProjectDeployment) -> Result<(), String> {
-    let shipped: std::collections::HashSet<String> = std::fs::read_dir(&deployment.project_dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().to_string()))
-        .collect();
-    let current_output = pct_exec_capture(ctid, &format!("ls -1A {}", shell_single_quote(&deployment.ct_project_root)))?;
-    let preserved = [".eco", "target", "node_modules", ".eco-rust-hash", &deployment.pm2_config_filename, "Caddyfile"];
-    for entry in current_output.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-        if shipped.contains(entry) || preserved.contains(&entry) || entry == "ecompose.yml" || entry == "ecompose.yaml" || entry.ends_with("-ecompose.yml") {
-            continue;
-        }
-        print_step(&format!("[CT {ctid}] Removing stale top-level source entry: {entry}"));
-        pct_exec(ctid, &format!("rm -rf {}", shell_single_quote(&format!("{}/{}", deployment.ct_project_root, entry))))?;
-    }
-    Ok(())
-}
-
-// Mirrors the hash produced by the CT-side `buildConditionalRustCommand` so the
-// recorded `.eco-rust-hash` lets later deploys skip a rebuild when the source
 // shipped to the CT is unchanged.
 fn compute_rust_input_hash(service_dir: &Path) -> Result<String, String> {
     let mut inputs: Vec<String> = Vec::new();
@@ -3859,151 +3852,7 @@ The shipped artifacts exceed the limit; reduce what is being built/shipped."
     result
 }
 
-fn install_remote_rust_binaries(ctid: &str, deployment: &ProjectDeployment, artifacts_dir: &str, hashes_file: &str, estate_core: &str) -> Result<(), String> {
-    let mut hashes: HashMap<String, String> = HashMap::new();
-    if !hashes_file.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(hashes_file) {
-            for line in content.lines() {
-                let mut parts = line.split_whitespace();
-                if let (Some(path), Some(hash)) = (parts.next(), parts.next()) {
-                    hashes.insert(path.to_string(), hash.to_string());
-                }
-            }
-        }
-    }
-    let rust_services: Vec<&ecompose::Service> = deployment
-        .services
-        .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
-        .collect();
-    let project_dir = deployment.project_dir.display().to_string();
-    for service in rust_services {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir, estate_core);
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
-        let host_manifest = Path::new(&deployment.project_dir).join(&rel).join("Cargo.toml");
-        let Some(cargo_text) = std::fs::read_to_string(&host_manifest).ok() else {
-            continue;
-        };
-        let Some(package) = cargo_package_name(&cargo_text) else {
-            continue;
-        };
-        let artifact = Path::new(artifacts_dir).join(&package);
-        if !artifact.is_file() {
-            return Err(format!("Remote artifact missing for {} (expected {})", service.name, artifact.display()));
-        }
-        let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &project_dir, estate_core);
-        // configure.sh resolves the binary from the cargo target dir, the
-        // project-root target/release, or the service target/release. Install
-        // to the last two so every layout finds the shipped artifact.
-        for target_dir in [format!("{service_dir}/target/release"), format!("{}/target/release", deployment.ct_project_root)] {
-            pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
-            run_command(
-                "pct",
-                &["push".to_string(), ctid.to_string(), artifact.display().to_string(), format!("{target_dir}/{package}.new")],
-                &util::current_dir(),
-            )?;
-            pct_exec(
-                ctid,
-                &format!(
-                    "mv -f {} {} && chmod 755 {}",
-                    shell_single_quote(&format!("{target_dir}/{package}.new")),
-                    shell_single_quote(&format!("{target_dir}/{package}")),
-                    shell_single_quote(&format!("{target_dir}/{package}"))
-                ),
-            )?;
-        }
-        if let Some(hash) = hashes.get(&rel) {
-            push_text_file_to_ct(ctid, &format!("{service_dir}/.eco-rust-hash"), hash, "eco-rust-hash")?;
-        }
-        print_step(&format!("[CT {ctid}] Installed remote Rust binary: {}", service.name));
-    }
-    Ok(())
-}
-
-// Installs the frontend dists that `eco up --remote` built on the local
-// builder into the CT, and marks each service `.eco-frontend-built` so
-// configure.sh skips `npm ci` + `npm run build` on the CT and serves the
 // shipped artifact. Returns the service names that got a shipped dist.
-fn install_remote_frontend_artifacts(ctid: &str, deployment: &ProjectDeployment, artifacts_dir: &str, hashes_file: &str, estate_core: &str) -> Result<Vec<String>, String> {
-    let mut bun_compiled = Vec::new();
-    if artifacts_dir.is_empty() || !Path::new(artifacts_dir).is_dir() {
-        return Ok(bun_compiled);
-    }
-    let mut hashes: HashMap<String, String> = HashMap::new();
-    if !hashes_file.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(hashes_file) {
-            for line in content.lines() {
-                let mut parts = line.split_whitespace();
-                if let (Some(path), Some(hash)) = (parts.next(), parts.next()) {
-                    hashes.insert(path.to_string(), hash.to_string());
-                }
-            }
-        }
-    }
-    let project_dir = deployment.project_dir.display().to_string();
-    for entry in std::fs::read_dir(artifacts_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let fname = entry.file_name().to_string_lossy().to_string();
-        // A directory under artifacts/ is a shipped frontend (service name);
-        // flat files are the Rust binaries handled by install_remote_rust_binaries.
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let Some(service) = deployment.services.iter().find(|s| s.name == fname) else {
-            continue;
-        };
-        let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &project_dir, estate_core);
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&service_dir)))?;
-        // Ship the built dist tree into the CT service dir.
-        let tar_path = std::env::temp_dir().join(format!("eco-frontend-{}-{}.tar.gz", service.name, std::process::id()));
-        let _ = std::fs::remove_file(&tar_path);
-        run_command(
-            "tar",
-            &[
-                "czf".to_string(),
-                tar_path.display().to_string(),
-                "-C".to_string(),
-                entry.path().display().to_string(),
-                ".".to_string(),
-            ],
-            &util::current_dir(),
-        )?;
-        let remote_tar = format!("/tmp/eco-frontend-{}.tar.gz", service.name);
-        run_command(
-            "pct",
-            &["push".to_string(), ctid.to_string(), tar_path.display().to_string(), remote_tar.clone()],
-            &util::current_dir(),
-        )?;
-        pct_exec(ctid, &format!("tar xzf {} -C {}", shell_single_quote(&remote_tar), shell_single_quote(&service_dir)))?;
-        pct_exec(ctid, &format!("rm -f {}", shell_single_quote(&remote_tar)))?;
-        let _ = std::fs::remove_file(&tar_path);
-        // Marker + hash so configure.sh skips npm install/build and serves dist.
-        let is_bun = entry.path().join(".eco-bun").is_file();
-        if is_bun {
-            // Bun-compiled node backend: the artifact holds <service> (the
-            // linux-x64 single binary) + its assets. Install a marker so
-            // configure.sh generates a unit that runs the binary directly.
-            pct_exec(ctid, &format!("chmod 755 {}", shell_single_quote(&format!("{service_dir}/{}", service.name))))?;
-            pct_exec(ctid, &format!("touch {}", shell_single_quote(&format!("{service_dir}/.eco-bun"))))?;
-            push_text_file_to_ct(ctid, &format!("{service_dir}/.eco-bun-name"), &service.name, "eco-bun-name")?;
-            bun_compiled.push(service.name.clone());
-            print_step(&format!("[CT {ctid}] Installed Bun-compiled single binary: {}", service.name));
-        } else {
-            pct_exec(ctid, &format!("touch {}", shell_single_quote(&format!("{service_dir}/.eco-frontend-built"))))?;
-            print_step(&format!("[CT {ctid}] Installed shipped frontend dist: {}", service.name));
-        }
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir, estate_core);
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
-        if let Some(hash) = hashes.get(&rel) {
-            push_text_file_to_ct(ctid, &format!("{service_dir}/.eco-frontend-hash"), hash, "eco-frontend-hash")?;
-        }
-    }
-    Ok(bun_compiled)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// eco serve agent handlers (run on the Proxmox host).
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub fn agent_list_estates() -> Vec<serde_json::Value> {
     let root = Path::new("/opt/projects");
@@ -4117,8 +3966,8 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
             &["xzf".to_string(), tar_path.display().to_string(), "-C".to_string(), tmp.display().to_string()],
             &util::current_dir(),
         )?;
-        // Executable-only payload: the manifest travels (for configure.sh to
-        // derive service topology), never source code.
+        // Executable-only payload: the manifest travels (for config generation
+        // to derive service topology), never source code.
         let manifest_path = tmp.join("ecompose.yml");
         if !manifest_path.is_file() {
             return Err("payload is missing ecompose.yml — build the tarball with `eco up --remote`".to_string());
@@ -4126,24 +3975,44 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
         let artifacts_dir = tmp.join("artifacts");
         let hashes_file = tmp.join("rust-hashes");
         let frontend_hashes_file = tmp.join("frontend-hashes");
-        let host_project = Path::new("/opt/projects").join(project);
-        let _ = std::fs::remove_dir_all(&host_project);
-        std::fs::create_dir_all(&host_project).map_err(|e| format!("stage /opt/projects: {e}"))?;
-        std::fs::copy(&manifest_path, host_project.join("ecompose.yml"))
+        // Host-side release dir: stage the immutable deploy under
+        // /opt/eco/deploys/<project>/r<ts>/ and keep a `current` symlink.
+        let host_releases_root = format!("/opt/eco/deploys/{project}/releases");
+        std::fs::create_dir_all(&host_releases_root).map_err(|e| format!("create host release root: {e}"))?;
+        let host_release_dir = PathBuf::from(unique_release_dir(&host_releases_root));
+        std::fs::create_dir_all(&host_release_dir).map_err(|e| format!("create host release dir: {e}"))?;
+        std::fs::copy(&manifest_path, host_release_dir.join("ecompose.yml"))
             .map_err(|e| format!("stage manifest: {e}"))?;
-        let cwd = util::current_dir();
-        let project_path = host_project.display().to_string();
-        let deployment = load_project_deployment(&project_path, &cwd)?;
-        let mut options = HashMap::new();
-        options.insert("remote".to_string(), "true".to_string());
         if artifacts_dir.is_dir() {
-            options.insert("remote-artifacts".to_string(), artifacts_dir.display().to_string());
+            let dest = host_release_dir.join("artifacts");
+            std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+            copy_tree_excluding(&artifacts_dir, &dest, &(skip_none as fn(&str) -> bool))?;
         }
         if hashes_file.is_file() {
-            options.insert("remote-hashes".to_string(), hashes_file.display().to_string());
+            let _ = std::fs::copy(&hashes_file, host_release_dir.join("rust-hashes"));
         }
         if frontend_hashes_file.is_file() {
-            options.insert("remote-frontend-hashes".to_string(), frontend_hashes_file.display().to_string());
+            let _ = std::fs::copy(&frontend_hashes_file, host_release_dir.join("frontend-hashes"));
+        }
+        // Point `current` at the new release (host-side, for the agent).
+        let host_current = format!("/opt/eco/deploys/{project}/current");
+        let _ = std::fs::remove_file(&host_current);
+        std::os::unix::fs::symlink(&host_release_dir, &host_current).map_err(|e| format!("link host current: {e}"))?;
+        // Load the deployment from the staged manifest (no source tree).
+        let cwd = util::current_dir();
+        let host_manifest = host_release_dir.join("ecompose.yml");
+        let deployment = load_project_deployment(&host_manifest.display().to_string(), &cwd)?;
+        let mut options = HashMap::new();
+        options.insert("remote".to_string(), "true".to_string());
+        options.insert("release-dir".to_string(), host_release_dir.display().to_string());
+        if artifacts_dir.is_dir() {
+            options.insert("remote-artifacts".to_string(), host_release_dir.join("artifacts").display().to_string());
+        }
+        if hashes_file.is_file() {
+            options.insert("remote-hashes".to_string(), host_release_dir.join("rust-hashes").display().to_string());
+        }
+        if frontend_hashes_file.is_file() {
+            options.insert("remote-frontend-hashes".to_string(), host_release_dir.join("frontend-hashes").display().to_string());
         }
         let staging_config = ecompose::parse_staging(&deployment.content);
         let deploy_ctid = if staging {
@@ -4151,7 +4020,7 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
         } else {
             deployment.ctid.clone()
         };
-        provision_estate(&deployment, &options, staging, &staging_config)?;
+        deploy_estate(&deployment, &options, staging, &staging_config)?;
         Ok(format!("Remote deploy of {project} completed on CT {deploy_ctid}."))
     })();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -4163,93 +4032,6 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
 // marker dir (start.sh + .env.example from the LXS contract) so configure.sh
 // discovers it as a normal service — port allocation, PM2, and gateway routing
 // then work unchanged.
-fn install_lxs_services(ctid: &str, deployment: &ProjectDeployment) -> Result<Vec<String>, String> {
-    let lxs_services: Vec<&ecompose::Service> = deployment.services.iter().filter(|s| !s.lxs.is_empty()).collect();
-    if lxs_services.is_empty() {
-        return Ok(Vec::new());
-    }
-    // LXS is resolved from the registry ADDRESS (no local clone): `eco lxs add`
-    // wrote the `lxs:` refs, and `eco up` fetches each binary straight from the
-    // registry (the estate's `.eco/state.json` registry, official by default)
-    // into the local cache, then ships it.
-    let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir).map(|s| s.registry).filter(|r| !r.is_empty());
-    let mut installed = Vec::new();
-    for service in lxs_services {
-        let (manifest, version, local_bin) = crate::commands::lxs::fetch_lxs_to_cache(&service.lxs, "linux/amd64", state_registry.as_deref())?;
-        let name = manifest.name.clone();
-        if name.is_empty() {
-            return Err(format!("LXS {} has no name in its manifest", service.lxs));
-        }
-
-        let target_dir = format!("{}/target/release", deployment.ct_project_root);
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
-        run_command(
-            "pct",
-            &["push".to_string(), ctid.to_string(), local_bin.display().to_string(), format!("{target_dir}/{name}.new")],
-            &util::current_dir(),
-        )?;
-        pct_exec(
-            ctid,
-            &format!(
-                "mv -f {} {} && chmod 755 {}",
-                shell_single_quote(&format!("{target_dir}/{name}.new")),
-                shell_single_quote(&format!("{target_dir}/{name}")),
-                shell_single_quote(&format!("{target_dir}/{name}"))
-            ),
-        )?;
-
-        let service_dir = format!("{}/{}", deployment.ct_project_root, service.name);
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&service_dir)))?;
-        let binary_path = format!("{target_dir}/{name}");
-        let start_sh = format!(
-            "#!/bin/bash\nset -a\n. \"$(dirname \"$0\")/.env\" 2>/dev/null || true\nset +a\nif [ -z \"${{SERVER_PORT:-}}\" ] && [ -n \"${{PORT:-}}\" ]; then export SERVER_PORT=\"$PORT\"; fi\nexec {}\n",
-            shell_single_quote(&binary_path)
-        );
-        push_text_file_to_ct(ctid, &format!("{service_dir}/start.sh"), &start_sh, "lxs-start")?;
-        pct_exec(ctid, &format!("chmod 755 {}", shell_single_quote(&format!("{service_dir}/start.sh"))))?;
-
-        let mut env_example = String::new();
-        for key in manifest.contract.env.required.iter().chain(manifest.contract.env.optional.iter()) {
-            let value = manifest.contract.env.defaults.get(key).cloned().unwrap_or_default();
-            env_example.push_str(&format!("{key}={value}\n"));
-        }
-        push_text_file_to_ct(ctid, &format!("{service_dir}/.env.example"), &env_example, "lxs-env-example")?;
-        // Seed .env with contract defaults (values configure.sh must preserve,
-        // e.g. S3_BUCKET) and granted-secret placeholders. Runs before
-        // configure.sh, which then adds the rest (ports, DB URIs, shared
-        // secrets) via sync_env_from_example / set_env.
-        let mut env_seed = String::new();
-        for (key, value) in &manifest.contract.env.defaults {
-            env_seed.push_str(&format!("{key}={value}\n"));
-        }
-        for key in &service.grants_secrets {
-            if !manifest.contract.env.defaults.contains_key(key) {
-                env_seed.push_str(&format!("{key}=\n"));
-            }
-        }
-        if !env_seed.is_empty() {
-            push_text_file_to_ct(ctid, &format!("{service_dir}/.env"), &env_seed, "lxs-env")?;
-        }
-
-        // The LXS contract declares the database it needs. configure.sh's data
-        // bootstrap is driven by runtimes, which `lxs:` services no longer
-        // declare, so eco provisions the DB itself from the contract.
-        match manifest.contract.db.as_str() {
-            "mongodb@7" => provision_lxs_mongodb(ctid, &service_dir)?,
-            "postgresql@15" => provision_lxs_postgres(ctid, &service_dir, &service.name, &deployment.project)?,
-            _ => {}
-        }
-        if manifest.contract.env.required.iter().any(|k| k == "REDIS_URL") || manifest.runtime.dependencies.iter().any(|d| d == "redis") {
-            provision_lxs_redis(ctid, &service_dir)?;
-        }
-
-        print_step(&format!("[CT {ctid}] Installed LXS {}@{} as service {}", name, version, service.name));
-        installed.push(service.name.clone());
-    }
-    Ok(installed)
-}
-
-// Ensures mongod runs and that configure.sh treats MONGODB_URI as managed
 // (ECO_MANAGED_MONGODB_URI=true forces it to write the estate-scoped URI).
 fn provision_lxs_mongodb(ctid: &str, service_dir: &str) -> Result<(), String> {
     pct_exec(
@@ -4359,16 +4141,16 @@ pub fn run_up(args: &[String]) -> Result<(), String> {
                 deployment.project
             ));
         }
-        return provision_estate(&deployment, &options, true, &staging_config);
+        return deploy_estate(&deployment, &options, true, &staging_config);
     }
 
-    provision_estate(&deployment, &options, false, &staging_config)?;
+    deploy_estate(&deployment, &options, false, &staging_config)?;
     if staging_config.contains_key("ct") && !options.get("prod-only").map(|v| v == "true").unwrap_or(false) {
         util::println_stdout(&format!(
             "\n[eco up] staging block declared (ct {}) — provisioning the staging footprint.",
             staging_config.get("ct").cloned().unwrap_or_default()
         ));
-        provision_estate(&deployment, &options, true, &staging_config)?;
+        deploy_estate(&deployment, &options, true, &staging_config)?;
     }
     Ok(())
 }
@@ -4395,3 +4177,187 @@ pub fn run_expose(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure-binary deploy helpers: host-side config generation and release-dir
+// artifact install. The CT is a pure runtime — no source, no node, no PM2.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Generate estate config (systemd units, .env, Caddyfile) on the HOST using
+/// the manifest + shipped artifacts + the resource registry, then push the
+/// finished files into the CT's release dir.
+fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, ct_release_dir: &str) -> Result<(), String> {
+    use crate::configgen;
+    let expose_hostname = deployment.expose.hostname();
+    // Resolve the main estate's services (default: all declared services).
+    let estates = ecompose::parse_estates(&deployment.content);
+    let main = ecompose::parse_main(&deployment.content);
+    let main_estate = estates.iter().find(|e| e.name == main).or_else(|| estates.first());
+    let selected: std::collections::HashSet<String> = main_estate
+        .map(|e| e.services.iter().cloned().collect())
+        .unwrap_or_default();
+    let svc: Vec<ecompose::Service> = if selected.is_empty() {
+        deployment.services.clone()
+    } else {
+        deployment
+            .services
+            .iter()
+            .filter(|s| selected.contains(&s.name))
+            .cloned()
+            .collect()
+    };
+    let (files, units) = configgen::generate_all(&deployment.project, ct_release_dir, &svc, &expose_hostname)?;
+    // Push .env files + Caddyfile into the release dir.
+    for (rel, content) in &files {
+        let target = format!("{ct_release_dir}/{rel}");
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&format!("{}/{}", ct_release_dir, rel.split('/').next().unwrap_or("")))))?;
+        push_text_file_to_ct(ctid, &target, content, "config-file")?;
+    }
+    // Push systemd units to /etc/systemd/system on the CT (ExecStart via current).
+    for (unit_name, unit_text) in &units {
+        let target = format!("/etc/systemd/system/{unit_name}");
+        push_text_file_to_ct(ctid, &target, unit_text, "systemd-unit")?;
+    }
+    Ok(())
+}
+
+/// Install shipped Rust binaries into the CT release dir artifacts/.
+fn install_remote_rust_binaries_release(
+    ctid: &str,
+    deployment: &ProjectDeployment,
+    artifacts_dir: &str,
+    ct_release_dir: &str,
+    _estate_core: &str,
+) -> Result<(), String> {
+    let artifacts = Path::new(artifacts_dir);
+    let rust_services: Vec<&ecompose::Service> = deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+        .collect();
+    for service in rust_services {
+        // binary: names the artifact; fall back to lxs name or service name.
+        let bin = if !service.binary.is_empty() {
+            service.binary.clone()
+        } else if !service.lxs.is_empty() {
+            service.lxs.split('@').next().unwrap_or("").to_string()
+        } else {
+            service.name.clone()
+        };
+        let artifact = artifacts.join(&bin);
+        if !artifact.is_file() {
+            return Err(format!("Remote artifact missing for {} (expected {})", service.name, artifact.display()));
+        }
+        let target_dir = format!("{ct_release_dir}/artifacts");
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
+        run_command(
+            "pct",
+            &["push".to_string(), ctid.to_string(), artifact.display().to_string(), format!("{target_dir}/{bin}.new")],
+            &util::current_dir(),
+        )?;
+        pct_exec(
+            ctid,
+            &format!(
+                "mv -f {} {} && chmod 755 {}",
+                shell_single_quote(&format!("{target_dir}/{bin}.new")),
+                shell_single_quote(&format!("{target_dir}/{bin}")),
+                shell_single_quote(&format!("{target_dir}/{bin}"))
+            ),
+        )?;
+        print_step(&format!("[CT {ctid}] Installed release binary: {}", service.name));
+    }
+    Ok(())
+}
+
+/// Install shipped frontend dists (and bun-compiled binaries) into the CT
+/// release dir artifacts/<service>/.
+fn install_remote_frontend_artifacts_release(
+    ctid: &str,
+    deployment: &ProjectDeployment,
+    artifacts_dir: &str,
+    ct_release_dir: &str,
+    _estate_core: &str,
+) -> Result<Vec<String>, String> {
+    let mut bun_compiled = Vec::new();
+    let artifacts = Path::new(artifacts_dir);
+    if !artifacts.is_dir() {
+        return Ok(bun_compiled);
+    }
+    for entry in std::fs::read_dir(artifacts).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if !entry.path().is_dir() {
+            continue; // rust binaries (flat) handled separately
+        }
+        let Some(service) = deployment.services.iter().find(|s| s.name == fname) else {
+            continue;
+        };
+        let service_dir = format!("{ct_release_dir}/artifacts/{}", service.name);
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&service_dir)))?;
+        let tar_path = std::env::temp_dir().join(format!("eco-frontend-{}-{}.tar.gz", service.name, std::process::id()));
+        let _ = std::fs::remove_file(&tar_path);
+        run_command(
+            "tar",
+            &[
+                "czf".to_string(),
+                tar_path.display().to_string(),
+                "-C".to_string(),
+                entry.path().display().to_string(),
+                ".".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
+        let remote_tar = format!("/tmp/eco-frontend-{}.tar.gz", service.name);
+        run_command(
+            "pct",
+            &["push".to_string(), ctid.to_string(), tar_path.display().to_string(), remote_tar.clone()],
+            &util::current_dir(),
+        )?;
+        pct_exec(ctid, &format!("tar xzf {} -C {}", shell_single_quote(&remote_tar), shell_single_quote(&service_dir)))?;
+        pct_exec(ctid, &format!("rm -f {}", shell_single_quote(&remote_tar)))?;
+        let _ = std::fs::remove_file(&tar_path);
+        let is_bun = entry.path().join(".eco-bun").is_file();
+        if is_bun {
+            pct_exec(ctid, &format!("chmod 755 {}", shell_single_quote(&format!("{service_dir}/{}", service.name))))?;
+            bun_compiled.push(service.name.clone());
+        }
+        print_step(&format!("[CT {ctid}] Installed release frontend dist: {}", service.name));
+    }
+    Ok(bun_compiled)
+}
+
+/// Install `lxs:` services into the CT release dir artifacts/<name>.
+fn install_lxs_services_release(ctid: &str, deployment: &ProjectDeployment, ct_release_dir: &str) -> Result<Vec<String>, String> {
+    let lxs_services: Vec<&ecompose::Service> = deployment.services.iter().filter(|s| !s.lxs.is_empty()).collect();
+    if lxs_services.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir).map(|s| s.registry).filter(|r| !r.is_empty());
+    let mut installed = Vec::new();
+    for service in lxs_services {
+        let (manifest, version, local_bin) = crate::commands::lxs::fetch_lxs_to_cache(&service.lxs, "linux/amd64", state_registry.as_deref())?;
+        let name = manifest.name.clone();
+        if name.is_empty() {
+            return Err(format!("LXS {} has no name in its manifest", service.lxs));
+        }
+        let target_dir = format!("{ct_release_dir}/artifacts");
+        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&target_dir)))?;
+        run_command(
+            "pct",
+            &["push".to_string(), ctid.to_string(), local_bin.display().to_string(), format!("{target_dir}/{name}.new")],
+            &util::current_dir(),
+        )?;
+        pct_exec(
+            ctid,
+            &format!(
+                "mv -f {} {} && chmod 755 {}",
+                shell_single_quote(&format!("{target_dir}/{name}.new")),
+                shell_single_quote(&format!("{target_dir}/{name}")),
+                shell_single_quote(&format!("{target_dir}/{name}"))
+            ),
+        )?;
+        print_step(&format!("[CT {ctid}] Installed LXS {}@{} as {}", name, version, service.name));
+        installed.push(service.name.clone());
+    }
+    Ok(installed)
+}
