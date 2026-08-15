@@ -327,7 +327,25 @@ fn run_tunnel(
         "origin": origin,
         "port": port_num,
     });
-    let reserved = api_post_json(&format!("{api_url}/v1/serve"), &api_key, &body)?;
+    let reserved = match api_post_json(&format!("{api_url}/v1/serve"), &api_key, &body) {
+        Ok(v) => v,
+        Err(e) if e.contains("already reserved") => {
+            // Reuse an existing lease: `eco serve <name>` again after a
+            // previous run (or a crash) should pick up the same tunnel token
+            // instead of erroring. Only reuse when the hostname matches.
+            util::println_stdout("Subdomain already reserved — reusing the existing tunnel.");
+            let existing = api_get_json(&format!("{api_url}/v1/serve"), &api_key)?
+                .get("serves")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|l| l.get("subdomain").and_then(|s| s.as_str()) == Some(subdomain))
+                .ok_or_else(|| format!("subdomain \"{subdomain}\" is reserved by someone else; pick another name"))?;
+            existing
+        }
+        Err(e) => return Err(e),
+    };
     let hostname = reserved.get("hostname").and_then(|h| h.as_str()).unwrap_or("").to_string();
     let tunnel_token = reserved.get("tunnel_token").and_then(|t| t.as_str()).unwrap_or("").to_string();
     if hostname.is_empty() || tunnel_token.is_empty() {
@@ -344,7 +362,7 @@ fn run_tunnel(
     util::println_stdout(&format!("\n  Public URL: {url}\n  Local app:  {origin}\n\n  Press Ctrl+C to stop the tunnel and release the subdomain.\n"));
 
     let status = Command::new("cloudflared")
-        .args(["tunnel", "--token", &tunnel_token, "--url", &origin])
+        .args(["tunnel", "run", "--token", &tunnel_token, "--url", &origin])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

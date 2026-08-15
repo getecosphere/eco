@@ -360,7 +360,17 @@ pub fn ensure_remote_tunnel(
     let env = get_cloudflare_env(account);
     require_env_var(&env.account_id, "CF_ACCOUNT_ID", account)?;
     let existing = list_remote_tunnels_by_name(tunnel_name, account)?;
-    let active = existing.iter().find(|t| t.get("deleted_at").is_none()).cloned();
+    // Cloudflare returns `deleted_at: null` for live tunnels (field present
+    // with a null value), so `.is_none()` on the Option is wrong here — a
+    // present-null must be treated as "not deleted".
+    let active = existing
+        .iter()
+        .find(|t| {
+            t.get("deleted_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true)
+        })
+        .cloned();
     if let Some(tunnel) = active {
         let tunnel_id = tunnel.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
         let token = tunnel

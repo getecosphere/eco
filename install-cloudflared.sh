@@ -20,7 +20,7 @@ install_cloudflared_binary() {
     ok "cloudflared already installed ($(cloudflared --version 2>/dev/null | head -1 || true))."
     return
   fi
-  local os arch url tmpfile
+  local os arch url tmpfile ext
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux) os=linux ;;
@@ -31,14 +31,27 @@ install_cloudflared_binary() {
     arm64|aarch64) arch=arm64 ;;
     *) fail "Unsupported architecture: $(uname -m)" ;;
   esac
-  url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${os}-${arch}"
+  ext=""
+  [[ "$os" == "darwin" ]] && ext=".tgz"
+  url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${os}-${arch}${ext}"
   tmpfile="$(mktemp)"
   log "Installing cloudflared (${os}-${arch})..."
   curl --proto '=https' --tlsv1.2 -sSfL "$url" -o "$tmpfile"
+  if [[ "$os" == "darwin" ]]; then
+    mkdir -p /tmp/cloudflared-install
+    tar -xzf "$tmpfile" -C /tmp/cloudflared-install
+    if [[ -f /tmp/cloudflared-install/cloudflared ]]; then
+      tmpfile="/tmp/cloudflared-install/cloudflared"
+    else
+      find /tmp/cloudflared-install -type f -name cloudflared -exec mv {} /tmp/cloudflared-install/cloudflared \; 2>/dev/null || true
+      tmpfile="/tmp/cloudflared-install/cloudflared"
+    fi
+  fi
   chmod +x "$tmpfile"
   if install -m 0755 "$tmpfile" /usr/local/bin/cloudflared 2>/dev/null; then :; else
     $SUDO install -m 0755 "$tmpfile" /usr/local/bin/cloudflared
   fi
+  rm -rf /tmp/cloudflared-install
   rm -f "$tmpfile"
   ok "cloudflared installed."
 }
