@@ -3196,12 +3196,8 @@ fn builder_cmd() -> Vec<String> {
 fn builder_exec(script: &str) -> Result<util::Captured, String> {
     if builder_is_host() {
         let mut env = std::env::vars().collect::<HashMap<_, _>>();
-        let path = host_builder_path();
-        eprintln!("[debug] host_builder_path = {}", path);
-        env.insert("PATH".to_string(), path);
-        let r = run_capture_env("bash", &["-c".to_string(), script.to_string()], &util::current_dir(), &env);
-        eprintln!("[debug] script = {}", script);
-        return r;
+        env.insert("PATH".to_string(), host_builder_path());
+        return run_capture_env("bash", &["-c".to_string(), script.to_string()], &util::current_dir(), &env);
     }
     let mut args = builder_cmd();
     // Non-login shell: `bash -lc` (login) sources ~/.profile/~.bashrc, which
