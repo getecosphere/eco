@@ -477,7 +477,7 @@ fn cargo_package_name(cargo_toml: &str) -> Option<String> {
     None
 }
 
-fn build_data_bootstrap_plan(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, project: &str, estate_core: &str) -> Vec<String> {
+fn build_data_bootstrap_plan(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, project: &str, estate_core: &str, env_dir: &str) -> Vec<String> {
     let mut commands = Vec::new();
     let has_mongo = services.iter().any(|s| s.runtimes.iter().any(|r| r == "mongodb@7"));
     let sql_services: Vec<&ecompose::Service> = services.iter().filter(|s| s.runtimes.iter().any(|r| r == "postgresql@15")).collect();
@@ -498,16 +498,19 @@ fn build_data_bootstrap_plan(services: &[ecompose::Service], _ct_workspace_root:
     for service in &sql_services {
         let db_name = sql_database_name_for_service(service, project);
         let db_role = format!("{project}_user");
-        let env_file = format!("{}/.env", resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core));
+        let _ = resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core);
+        // Pure-binary release-dir: env lives at current/.env/<service>.env.
+        let env_file = format!("{env_dir}/{}.env", service.name);
         let quoted_env_file = shell_single_quote(&env_file);
         let is_java = uses_java_database_configuration(service);
         let mut commands_for_service = vec![
+            format!("mkdir -p {}", shell_single_quote(env_dir)),
             format!("touch {quoted_env_file}"),
             "if [[ -z \"${DATABASE_PASSWORD:-}\" ]]; then".to_string(),
             format!("  db_password=\"$(grep -E '^DATABASE_PASSWORD=' {quoted_env_file} 2>/dev/null | cut -d'=' -f2- | tr -d '\\r' || true)\";"),
             "  if [[ -z \"$db_password\" ]]; then".to_string(),
-            "    echo 'ERROR: DATABASE_PASSWORD is not exported in the shell environment and no value is persisted in the service .env. Add it to ~/.bashrc on the CT.' >&2;".to_string(),
-            "    exit 1;".to_string(),
+            "    db_password=\"$(openssl rand -base64 32 2>/dev/null | tr -d '\\n' || echo 'changeme')\";".to_string(),
+            "    echo \"[eco up] generated DATABASE_PASSWORD for {project} (stored in {env_file})\";".to_string(),
             "  fi".to_string(),
             format!("  echo \"[eco up] DATABASE_PASSWORD not in shell env -- reusing the value already persisted in {env_file} (no rotation)\";"),
             "else".to_string(),
@@ -543,11 +546,12 @@ fn build_data_bootstrap_plan(services: &[ecompose::Service], _ct_workspace_root:
     if !deepseek.is_empty() {
         for service in services {
             let key = "DEEPSEEK_API_KEY";
-            let env_file = format!("{}/.env", resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core));
+            let env_file = format!("{env_dir}/{}.env", service.name);
             let quoted_env_file = shell_single_quote(&env_file);
+            let quoted_env_dir = shell_single_quote(env_dir);
             let quoted_example = shell_single_quote(&format!("{env_file}.example"));
             commands.push(format!(
-                "if [ -f {quoted_example} ] && grep -qE \"^{key}=\" {quoted_example}; then\n  touch {quoted_env_file}\n  sed -i '/^{key}=/d' {quoted_env_file}\n  printf '{key}=%s\\n' {} >> {quoted_env_file}\nfi",
+                "if [ -f {quoted_example} ] && grep -qE \"^{key}=\" {quoted_example}; then\n  mkdir -p {quoted_env_dir}\n  touch {quoted_env_file}\n  sed -i '/^{key}=/d' {quoted_env_file}\n  printf '{key}=%s\\n' {} >> {quoted_env_file}\nfi",
                 shell_single_quote(&deepseek)
             ));
         }
@@ -556,16 +560,20 @@ fn build_data_bootstrap_plan(services: &[ecompose::Service], _ct_workspace_root:
     commands
 }
 
-fn build_rust_migration_plan(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, estate_core: &str) -> Vec<String> {
+fn build_rust_migration_plan(services: &[ecompose::Service], _ct_workspace_root: &str, ct_project_root: &str, project_dir: &str, estate_core: &str, release_dir: &str, env_dir: &str) -> Vec<String> {
     services
         .iter()
         .filter(|s| s.runtimes.iter().any(|r| r == "rust") && s.runtimes.iter().any(|r| r == "postgresql@15"))
         .map(|service| {
-            let service_dir = resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core);
+            // Pure-binary release-dir: migrations ship with the service artifact.
+            let migrations_dir = format!("{release_dir}/artifacts/{}/migrations", service.name);
+            let env_file = format!("{env_dir}/{}.env", service.name);
+            let _ = resolve_ct_service_dir(service, ct_project_root, project_dir, estate_core);
             format!(
-                "if [ -d {} ]; then\n  cd {}\n  find migrations -maxdepth 1 -name '._*' -delete 2>/dev/null || true\n  set -a; . ./.env; set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    if command -v cargo >/dev/null 2>&1; then\n      cargo install sqlx-cli --no-default-features --features postgres,rustls\n      sqlx_bin=\"$(command -v sqlx)\"\n    else\n      echo \"[eco up] sqlx is unavailable and this CT has no Cargo — assuming the database is already migrated (re-deploy of a live estate); skipping.\" >&2\n      exit 0\n    fi\n  fi\n  \"$sqlx_bin\" migrate run --source migrations\nfi",
-                shell_single_quote(&format!("{service_dir}/migrations")),
-                shell_single_quote(&service_dir)
+                "if [ -d {} ]; then\n  set -a; . {}\n  set +a\n  sqlx_bin=\"${{ECO_SQLX_BIN:-}}\"\n  if [[ -z \"$sqlx_bin\" ]]; then sqlx_bin=\"$(command -v sqlx 2>/dev/null || true)\"; fi\n  if [[ -z \"$sqlx_bin\" ]]; then\n    if command -v cargo >/dev/null 2>&1; then\n      cargo install sqlx-cli --no-default-features --features postgres,rustls\n      sqlx_bin=\"$(command -v sqlx)\"\n    else\n      echo \"[eco up] sqlx is unavailable and this CT has no Cargo — assuming the database is already migrated (re-deploy of a live estate); skipping.\" >&2\n      exit 0\n    fi\n  fi\n  \"$sqlx_bin\" migrate run --source {}\nfi",
+                shell_single_quote(&migrations_dir),
+                shell_single_quote(&env_file),
+                shell_single_quote(&migrations_dir)
             )
         })
         .collect()
@@ -2430,8 +2438,6 @@ fn deploy_estate(
         }
     }
 
-    let data_bootstrap_steps = build_data_bootstrap_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &deployment.project, &estate_core);
-    let migration_steps = build_rust_migration_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
     let rust_services: Vec<&ecompose::Service> = deployment
         .services
         .iter()
@@ -2488,6 +2494,13 @@ fn deploy_estate(
             rust_services.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", ")
         ));
     }
+
+    // Release-dir paths (stable base for step generation; the unique CT dir is
+    // resolved at runtime). Rebuilt after resolution for the actual deploy.
+    let (ct_releases_root, ct_release_dir_base, _ct_current) = ct_release_paths(&deployment.project);
+    let env_dir_base = format!("{ct_release_dir_base}/.env");
+    let data_bootstrap_steps = build_data_bootstrap_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &deployment.project, &estate_core, &env_dir_base);
+    let migration_steps = build_rust_migration_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core, &ct_release_dir_base, &env_dir_base);
 
     let mut commands: Vec<String> = vec![
         format!("pct status {ctid} || pct create {}", create_args[1..].join(" ")),
@@ -2616,15 +2629,21 @@ fn deploy_estate(
     // to the active release. systemd ExecStart points at current/... so a
     // rollback is re-pointing the symlink + restarting units. No source, no
     // /opt/projects source layout, no SSH keys, no eco binary on the CT.
-    let (ct_releases_root, ct_release_dir, ct_current) = ct_release_paths(&deployment.project);
     let ct_release_dir = if remote_mode {
         // unique on the CT (check via pct ls)
         unique_ct_release_dir(&ctid, &ct_releases_root)?
     } else {
-        ct_release_dir
+        ct_release_dir_base.clone()
     };
+    let ct_current = format!("{CT_ECO_ROOT}/{}/current", deployment.project);
     pct_exec(&ctid, &format!("mkdir -p {}", shell_single_quote(&ct_release_dir)))?;
     print_step(&format!("[CT {ctid}] Release dir: {}", ct_release_dir));
+
+    // Rebuild steps against the actual (unique) release dir so data bootstrap,
+    // migrations, and config all target the same path.
+    let env_dir = format!("{ct_release_dir}/.env");
+    let data_bootstrap_steps = build_data_bootstrap_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &deployment.project, &estate_core, &env_dir);
+    let migration_steps = build_rust_migration_plan(&deployment.services, &deployment.ct_workspace_root, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core, &ct_release_dir, &env_dir);
 
     if staging {
         print_step(&format!("[CT {ctid}] Writing staging ecompose.yml ({})", expose.hostname()));
@@ -2659,14 +2678,6 @@ fn deploy_estate(
     if expose.enabled() {
         print_step(&format!("[CT {ctid}] Ensuring caddy is installed for gateway"));
         ensure_ct_caddy(&ctid)?;
-    }
-    for (index, command) in data_bootstrap_steps.iter().enumerate() {
-        print_step(&format!("[CT {ctid}] Bootstrapping data service {}", index + 1));
-        pct_exec(&ctid, &format!("export LANG=C.UTF-8 LC_ALL=C.UTF-8 PERL_BADLANG=0\n{}", command))?;
-    }
-    for (index, command) in migration_steps.iter().enumerate() {
-        print_step(&format!("[CT {ctid}] Applying Rust migration set {}", index + 1));
-        pct_exec(&ctid, &format!("{command}"))?;
     }
     // Install the shipped binaries into the release dir.
     let mut rust_build_failures: Vec<String> = Vec::new();
@@ -2715,6 +2726,17 @@ fn deploy_estate(
     // `deploy-webhook` / `gateway` units from the previous source+PM2 era) so
     // only the new release units keep running.
     purge_stale_units(&ctid, &deployment.project, &new_units)?;
+
+    // Data bootstrap + migrations run AFTER configgen so the password-bearing
+    // DATABASE_URL they write wins over configgen's hostname-only default.
+    for (index, command) in data_bootstrap_steps.iter().enumerate() {
+        print_step(&format!("[CT {ctid}] Bootstrapping data service {}", index + 1));
+        pct_exec(&ctid, &format!("export LANG=C.UTF-8 LC_ALL=C.UTF-8 PERL_BADLANG=0\n{}", command))?;
+    }
+    for (index, command) in migration_steps.iter().enumerate() {
+        print_step(&format!("[CT {ctid}] Applying Rust migration set {}", index + 1));
+        pct_exec(&ctid, &format!("{command}"))?;
+    }
 
     let mut failures: Vec<(String, String)> = Vec::new();
     for failure in rust_build_failures {
@@ -3294,6 +3316,16 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 trim_dev_artifact(&path, &artifact_dir);
             }
         }
+        // Next.js (`.next`) needs its node_modules on the CT at runtime. Ship
+        // the manifest files so the CT can `npm ci` (native modules are linux).
+        if included.iter().any(|s| s == ".next" || s == "app/.next") {
+            for f in ["package.json", "package-lock.json", "npm-shrinkwrap.json"] {
+                let src = Path::new(build_dir).join(f);
+                if src.is_file() {
+                    std::fs::copy(&src, artifact_dir.join(f)).map_err(|e| e.to_string())?;
+                }
+            }
+        }
     } else {
         let remote_tar = format!("/tmp/eco-builder-artifact-{}.tar.gz", std::process::id());
         builder_exec_ok(&format!(
@@ -3712,7 +3744,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             )
         } else {
             format!(
-                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash",
+                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund --legacy-peer-deps; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash",
                 shell_single_quote(&build_dir)
             )
         };
@@ -4358,6 +4390,16 @@ fn install_remote_frontend_artifacts_release(
         pct_exec(ctid, &format!("tar xzf {} -C {}", shell_single_quote(&remote_tar), shell_single_quote(&service_dir)))?;
         pct_exec(ctid, &format!("rm -f {}", shell_single_quote(&remote_tar)))?;
         let _ = std::fs::remove_file(&tar_path);
+        // Next.js SSR frontends ship a .next build plus package.json/package-lock;
+        // they need linux node_modules on the CT to run `next start`. Install
+        // natively so native modules (sharp etc.) match the linux arch.
+        if entry.path().join(".next").is_dir() {
+            let ci = pct_exec(ctid, &format!("cd {} && npm ci --no-audit --no-fund --legacy-peer-deps 2>/dev/null", shell_single_quote(&service_dir)));
+            if ci.is_err() {
+                pct_exec(ctid, &format!("cd {} && npm install --no-audit --no-fund --legacy-peer-deps 2>/dev/null", shell_single_quote(&service_dir)))?;
+            }
+            print_step(&format!("[CT {ctid}] Installed linux node_modules for Next.js: {}", service.name));
+        }
         let is_bun = entry.path().join(".eco-bun").is_file();
         if is_bun {
             pct_exec(ctid, &format!("chmod 755 {}", shell_single_quote(&format!("{service_dir}/{}", service.name))))?;

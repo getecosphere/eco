@@ -29,6 +29,8 @@ pub struct ServiceDeploy {
     pub port: u16,
     /// The env var name this service reads its port from (SERVER_PORT / PORT).
     pub port_var: String,
+    /// Database kind this service needs (postgres | mongo | redis | "").
+    pub database: String,
 }
 
 /// Resolve the executable for a service inside a CT release dir.
@@ -42,11 +44,19 @@ pub struct ServiceDeploy {
 ///       <service-name>/migrations/
 ///
 /// `binary:` in the manifest names the artifact for source Rust services.
+///
+/// `read_dir` is where shipped artifacts actually live (the HOST release dir,
+/// which exists on this machine); `release_dir` is the CT release dir that
+/// returned ExecStart/workdir paths must point at (may not exist locally).
+/// Existence checks (dist vs .next vs bun) run against read_dir; returned
+/// paths are anchored at release_dir.
 pub fn resolve_service_exec(
     service: &ecompose::Service,
+    read_dir: &str,
     release_dir: &str,
     binary_override: &str,
 ) -> Result<(String, String, bool), String> {
+    let read_artifacts = format!("{read_dir}/artifacts");
     let artifacts = format!("{release_dir}/artifacts");
     // Source Rust service: binary named `binary:` (or service/lxs name).
     if service.runtimes.iter().any(|r| r == "rust") {
@@ -72,14 +82,23 @@ pub fn resolve_service_exec(
     if service.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")) {
         // Frontend: served as a static dist via python http.server, or a
         // Bun-compiled single binary when a `.eco-bun` marker exists.
+        let read_service_dir = format!("{read_artifacts}/{}", service.name);
         let service_dir = format!("{artifacts}/{}", service.name);
-        let bun_marker = format!("{service_dir}/.eco-bun");
+        let bun_marker = format!("{read_service_dir}/.eco-bun");
         if Path::new(&bun_marker).exists() {
-            let bun_name = std::fs::read_to_string(format!("{service_dir}/.eco-bun-name"))
+            let bun_name = std::fs::read_to_string(format!("{read_service_dir}/.eco-bun-name"))
                 .unwrap_or_else(|_| service.name.clone())
                 .trim()
                 .to_string();
             return Ok((format!("{service_dir}/{bun_name}"), service_dir.clone(), true));
+        }
+        // Next.js build output: serve via next start (needs node + node_modules
+        // shipped to the CT). Static dist / Bun single-binary handled below.
+        let next_dir = format!("{read_service_dir}/.next");
+        if Path::new(&next_dir).is_dir() {
+            let port_var = format!("${{{}}}", env_var_for(service, "PORT"));
+            let exec = format!("{service_dir}/node_modules/.bin/next start -p {port_var}");
+            return Ok((exec, service_dir.clone(), true));
         }
         // Static dist served by python3 http.server on the allocated port.
         let dist = format!("{service_dir}/dist");
@@ -183,6 +202,23 @@ pub fn build_env_files(
             let jwt = configgen_shared_jwt(&scope, project);
             env.push_str(&format!("JWT_SECRET={jwt}\n"));
         }
+        // Guarantee the managed DB URL the service's runtime requires is
+        // present even when the shipped contract omits it.
+        if s.database == "postgres" && !env.contains("DATABASE_URL=") {
+            if let Some(mv) = managed_env_value("DATABASE_URL", &s.name, project) {
+                env.push_str(&format!("DATABASE_URL={mv}\n"));
+            }
+        }
+        if s.database == "mongo" && !env.contains("MONGODB_URI=") {
+            if let Some(mv) = managed_env_value("MONGODB_URI", &s.name, project) {
+                env.push_str(&format!("MONGODB_URI={mv}\n"));
+            }
+        }
+        if s.database == "redis" && !env.contains("REDIS_URL=") {
+            if let Some(mv) = managed_env_value("REDIS_URL", &s.name, project) {
+                env.push_str(&format!("REDIS_URL={mv}\n"));
+            }
+        }
         out.insert(s.name.clone(), env);
     }
     out
@@ -199,9 +235,11 @@ fn managed_env_value(key: &str, service: &str, project: &str) -> Option<String> 
     match key {
         "MONGODB_URI" => Some(format!("mongodb://localhost:27017/{service}_{project}")),
         "REDIS_URL" => Some("redis://127.0.0.1:6379".to_string()),
-        "DATABASE_URL" | "POSTGRES_URL" => {
-            Some(format!("postgresql://{project}_user@{service}_{project}", project = project, service = service))
-        }
+        // Hostname-only default (no password); data bootstrap overwrites this
+        // with the real role password. db name convention: <service>_<project>.
+        "DATABASE_URL" | "POSTGRES_URL" => Some(format!(
+            "postgresql://{project}_user@127.0.0.1:5432/{service}_{project}"
+        )),
         _ => None,
     }
 }
@@ -276,7 +314,7 @@ pub fn generate_all(
     let mut deploys: Vec<ServiceDeploy> = Vec::new();
     let mut ports: HashMap<String, u16> = HashMap::new();
     for svc in services {
-        let (exec, workdir, http) = resolve_service_exec(svc, write_dir, "")?;
+        let (exec, workdir, http) = resolve_service_exec(svc, read_dir, write_dir, "")?;
         if exec.is_empty() {
             continue;
         }
@@ -288,6 +326,15 @@ pub fn generate_all(
         };
         ports.insert(svc.name.clone(), port);
         let port_var = env_var_for(svc, "PORT");
+        let database = if svc.runtimes.iter().any(|r| r == "postgresql@15") {
+            "postgres".to_string()
+        } else if svc.runtimes.iter().any(|r| r.starts_with("mongodb")) {
+            "mongo".to_string()
+        } else if svc.runtimes.iter().any(|r| r.starts_with("redis")) {
+            "redis".to_string()
+        } else {
+            String::new()
+        };
         deploys.push(ServiceDeploy {
             name: svc.name.clone(),
             exec,
@@ -296,6 +343,7 @@ pub fn generate_all(
             http,
             port,
             port_var,
+            database,
         });
     }
     let env_files = build_env_files(&deploys, project, &ports, &HashMap::new());
