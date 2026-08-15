@@ -70,7 +70,7 @@ echo "=== [publish-eco] building eco release $VERSION from $ECO_BRANCH"
 # ---- publish binaries into the getecosphere downloads dir --------------
 DEST="$GECO/frontend/downloads"
 echo "=== [publish-eco] publishing to $DEST"
-for triple in x86_64-unknown-linux-musl x86_64-apple-darwin x86_64-pc-windows-gnu; do
+for triple in x86_64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
   src="$SCRIPT_DIR/dist/$triple/eco"
   if [ "$triple" = "x86_64-pc-windows-gnu" ]; then src="$src.exe"; fi
   if [ -f "$src" ]; then
