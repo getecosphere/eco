@@ -145,6 +145,100 @@ pub fn parse_project_name(content: &str) -> String {
     String::new()
 }
 
+/// The `main:` key — the default estate name, like `main()` in C++.
+/// Falls back to the project name (or the first estate) when absent.
+pub fn parse_main(content: &str) -> String {
+    for raw in content.split('\n') {
+        let line = raw.trim_end_matches('\r').trim_end();
+        if line.is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("main:") {
+            return util::strip_quotes(rest.trim());
+        }
+    }
+    String::new()
+}
+
+/// One estate: a deployable composition of services selected by name.
+#[derive(Debug, Clone, Default)]
+pub struct Estate {
+    pub name: String,
+    pub hostname: String,
+    pub ingress: String,
+    pub cloudflare_account: String,
+    pub ct_id: String,
+    pub services: Vec<String>,
+}
+
+/// Parse `estates:` — a map of estate name → estate config. An estate selects
+/// which services it runs from the shared `services:` pool. Top-level keys
+/// that appear before/after are ignored.
+pub fn parse_estates(content: &str) -> Vec<Estate> {
+    let mut estates: Vec<Estate> = Vec::new();
+    let mut in_estates = false;
+    let mut current: Option<Estate> = None;
+    let mut in_services = false;
+
+    for raw in content.split('\n') {
+        let line = raw.trim_end_matches('\r').trim_end();
+        if line.is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line == "estates:" {
+            in_estates = true;
+            continue;
+        }
+        if !in_estates {
+            continue;
+        }
+        if starts_top_level_key(line) {
+            break;
+        }
+        if let Some(name) = match_indented_key(line, 2) {
+            if let Some(e) = current.take() {
+                estates.push(e);
+            }
+            current = Some(Estate {
+                name,
+                ..Default::default()
+            });
+            in_services = false;
+            continue;
+        }
+        if let Some(e) = current.as_mut() {
+            if let Some((key, value)) = match_indented_key_value(line, 4) {
+                match key.as_str() {
+                    "hostname" => e.hostname = util::strip_quotes(value.trim()),
+                    "ingress" => e.ingress = util::strip_quotes(value.trim()),
+                    "cloudflare_account" => e.cloudflare_account = util::strip_quotes(value.trim()),
+                    "ct" => e.ct_id = util::strip_quotes(value.trim()),
+                    _ => {}
+                }
+                continue;
+            }
+            if line.trim_start() == "services:" {
+                in_services = true;
+                continue;
+            }
+            if in_services {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix('-') {
+                    let name = util::strip_quotes(rest.trim());
+                    if !name.is_empty() && !e.services.contains(&name) {
+                        e.services.push(name);
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+    if let Some(e) = current.take() {
+        estates.push(e);
+    }
+    estates
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Service {
     pub name: String,
@@ -221,7 +315,21 @@ pub fn parse_services(content: &str) -> Vec<Service> {
                 continue;
             }
             if line.trim_start().starts_with("runtimes:") {
-                in_runtimes = true;
+                // Support both block form (`runtimes:\n  - rust`) and inline
+                // flow form (`runtimes: [rust, mongodb@7]`).
+                let after = line.trim_start().trim_start_matches("runtimes:").trim();
+                if after.starts_with('[') {
+                    let inner = after.trim_start_matches('[').trim_end_matches(']');
+                    for item in inner.split(',') {
+                        let item = util::strip_quotes(item.trim());
+                        if !item.is_empty() {
+                            c.runtimes.push(item);
+                        }
+                    }
+                    in_runtimes = false;
+                } else {
+                    in_runtimes = true;
+                }
                 continue;
             }
             if in_runtimes {

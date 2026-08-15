@@ -2767,42 +2767,8 @@ fn provision_estate(
 // at once.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REMOTE_SOURCE_SKIP: [&str; 13] = [
-    ".env", ".env.local", ".git", "node_modules", "target", ".next", ".cache", ".eco", "dist",
-    "docs", "build", ".svelte-kit", "data-snapshots",
-];
-
 fn skip_none(_: &str) -> bool {
     false
-}
-
-// Only secret/local env files are excluded from the shipped source. `.env.example`
-// is a committed contract file configure.sh reads on the CT to normalize env
-// (JWT_SECRET, CORS, feature flags) and must be shipped.
-fn should_skip_remote_source(name: &str) -> bool {
-    REMOTE_SOURCE_SKIP.contains(&name)
-        || name.starts_with("._")
-        || (name.starts_with(".env.") && name.ends_with(".local"))
-        || name.ends_with(".log")
-}
-
-// Best-effort gitignore awareness: read a dir's `.gitignore` and return the
-// top-level entry names it ignores (comments, blanks and nested paths skipped).
-// The remote payload ship skips gitignored content — "if it's gitignored, we
-// don't ship it" — so a user who accidentally keeps large non-runtime files in
-// the estate can gitignore them and they stop going to the CT.
-fn load_gitignore_names(dir: &Path) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Ok(content) = std::fs::read_to_string(dir.join(".gitignore")) {
-        for line in content.lines() {
-            let t = line.trim();
-            if t.is_empty() || t.starts_with('#') || t.contains('/') {
-                continue;
-            }
-            names.push(t.trim_end_matches('/').to_string());
-        }
-    }
-    names
 }
 
 fn copy_tree_excluding(src: &Path, dst: &Path, skip: &dyn Fn(&str) -> bool) -> Result<(), String> {
@@ -3452,15 +3418,12 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         ));
     }
     let deploy_query = if staging { "?staging=1" } else { "" };
-    let estate_root = deployment
-        .project_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| deployment.project_dir.clone());
     let project_dir_str = deployment.project_dir.display().to_string();
 
     // Pair each declared Rust service with its local crate directory and its
     // CT-relative path (where the binary and .eco-rust-hash live on the CT).
+    // `path:` is relative to the repo root (project_dir) and may point outside
+    // the repo (`../bidding`) — the developer arranges their own folders.
     let mut rust_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
     for service in deployment
         .services
@@ -3469,16 +3432,15 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     {
         let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
         let rel = if rel.is_empty() { service.path.clone() } else { rel };
-        let candidates = [estate_root.join(&rel), deployment.project_dir.join(&rel)];
-        let Some(dir) = candidates.iter().find(|c| c.join("Cargo.toml").is_file()) else {
+        let candidate = deployment.project_dir.join(&rel);
+        if !candidate.join("Cargo.toml").is_file() {
             return Err(format!(
-                "Cannot find local crate for Rust service {} (looked in {} and {})",
+                "Cannot find local crate for Rust service {} (looked at {})",
                 service.name,
-                candidates[0].display(),
-                candidates[1].display()
+                candidate.display()
             ));
-        };
-        rust_targets.push((service.clone(), rel, dir.clone()));
+        }
+        rust_targets.push((service.clone(), rel, candidate));
     }
     if rust_targets.is_empty() {
         // Not necessarily an error any more: an estate may ship only Node
@@ -3497,26 +3459,24 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     {
         let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
         let rel = if rel.is_empty() { service.path.clone() } else { rel };
-        let candidates = [estate_root.join(&rel), deployment.project_dir.join(&rel)];
+        let candidate = deployment.project_dir.join(&rel);
         // Node frontends have package.json; Leptos/Rust frontends have
         // Cargo.toml + index.html (the trunk CSR entry).
         let is_leptos = service.runtimes.iter().any(|r| r == "leptos");
-        let Some(dir) = candidates.iter().find(|c| {
-            if is_leptos {
-                c.join("Cargo.toml").is_file() && c.join("index.html").is_file()
-            } else {
-                c.join("package.json").is_file()
-            }
-        }) else {
+        let ok = if is_leptos {
+            candidate.join("Cargo.toml").is_file() && candidate.join("index.html").is_file()
+        } else {
+            candidate.join("package.json").is_file()
+        };
+        if !ok {
             return Err(format!(
-                "Cannot find local {} for service {} (looked in {} and {})",
+                "Cannot find local {} for service {} (looked at {})",
                 if is_leptos { "Cargo.toml + index.html (Leptos)" } else { "package.json" },
                 service.name,
-                candidates[0].display(),
-                candidates[1].display()
+                candidate.display()
             ));
-        };
-        frontend_targets.push((service.clone(), rel, dir.clone()));
+        }
+        frontend_targets.push((service.clone(), rel, candidate));
     }
     if rust_targets.is_empty() && frontend_targets.is_empty() {
         return Err("eco up --remote found no Rust or Node services in ecompose.yml to build and ship.".to_string());
@@ -3757,43 +3717,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         print_step(&format!("Built {} artifact -> ship", service.name));
     }
 
-    // Build the deploy payload: source (project + domains), artifacts, hashes.
+    // Build the deploy payload: ecompose.yml + artifacts + hashes. Executable-only:
+    // the server never sees source code. The manifest travels so configure.sh
+    // can derive service topology without scanning a source tree.
     let payload_dir = std::env::temp_dir().join(format!("eco-remote-payload-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&payload_dir);
     std::fs::create_dir_all(&payload_dir).map_err(|e| e.to_string())?;
     let result = (|| -> Result<(), String> {
-        let source_dir = payload_dir.join("source");
-        // Ship only the source the CT needs (git-tracked content minus the
-        // fixed skip list) — gitignored files never ship. The built binaries
-        // and frontend dist travel as the artifacts below.
-        let project_ignored = load_gitignore_names(&deployment.project_dir);
-        let source_skip = |name: &str| should_skip_remote_source(name) || project_ignored.iter().any(|g| g == name);
-        copy_tree_excluding(&deployment.project_dir, &source_dir, &source_skip)?;
-        let domains: Vec<String> = deployment
-            .services
-            .iter()
-            .filter(|s| !s.path.is_empty())
-            .filter_map(|s| s.path.split('/').next().map(|p| p.to_string()))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        let project_base = deployment.project_dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        for domain in domains {
-            if domain == "." || domain.is_empty() {
-                continue;
-            }
-            if domain == project_base {
-                continue;
-            }
-            let domain_dir = estate_root.join(&domain);
-            if domain_dir.is_dir() {
-                let domain_ignored = load_gitignore_names(&domain_dir);
-                let domain_skip = |name: &str| {
-                    should_skip_remote_source(name) || project_ignored.iter().any(|g| g == name) || domain_ignored.iter().any(|g| g == name)
-                };
-                copy_tree_excluding(&domain_dir, &source_dir.join(&domain), &domain_skip)?;
-            }
-        }
         let artifacts_dir = payload_dir.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir).map_err(|e| e.to_string())?;
         for (package, binary) in &artifacts {
@@ -3806,6 +3736,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         }
         std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
+        std::fs::write(payload_dir.join("ecompose.yml"), &deployment.content).map_err(|e| e.to_string())?;
         let tar_path = payload_dir.join("payload.tar.gz");
         run_command(
             "tar",
@@ -3814,26 +3745,22 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 tar_path.display().to_string(),
                 "-C".to_string(),
                 payload_dir.display().to_string(),
-                "source".to_string(),
                 "artifacts".to_string(),
                 "rust-hashes".to_string(),
                 "frontend-hashes".to_string(),
+                "ecompose.yml".to_string(),
             ],
             &util::current_dir(),
         )?;
-        // Payload size cap — the pricing hook. The shipped source must be the
-        // git-tracked estate source + build artifacts only; large non-runtime
-        // content (docs, data, uploads) that isn't gitignored blows past this
-        // and is rejected rather than silently shipped to the CT.
+        // Payload size cap — the pricing hook. The shipped payload is the
+        // built artifacts + the manifest only (no source).
         const MAX_PAYLOAD_MB: u64 = 300;
         let tar_meta = std::fs::metadata(&tar_path).map_err(|e| format!("read payload size: {e}"))?;
         let mb = tar_meta.len() / (1024 * 1024);
         if tar_meta.len() > MAX_PAYLOAD_MB * 1024 * 1024 {
             return Err(format!(
                 "remote deploy payload is {mb} MB — over the {MAX_PAYLOAD_MB} MB cap. \
-The shipped source includes large files that don't belong in a deploy; add them to \
-.gitignore (gitignored files are never shipped) or move them out of the estate. \
-Larger payloads are a paid-plan limit."
+The shipped artifacts exceed the limit; reduce what is being built/shipped."
             ));
         }
         let bytes = std::fs::read(&tar_path).map_err(|e| format!("read payload: {e}"))?;
@@ -4190,9 +4117,11 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
             &["xzf".to_string(), tar_path.display().to_string(), "-C".to_string(), tmp.display().to_string()],
             &util::current_dir(),
         )?;
-        let source_dir = tmp.join("source");
-        if !source_dir.is_dir() {
-            return Err("payload is missing source/ — build the tarball with `eco up --remote`".to_string());
+        // Executable-only payload: the manifest travels (for configure.sh to
+        // derive service topology), never source code.
+        let manifest_path = tmp.join("ecompose.yml");
+        if !manifest_path.is_file() {
+            return Err("payload is missing ecompose.yml — build the tarball with `eco up --remote`".to_string());
         }
         let artifacts_dir = tmp.join("artifacts");
         let hashes_file = tmp.join("rust-hashes");
@@ -4200,7 +4129,8 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
         let host_project = Path::new("/opt/projects").join(project);
         let _ = std::fs::remove_dir_all(&host_project);
         std::fs::create_dir_all(&host_project).map_err(|e| format!("stage /opt/projects: {e}"))?;
-        copy_tree_excluding(&source_dir, &host_project, &(skip_none as fn(&str) -> bool))?;
+        std::fs::copy(&manifest_path, host_project.join("ecompose.yml"))
+            .map_err(|e| format!("stage manifest: {e}"))?;
         let cwd = util::current_dir();
         let project_path = host_project.display().to_string();
         let deployment = load_project_deployment(&project_path, &cwd)?;
