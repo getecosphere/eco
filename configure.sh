@@ -346,6 +346,37 @@ parse_manifest_services() {
   ' "$manifest_path"
 }
 
+# Prints `service_name|domain` for every `lxs: <domain>@<version>` service in
+# ecompose.yml. eco installs each of these into <project>/<service_name>/ with
+# a generated .env, but configure.sh's source scan never discovers them, so
+# gateway routing / port lookups must consult this list to reach them.
+parse_manifest_lxs_services() {
+  local manifest_path="$1"
+  [[ -z "$manifest_path" || ! -f "$manifest_path" ]] && return 1
+
+  awk '
+    BEGIN { in_services = 0; current = "" }
+    /^[[:space:]]*#/ { next }
+    /^services:[[:space:]]*$/ { in_services = 1; next }
+    in_services && /^[^[:space:]].*:[[:space:]]*$/ { exit }
+    in_services && /^  [A-Za-z0-9._-]+:[[:space:]]*$/ {
+      current = $1
+      sub(/:$/, "", current)
+      next
+    }
+    in_services && current != "" && /^    lxs:[[:space:]]*/ {
+      lxs = $0
+      sub(/^    lxs:[[:space:]]*/, "", lxs)
+      sub(/[[:space:]]+#.*$/, "", lxs)
+      gsub(/^["'"'"']|["'"'"']$/, "", lxs)
+      domain = lxs
+      sub(/@.*$/, "", domain)
+      print current "|" domain
+      current = ""
+    }
+  ' "$manifest_path"
+}
+
 # A MongoDB runtime in ecompose.yml means Eco owns a local, estate-scoped
 # database for that service. This is intentionally independent of a domain's
 # .env.example: older domains may not declare MONGODB_URI at all, but their
@@ -784,6 +815,40 @@ lookup_service_port() {
       return 0
     fi
   done
+  # Fall back to an installed LXS service: eco installs each `lxs:` service
+  # into <project>/<service-name>/ with a generated .env carrying its PORT
+  # (source-discovered services are scanned into svc_name; LXS services are
+  # not, so the gateway/configure steps must read the port from their .env).
+  local lxs_env=""
+  if [[ -n "$PM2_DIR" ]]; then
+    lxs_env="$PM2_DIR/$target_name/.env"
+  elif [[ -n "$PROJECT_DIR" ]]; then
+    lxs_env="$PROJECT_DIR/$target_name/.env"
+  fi
+  if [[ -n "$lxs_env" && -f "$lxs_env" ]]; then
+    local port
+    port="$(get_env "$lxs_env" "PORT")"
+    if [[ -z "$port" ]]; then
+      port="$(get_env "$lxs_env" "SERVER_PORT")"
+    fi
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$port"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Given a domain name (e.g. `registry`), prints the manifest LXS service that
+# provides it (e.g. `lxs-registry`), or nothing. Used by the gateway to route
+# a domain's configured paths to its installed LXS backend.
+lxs_service_name_for_domain() {
+  local want_domain="$1" lxs_manifest="" svc domain
+  lxs_manifest="$(resolve_manifest_path || true)"
+  [[ -n "$lxs_manifest" && -f "$lxs_manifest" ]] || return 1
+  while IFS='|' read -r svc domain; do
+    [[ -n "$svc" && "$domain" == "$want_domain" ]] && { printf '%s' "$svc"; return 0; }
+  done < <(parse_manifest_lxs_services "$lxs_manifest")
   return 1
 }
 
@@ -881,11 +946,22 @@ generate_gateway_config() {
   # single monolith backend) falls through entirely to the generic
   # api_service block, unchanged from before.
   local -a domain_blocks=() routed_backend_names=()
+  declare -A emitted_prefixes=()
   local i prefix backend_name backend_port paths
   for i in "${!domain_gateway_prefix[@]}"; do
     prefix="${domain_gateway_prefix[$i]}"
     backend_name="${prefix}-backend"
     backend_port="$(lookup_service_port "$backend_name" || true)"
+    if [[ -z "$backend_port" ]]; then
+      # The domain may be composed as an installed LXS whose service name is
+      # not `<domain>-backend` (e.g. `lxs-registry` for the registry domain).
+      # Resolve its port through the LXS service lookup before skipping.
+      local lxs_svc_for_domain=""
+      lxs_svc_for_domain="$(lxs_service_name_for_domain "$prefix" || true)"
+      if [[ -n "$lxs_svc_for_domain" ]]; then
+        backend_port="$(lookup_service_port "$lxs_svc_for_domain" || true)"
+      fi
+    fi
     [[ -z "$backend_port" ]] && continue
     paths="${domain_gateway_paths[$i]}"
     # Caddyfile's `handle` directive takes exactly one path argument --
@@ -897,14 +973,14 @@ generate_gateway_config() {
     # separated path patterns as OR'd alternatives.
     domain_blocks+=("$(printf '\t@gw_%s path %s\n\thandle @gw_%s {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n' "$prefix" "$paths" "$prefix" "$backend_port")")
     routed_backend_names+=("$backend_name")
+    emitted_prefixes[$prefix]=1
   done
 
   # Every other split domain follows Eco's conventional public route
   # /api/<domain>/*. This prevents browser bundles from needing localhost or
   # one public hostname per backend. The explicit path table above retains
   # priority for legacy domains whose routes are not namespaced this way.
-  local idx service_name already_routed emitted_prefix
-  declare -A emitted_prefixes=()
+  local idx service_name already_routed
   for idx in "${!svc_name[@]}"; do
     service_name="${svc_name[$idx]}"
     [[ "$service_name" == *-backend ]] || continue
@@ -930,6 +1006,27 @@ generate_gateway_config() {
     # that exact path falls through to the frontend.
     domain_blocks+=("$(printf '\t@gw_%s path /api/%s /api/%s/*\n\thandle @gw_%s {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n' "$prefix" "$prefix" "$prefix" "$prefix" "$backend_port")")
   done
+
+  # Installed LXS services are not source-discovered, so they never land in
+  # svc_name and the loop above cannot route them. Emit the conventional
+  # /api/<domain>/ routes for each manifest `lxs:` service using the port from
+  # its installed .env. The static domain_gateway_prefix table above already
+  # emits precise path sets for domains that need them (e.g. registry ->
+  # /api/lxs /api/lxs/*); skip a domain here if that table already routed it.
+  local lxs_manifest=""
+  lxs_manifest="$(resolve_manifest_path || true)"
+  if [[ -n "$lxs_manifest" && -f "$lxs_manifest" ]]; then
+    local lxs_svc lxs_domain lxs_port
+    while IFS='|' read -r lxs_svc lxs_domain; do
+      [[ -z "$lxs_svc" || -z "$lxs_domain" ]] && continue
+      [[ "$lxs_domain" == "$PROJECT_NAME" ]] && continue
+      lxs_port="$(lookup_service_port "$lxs_svc" || true)"
+      [[ -z "$lxs_port" ]] && continue
+      [[ -n "${emitted_prefixes[$lxs_domain]:-}" ]] && continue
+      emitted_prefixes[$lxs_domain]=1
+      domain_blocks+=("$(printf '\t@gw_%s path /api/%s /api/%s/*\n\thandle @gw_%s {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n' "$lxs_domain" "$lxs_domain" "$lxs_domain" "$lxs_domain" "$lxs_port")")
+    done < <(parse_manifest_lxs_services "$lxs_manifest")
+  fi
 
   local api_service api_port
   api_service="$(resolve_gateway_api_service || true)"
