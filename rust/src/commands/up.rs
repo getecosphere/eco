@@ -55,10 +55,6 @@ fn run_capture(command: &str, args: &[String], cwd: &Path) -> Result<util::Captu
     util::run_capture(command, args, cwd)
 }
 
-fn run_capture_env(command: &str, args: &[String], cwd: &Path, env_map: &HashMap<String, String>) -> Result<util::Captured, String> {
-    util::run_capture_env(command, args, cwd, env_map)
-}
-
 fn build_net0(ct: &HashMap<String, String>) -> String {
     let mut parts = vec![
         "name=eth0".to_string(),
@@ -3195,9 +3191,18 @@ fn builder_cmd() -> Vec<String> {
 
 fn builder_exec(script: &str) -> Result<util::Captured, String> {
     if builder_is_host() {
-        let mut env = std::env::vars().collect::<HashMap<_, _>>();
-        env.insert("PATH".to_string(), host_builder_path());
-        return run_capture_env("bash", &["-c".to_string(), script.to_string()], &util::current_dir(), &env);
+        // Inherit the parent shell env (no env_clear) and prepend the dev
+        // toolchain dirs inside the script itself, so nvm's npm (a symlink
+        // with `#!/usr/bin/env node`) resolves node exactly like an interactive
+        // shell would. Passing the augmented PATH via the env map alone proved
+        // fragile on macOS with nvm-managed node.
+        let path = host_builder_path();
+        let wrapped = format!(
+            "export PATH={}; export SQLX_OFFLINE=true; {}",
+            shell_single_quote(&path),
+            script
+        );
+        return run_capture("bash", &["-c".to_string(), wrapped], &util::current_dir());
     }
     let mut args = builder_cmd();
     // Non-login shell: `bash -lc` (login) sources ~/.profile/~.bashrc, which
@@ -3269,10 +3274,12 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
 // Trim dev/build-cache cruft from a shipped frontend artifact so the payload
 // stays small. Next.js dev builds put hundreds of MB under .next/dev (and
 // .next/cache/build) that `next start` never needs — only server/static/
-// BUILD_ID + the manifests are runtime output.
-fn trim_dev_artifact(dir: &Path, _root: &Path) {
+// BUILD_ID + the manifests are runtime output. Paths are resolved relative to
+// `root` (the artifact dir) so .next/dev is found whether .next sits directly
+// under the artifact or under a nested dist/ output dir.
+fn trim_dev_artifact(_dir: &Path, root: &Path) {
     for name in [".next/dev", ".next/cache", ".next/build", "node_modules/.cache", ".vite/cache"] {
-        let p = dir.join(name);
+        let p = root.join(name);
         if p.is_dir() {
             let _ = std::fs::remove_dir_all(&p);
         }
@@ -3715,7 +3722,18 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             // Only shell-valid identifier keys can be exported; keys like
             // `cors.allowed-origins` (dots) are not usable in bash.
             if is_shell_ident(key) {
-                exports.push_str(&format!("export {}={}\n", key, shell_single_quote(value)));
+                if key == "PATH" {
+                    // Prepend instead of replacing: build_env pins a zig/cargo
+                    // PATH for the Rust cross-compile, but the same export must
+                    // not wipe the node/npm dirs a frontend build needs (nvm,
+                    // bun, homebrew). Keep the existing PATH after the prepend.
+                    exports.push_str(&format!(
+                        "export PATH={}:$PATH\n",
+                        shell_single_quote(value)
+                    ));
+                } else {
+                    exports.push_str(&format!("export {}={}\n", key, shell_single_quote(value)));
+                }
             }
         }
         // Hash-skip: if this frontend's source hash matches the last built
