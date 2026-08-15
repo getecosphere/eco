@@ -3291,7 +3291,7 @@ fn trim_dev_artifact(_dir: &Path, root: &Path) {
 
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
-    let subdirs = ["dist", "build", ".next", "output", "app/dist", "app/.next", "app/build"];
+    let subdirs = ["dist", "build", ".next", "output", "app/dist", "app/.next", "app/build", "public", "app/public"];
     let mut included: Vec<String> = Vec::new();
     for sub in subdirs {
         let path = Path::new(build_dir).join(sub);
