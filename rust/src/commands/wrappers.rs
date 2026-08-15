@@ -108,24 +108,56 @@ fn update_asset_for_platform() -> Result<String, String> {
     }
 }
 
-// The latest release tag (e.g. "v0.3.2") for getecosphere/eco, fetched from the
-// GitHub releases API so the self-update can tell "already latest" apart from
-// "a newer version is available". Falls back to None when the API is unreachable
-// or the response can't be parsed — the update then proceeds to download the
-// latest release asset (which is the best we can do without the version info).
+// Extract "v0.3.3" from a GitHub release asset redirect URL, e.g.
+//   https://github.com/getecosphere/eco/releases/download/v0.3.3/eco-...
+fn tag_from_release_url(url: &str) -> Option<String> {
+    let marker = "/releases/download/";
+    let idx = url.find(marker)?;
+    let rest = &url[idx + marker.len()..];
+    let tag = rest.split('/').next().unwrap_or("").to_string();
+    if tag.is_empty() { None } else { Some(tag) }
+}
+
+// The latest release tag (e.g. "v0.3.2") for getecosphere/eco. Primary source is
+// the GitHub releases API; when that is rate-limited or unreachable, falls back
+// to following the `releases/latest/download/<asset>` redirect (a 302 whose
+// Location embeds the actual tag) so the self-update can still tell "already
+// latest" apart from "a newer version is available" without burning API quota.
 fn latest_release_tag() -> Result<Option<String>, String> {
-    let url = "https://api.github.com/repos/getecosphere/eco/releases/latest";
-    let mut req = ureq::get(url).set("User-Agent", "eco-cli");
-    let text = match req.timeout(std::time::Duration::from_secs(20)).call() {
-        Ok(resp) => resp.into_string().map_err(|e| format!("read {url}: {e}"))?,
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = resp.into_string().unwrap_or_default();
-            return Err(format!("check latest release (HTTP {code}): {}", body.chars().take(160).collect::<String>()));
+    let api_url = "https://api.github.com/repos/getecosphere/eco/releases/latest";
+    let api_text = {
+        let mut req = ureq::get(api_url).set("User-Agent", "eco-cli");
+        match req.timeout(std::time::Duration::from_secs(20)).call() {
+            Ok(resp) => resp.into_string().ok(),
+            Err(_) => None,
         }
-        Err(ureq::Error::Transport(t)) => return Err(format!("network error checking latest release: {t}")),
     };
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| "invalid GitHub releases response".to_string())?;
-    Ok(value.get("tag_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    if let Some(text) = api_text {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(tag) = value.get("tag_name").and_then(|v| v.as_str()) {
+                return Ok(Some(tag.to_string()));
+            }
+        }
+    }
+
+    // Fallback: the download redirect for this platform embeds the latest tag.
+    let asset = update_asset_for_platform()?;
+    let redirect_url = format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    match agent.get(&redirect_url).set("User-Agent", "eco-cli").call() {
+        Ok(resp) => {
+            if let Some(location) = resp.header("Location") {
+                return Ok(tag_from_release_url(location));
+            }
+        }
+        Err(ureq::Error::Status(302, resp)) => {
+            if let Some(location) = resp.header("Location") {
+                return Ok(tag_from_release_url(location));
+            }
+        }
+        Err(_) => {}
+    }
+    Ok(None)
 }
 
 // Trivial semver compare of "v0.3.2"-style tags (also accepts the bare
