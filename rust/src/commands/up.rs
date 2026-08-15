@@ -1493,15 +1493,12 @@ fn expose_via_proxy_ct(
             false,
         )?);
     } else {
-        let gateway_service_name = format!("{project}-gateway");
-        let has_gateway_service = ct_config_has_service(app_ctid, app_config_path, &gateway_service_name);
-        if has_gateway_service {
-            service_name = gateway_service_name;
-        }
-        let port = if !has_gateway_service && !expose.target_port().is_empty() && expose.target_port().chars().all(|c| c.is_ascii_digit()) {
+        // Pure-binary release-dir: the gateway port is recorded in
+        // current/.env/gateway.env by configgen. Fall back to expose.target_port.
+        let port = if !expose.target_port().is_empty() && expose.target_port().chars().all(|c| c.is_ascii_digit()) {
             expose.target_port()
         } else {
-            resolve_service_port_from_ct(app_ctid, app_config_path, &service_name)?
+            resolve_release_gateway_port(app_ctid, project)?
         };
         let app_ip = resolve_ct_primary_ip(app_ctid)?;
         let service_url = format!("http://{app_ip}:{port}");
@@ -2709,11 +2706,15 @@ fn deploy_estate(
     // writes paths that point at the CT release dir.
     print_step(&format!("[CT {ctid}] Generating estate config (host-side) for {}", deployment.project));
     let host_release_dir = options.get("release-dir").cloned().unwrap_or_default();
-    deploy_generate_config_host(&ctid, deployment, &host_release_dir, &ct_release_dir)?;
+    let new_units = deploy_generate_config_host(&ctid, deployment, &host_release_dir, &ct_release_dir)?;
     pct_exec(&ctid, &format!("ln -sfn {} {}", shell_single_quote(&ct_release_dir), shell_single_quote(&ct_current)))?;
     print_step(&format!("[CT {ctid}] current -> {}", ct_release_dir));
     // Clean up old releases beyond the keep limit (storage pricing hook).
     trim_old_ct_releases(&ctid, &ct_releases_root, &ct_release_dir)?;
+    // Purge stale systemd units for this estate (e.g. old `*-backend` /
+    // `deploy-webhook` / `gateway` units from the previous source+PM2 era) so
+    // only the new release units keep running.
+    purge_stale_units(&ctid, &deployment.project, &new_units)?;
 
     let mut failures: Vec<(String, String)> = Vec::new();
     for failure in rust_build_failures {
@@ -4216,9 +4217,8 @@ pub fn run_expose(args: &[String]) -> Result<(), String> {
 /// Generate estate config (systemd units, .env, Caddyfile) on the HOST using
 /// the manifest + shipped artifacts + the resource registry, then push the
 /// finished files into the CT's release dir.
-fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, host_release_dir: &str, ct_release_dir: &str) -> Result<(), String> {
+fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, host_release_dir: &str, ct_release_dir: &str) -> Result<Vec<String>, String> {
     use crate::configgen;
-    let expose_hostname = deployment.expose.hostname();
     // Resolve the main estate's services (default: all declared services).
     let estates = ecompose::parse_estates(&deployment.content);
     let main = ecompose::parse_main(&deployment.content);
@@ -4238,19 +4238,29 @@ fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, host_
     };
     // read_dir = host release dir (artifacts + .env.example live there);
     // write_dir = CT release dir (paths ExecStart/EnvironmentFile must point at).
+    // v2 manifest: the estate's public hostname lives under estates.<main>.hostname
+    // (not the legacy top-level expose: block).
+    let expose_hostname = main_estate.map(|e| e.hostname.clone()).unwrap_or_default();
     let (files, units) = configgen::generate_all(&deployment.project, host_release_dir, ct_release_dir, &svc, &expose_hostname)?;
     // Push .env files + Caddyfile into the release dir.
     for (rel, content) in &files {
         let target = format!("{ct_release_dir}/{rel}");
-        pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&format!("{}/{}", ct_release_dir, rel.split('/').next().unwrap_or("")))))?;
+        // Only mkdir the parent when the rel path has a subdirectory
+        // (e.g. `.env/<service>.env`); flat files like `Caddyfile` need none.
+        if let Some(parent) = rel.rsplit_once('/') {
+            let parent_dir = format!("{ct_release_dir}/{}", parent.0);
+            pct_exec(ctid, &format!("mkdir -p {}", shell_single_quote(&parent_dir)))?;
+        }
         push_text_file_to_ct(ctid, &target, content, "config-file")?;
     }
     // Push systemd units to /etc/systemd/system on the CT (ExecStart via current).
+    let mut unit_names = Vec::new();
     for (unit_name, unit_text) in &units {
         let target = format!("/etc/systemd/system/{unit_name}");
         push_text_file_to_ct(ctid, &target, unit_text, "systemd-unit")?;
+        unit_names.push(unit_name.clone());
     }
-    Ok(())
+    Ok(unit_names)
 }
 
 /// Install shipped Rust binaries into the CT release dir artifacts/.
@@ -4405,4 +4415,42 @@ fn install_lxs_services_release(ctid: &str, deployment: &ProjectDeployment, ct_r
         installed.push(service.name.clone());
     }
     Ok(installed)
+}
+
+/// Stop, disable and delete this estate's systemd units that are NOT part of
+/// the current release (stale units from earlier deploys / the PM2 era).
+fn purge_stale_units(ctid: &str, project: &str, keep_units: &[String]) -> Result<(), String> {
+    let existing = pct_exec_capture(ctid, &format!("ls /etc/systemd/system/eco-{project}-*.service 2>/dev/null || true"))?;
+    let keep: std::collections::HashSet<&str> = keep_units.iter().map(|s| s.as_str()).collect();
+    let mut removed = Vec::new();
+    for unit in existing.split_whitespace() {
+        let name = unit.rsplit('/').next().unwrap_or(unit).trim();
+        if name.is_empty() {
+            continue;
+        }
+        if keep.contains(name) {
+            continue;
+        }
+        // Never touch units from other estates (they don't start with eco-<project>-).
+        pct_exec(ctid, &format!("systemctl disable {} 2>/dev/null || true; systemctl stop {} 2>/dev/null || true; rm -f /etc/systemd/system/{}", shell_single_quote(name), shell_single_quote(name), shell_single_quote(name)))?;
+        removed.push(name.to_string());
+    }
+    if !removed.is_empty() {
+        pct_exec(ctid, "systemctl daemon-reload")?;
+        print_step(&format!("[CT {ctid}] Removed stale units: {}", removed.join(", ")));
+    }
+    Ok(())
+}
+
+/// Read the estate gateway port from the CT release dir (written by configgen
+/// to current/.env/gateway.env). Returns the port string.
+fn resolve_release_gateway_port(ctid: &str, project: &str) -> Result<String, String> {
+    let env_path = format!("/opt/eco/{project}/current/.env/gateway.env");
+    let out = pct_exec_capture(ctid, &format!("cat {} 2>/dev/null || true", shell_single_quote(&env_path)))?;
+    let port = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("PORT=").map(|v| v.trim().to_string()))
+        .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        .ok_or_else(|| format!("Cannot resolve gateway port from {} on CT {ctid}", env_path))?;
+    Ok(port)
 }

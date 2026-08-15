@@ -304,7 +304,7 @@ pub fn generate_all(
     for name in env_files.keys() {
         env_paths.insert(name.clone(), format!("{write_dir}/.env/{name}.env"));
     }
-    let units = build_systemd_units(project, &deploys, &env_paths);
+    let mut units = build_systemd_units(project, &deploys, &env_paths);
     // .env files: relative path -> content
     let mut files: Vec<(String, String)> = Vec::new();
     for (name, env) in &env_files {
@@ -318,6 +318,14 @@ pub fn generate_all(
         let api_port = ports.iter().find(|(k, _)| k.as_str() == "backend").map(|(k, v)| (k.clone(), *v));
         let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port);
         files.push(("Caddyfile".to_string(), caddy));
+        // Record the gateway port so host-side exposure can find it.
+        files.push((".env/gateway.env".to_string(), format!("PORT={gateway_port}\n")));
+        // systemd unit for the estate gateway (Caddy serving the Caddyfile).
+        let caddyfile_path = format!("{write_dir}/Caddyfile");
+        let unit = format!(
+            "[Unit]\nDescription={project} gateway\nAfter=network.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nWorkingDirectory={write_dir}\nExecStart=/usr/bin/caddy run --config {caddyfile_path} --adapter caddyfile\nRestart=always\nRestartSec=2\nKillSignal=SIGTERM\n\n[Install]\nWantedBy=multi-user.target\n"
+        );
+        units.push((format!("eco-{project}-gateway.service"), unit));
     }
     Ok((files, units))
 }
