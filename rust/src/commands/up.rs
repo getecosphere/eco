@@ -5060,6 +5060,35 @@ pub fn agent_list_estates() -> Vec<serde_json::Value> {
                 if let Some(id) = ct.get("id") {
                     entry.insert("ctid".to_string(), serde_json::Value::String(id.clone()));
                 }
+                let expose = ecompose::parse_expose(&content);
+                let main = expose.hostname();
+                let mut hostnames: Vec<serde_json::Value> = Vec::new();
+                if !main.is_empty() {
+                    hostnames.push(serde_json::Value::String(main.clone()));
+                }
+                for extra in &expose.additional {
+                    if let Some(h) = extra.get("hostname") {
+                        if !h.is_empty() && !hostnames.iter().any(|v| v.as_str() == Some(h.as_str())) {
+                            hostnames.push(serde_json::Value::String(h.clone()));
+                        }
+                    }
+                }
+                if !hostnames.is_empty() {
+                    entry.insert("hostname".to_string(), serde_json::Value::String(main.clone()));
+                    entry.insert("hostnames".to_string(), serde_json::Value::Array(hostnames));
+                }
+                let staging = ecompose::parse_staging(&content);
+                if let Some(h) = staging.get("hostname") {
+                    if !h.is_empty() {
+                        entry.insert("staging_hostname".to_string(), serde_json::Value::String(h.clone()));
+                    }
+                }
+                let serve = ecompose::parse_indented_block(&content, "serve:");
+                if let Some(sub) = serve.get("subdomain") {
+                    if !sub.is_empty() {
+                        entry.insert("serve_hostname".to_string(), serde_json::Value::String(format!("{sub}.getecosphere.com")));
+                    }
+                }
             }
             estates.push(serde_json::Value::Object(entry));
         }

@@ -470,7 +470,7 @@ pub fn parse_staging(content: &str) -> HashMap<String, String> {
 }
 
 /// Parse a top-level indented key/value block into a map (e.g. `ct:`).
-fn parse_indented_block(content: &str, block_header: &str) -> HashMap<String, String> {
+pub fn parse_indented_block(content: &str, block_header: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let mut in_block = false;
 
