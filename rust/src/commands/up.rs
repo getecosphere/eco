@@ -3492,7 +3492,7 @@ fn collect_frontend_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), Stri
     Ok(())
 }
 
-fn compute_frontend_input_hash(service_dir: &Path) -> Result<String, String> {
+fn compute_frontend_input_hash(service_dir: &Path, build_env: &[(String, String)]) -> Result<String, String> {
     let mut inputs: Vec<String> = Vec::new();
     collect_frontend_inputs(service_dir, &mut inputs)?;
     for manifest in ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"] {
@@ -3507,6 +3507,15 @@ fn compute_frontend_input_hash(service_dir: &Path) -> Result<String, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
         let digest = sha2::Sha256::digest(&bytes);
         combined.push_str(&format!("{}  {path}\n", crate::registry::hex_encode(&digest)));
+    }
+    // Build-time public env vars (NEXT_PUBLIC_*/VITE_*/PUBLIC_*) are baked
+    // into the output, so a change to them must invalidate the cached build —
+    // otherwise the hash-skip reuses a stale artifact (e.g. an old localhost
+    // API URL) even though the CT .env now resolves the real public address.
+    for (key, value) in build_env {
+        if key.starts_with("NEXT_PUBLIC_") || key.starts_with("VITE_") || key.starts_with("PUBLIC_") {
+            combined.push_str(&format!("{key}={value}\n"));
+        }
     }
     Ok(if combined.is_empty() {
         String::new()
@@ -3923,7 +3932,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 service.name
             ));
         }
-        let hash = compute_frontend_input_hash(dir)?;
+        let hash = compute_frontend_input_hash(dir, &build_env)?;
         frontend_hash_lines.push(format!("{rel} {hash}"));
         let build_dir = format!("{}/{}", builder_build_root(), service.name);
         let build_loc = if builder_is_host() { "on this machine (host builder)".to_string() } else { format!("on local builder ({})", builder_name()) };
