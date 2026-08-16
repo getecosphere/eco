@@ -18,10 +18,10 @@ source code ──► binary ──► LXS ──► the world
 
 - Code is built **on the developer's machine** and shipped as **static binaries**.
 - The server is a **pure executable runner** — it never compiles, never pulls a
-  repo, never runs `npm install`. No Docker, no build cache, no `node_modules`
-  on the CT.
-- An **LXS** is one compiled binary (Rust or Go), one bounded domain, a declared
-  contract (env / db / network / resources), and zero runtime dependency.
+  repo, never runs `npm install`. No Docker, no build cache, no `node_modules`.
+- An **LXS** is polyglot: any codebase that can ship as a standalone binary —
+  Rust, Go, Node via Bun-compile, etc. Each LXS owns one bounded domain, a
+  declared contract (env / db / network / resources), and zero runtime dependency.
 - The **LXS registry** is the distribution layer: identity, versions, artifacts,
   manifests, checksums, contracts, and retrieval.
 
@@ -68,7 +68,7 @@ services:
 eco init                       # detect framework → write ecompose.yml + .eco/state.json
 eco lxs add auth@1.0.0         # compose an LXS binary from the registry
 eco up dev                     # run locally (native-arch binaries, PM2)
-eco up --remote                # build locally → ship executables → systemd on the CT
+eco up --remote                # build locally → ship executables → run on the server
 eco serve <subdomain>          # expose a local app: https://<sub>.getecosphere.com
 ```
 
@@ -80,21 +80,22 @@ eco serve <subdomain>          # expose a local app: https://<sub>.getecosphere.
   `eco lxs remove <name>`.
 - `.eco/state.json` (gitignored) binds a folder to its estate + registry
   (default `getecosphere/lxs-registry`).
-- `ECO_GITHUB_API_KEY` is only needed for LXS publish / remote repo automation.
+- `ECO_GITHUB_API_KEY` is used only by maintainers/enterprise publish flows that
+  push directly into a registry repo (below). As a contributor you never need it.
 - Useful ops: `eco show`, `eco ports list`, `eco db clear <service>`,
-  `eco ct status`, `eco stress`, `eco sync`.
+  `eco stress`, `eco sync`.
 
 ## Building & publishing an LXS (author side)
 
-An LXS is a Rust (axum) crate with a declared contract plus a docs bundle.
+An LXS is **polyglot** — any service you can ship as a standalone binary (Rust,
+Go, Node via Bun-compile, …) plus a declared contract and a docs bundle.
 Consumers get only the **binary + docs** — never the source.
 
 ```bash
 eco lxs new <name>              # scaffold: lxs.yml, src/, docs/, CI workflow
 # edit lxs.yml to declare the contract (below)
-eco lxs build                   # cross-compile (cargo-zigbuild) → writes artifacts.json
+eco lxs build                   # cross-compile → writes artifacts.json
 eco lxs publish <name>[@<v>]    # auto-bump patch; --minor / --major for features/breaking
-git push origin main --tags     # push the registry (or let the tag-triggered CI do it)
 ```
 
 - `eco lxs build` defaults to `linux/amd64` (musl static,
@@ -109,6 +110,22 @@ git push origin main --tags     # push the registry (or let the tag-triggered CI
 - Consumers fetch with `eco lxs add <name>[@<version>]`; a custom/private
   registry via `eco lxs add <name> --address <registry-repo>`.
 - `eco lxs init-registry [folder]` creates a new registry repo.
+
+### How an LXS reaches consumers
+
+An LXS is **not always public** — three paths:
+
+1. **Public registry** — the maintainers push directly into the official
+   `getecosphere/lxs-registry` (this needs `ECO_GITHUB_API_KEY`). Outside
+   contributors do **not** push: fork the official registry repo, publish to
+   your fork, then open a merge request (PR) — the eco team reviews and decides
+   whether to merge it into the public registry.
+2. **Private LXS** — publish to your own private registry
+   (`eco lxs init-registry` → `eco lxs publish` → `eco lxs add <name> --address <your-repo>`).
+   Publishing private LXS is an **enterprise-only** feature.
+3. **No registry at all** — a source LXS never leaves your machine: register the
+   folder with `eco lxs add .`, or simply declare it as a `path:` source service
+   in ecompose.yml. Nothing is published; it ships as part of your estate.
 
 ## LXS manifest contract
 
@@ -150,13 +167,14 @@ Registry repo layout:
 ## Rules for agents
 
 - **Never** put a build/compile/`npm install` step on the server. Build locally, ship binaries.
-- **Never** reach for Docker. Eco runs services as native processes inside a
-  Proxmox CT — application-level isolation, per-service container overhead is
-  the anti-pattern here.
+- **Never** reach for Docker. Eco runs services as native processes on the
+  ecosphere server — application-level isolation, per-service container overhead
+  is the anti-pattern here. (The underlying host technology is internal — you
+  don't need to know or touch it.)
 - Keep LXS **single-domain**: one bounded capability per binary; never let one
   LXS own another domain's responsibilities.
 - Prefer **musl static binaries** (`x86_64-unknown-linux-musl`); a glibc build
-  is not self-contained for the CT.
+  is not self-contained for the server.
 - When you change a capability, bump the LXS version (`--minor` features,
   `--major` breaking) and record it in `docs/changelog.md`.
 - The gateway (Caddyfile) is **auto-generated** by `eco up --remote`
