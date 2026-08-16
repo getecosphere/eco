@@ -393,6 +393,9 @@ pub fn build_caddyfile(
     let mut caddy = format!(
         "{{\n\tadmin off\n}}\n\n:{gateway_port} {{\n"
     );
+    // Allow larger upload bodies (avatar/cover photos can exceed the default
+    // 1 MiB Caddy cap). 32 MiB comfortably covers multi-megapixel images.
+    caddy.push_str("\trequest_body {\n\t\tmax_size 32MB\n\t}\n");
     caddy.push_str("\t@plain_http header X-Forwarded-Proto http\n");
     caddy.push_str("\tredir @plain_http https://{host}{uri} 302\n");
     if let Some(ap) = auth_port {
@@ -613,6 +616,8 @@ pub fn generate_all_auth(
             lines.push(format!("S3_BUCKET={s3_bucket}"));
             lines.push(format!("S3_ACCESS_KEY={s3_key}"));
             lines.push(format!("S3_SECRET_KEY={s3_secret}"));
+            // Allow bigger avatar/cover photos (default image cap is 10 MB).
+            lines.push("MAX_IMAGE_MB=25".to_string());
             env_files.insert(storage_name.clone(), lines.join("\n"));
         }
     }

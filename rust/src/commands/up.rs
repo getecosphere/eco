@@ -4305,10 +4305,17 @@ pub fn agent_handle_deploy(project: &str, tar_gz: &[u8], staging: bool) -> Resul
         if frontend_hashes_file.is_file() {
             let _ = std::fs::copy(&frontend_hashes_file, host_release_dir.join("frontend-hashes"));
         }
-        // Point `current` at the new release (host-side, for the agent).
+        // Point `current` at the new release (host-side, for the agent). The
+        // agent only ever runs on the Linux host, but the crate also builds
+        // for Windows/macOS (release matrix) — keep the symlink unix-only.
         let host_current = format!("/opt/eco/deploys/{project}/current");
         let _ = std::fs::remove_file(&host_current);
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&host_release_dir, &host_current).map_err(|e| format!("link host current: {e}"))?;
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::copy(&host_release_dir, &host_current).map_err(|e| format!("copy host current: {e}"))?;
+        }
         // Load the deployment from the staged manifest (no source tree).
         let cwd = util::current_dir();
         let host_manifest = host_release_dir.join("ecompose.yml");
