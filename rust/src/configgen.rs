@@ -79,7 +79,18 @@ pub fn resolve_service_exec(
             service.name.clone()
         };
         let bin_path = format!("{artifacts}/{}/bin/{bin}", service.name);
-        return Ok((bin_path, release_dir.to_string(), true));
+        // A source Rust frontend that ships static assets (static/, images/,
+        // public/) serves them relative to its working dir. Point the unit's
+        // WorkingDirectory at artifacts/<service> so ServeDir::new("static")
+        // (and the like) resolves on the CT.
+        let workdir = if Path::new(&read_artifacts).join(&service.name).join("static").is_dir()
+            || Path::new(&read_artifacts).join(&service.name).join("public").is_dir()
+        {
+            format!("{artifacts}/{}", service.name)
+        } else {
+            release_dir.to_string()
+        };
+        return Ok((bin_path, workdir, true));
     }
     // Source Go service: prebuilt static binary shipped as
     // artifacts/<service>/bin/<name> (built on the dev machine for linux/amd64).

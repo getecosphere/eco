@@ -4025,6 +4025,17 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             if migrations.is_dir() {
                 copy_tree_excluding(&migrations, &service_artifact.join("migrations"), &(skip_none as fn(&str) -> bool))?;
             }
+            // Ship static web assets (static/, images/, public/) so a source
+            // frontend binary that serves them (Leptos ServeDir, etc.) finds
+            // them at artifacts/<service>/<dir> on the CT.
+            for asset_dir in ["static", "images", "public", "assets"] {
+                let src = dir.join(asset_dir);
+                if src.is_dir() {
+                    let dst = service_artifact.join(asset_dir);
+                    std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+                    copy_tree_excluding(&src, &dst, &(skip_none as fn(&str) -> bool))?;
+                }
+            }
         }
         std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
