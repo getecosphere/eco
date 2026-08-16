@@ -1618,24 +1618,31 @@ fn assert_local_pm2_apps_present(config_path: &Path, cwd: &Path) -> Result<(), S
     if expected.is_empty() {
         return Ok(());
     }
-    let result = run_capture("pm2", &["jlist".to_string()], cwd)?;
-    if result.code != 0 {
-        return Err(format!("Unable to verify PM2 services after startup: {}", result.stderr.trim()));
+    // pm2 start returns before the spawned apps are visible in `jlist`; retry
+    // briefly so a freshly-started estate doesn't false-negative.
+    let mut last_actual: Vec<String> = Vec::new();
+    for _ in 0..20 {
+        let result = run_capture("pm2", &["jlist".to_string()], cwd)?;
+        if result.code != 0 {
+            return Err(format!("Unable to verify PM2 services after startup: {}", result.stderr.trim()));
+        }
+        let processes: serde_json::Value = serde_json::from_str(&result.stdout)
+            .map_err(|_| "Unable to parse PM2 service list after startup.".to_string())?;
+        last_actual = processes
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let missing: Vec<&String> = expected.iter().filter(|name| !last_actual.contains(name)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    let processes: serde_json::Value = serde_json::from_str(&result.stdout)
-        .map_err(|_| "Unable to parse PM2 service list after startup.".to_string())?;
-    let actual: Vec<String> = processes
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect())
-        .unwrap_or_default();
-    let missing: Vec<&String> = expected.iter().filter(|name| !actual.contains(name)).collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "PM2 did not register declared service(s): {}. Check the generated ecosystem config and service logs.",
-            missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
-        ));
-    }
-    Ok(())
+    let missing: Vec<&String> = expected.iter().filter(|name| !last_actual.contains(name)).collect();
+    Err(format!(
+        "PM2 did not register declared service(s): {}. Check the generated ecosystem config and service logs.",
+        missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
+    ))
 }
 
 fn extract_pm2_app_names(config_text: &str) -> Vec<String> {
@@ -1645,6 +1652,8 @@ fn extract_pm2_app_names(config_text: &str) -> Vec<String> {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("name:") {
             let val = rest.trim();
+            // strip trailing `,` (and any inline comment) after the quoted value
+            let val = val.split(',').next().unwrap_or("").trim();
             let val = val.trim_matches('"').trim_matches('\'');
             if !val.is_empty() && !val.contains("module") && !val.contains('}') {
                 names.push(val.to_string());
@@ -1659,11 +1668,19 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
-    let estate_root = deployment
-        .project_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| deployment.project_dir.clone());
+    // The eco-init model: a `.eco/state.json` marker makes the project dir the
+    // ONLY scanned root (no sibling-domain discovery, no parent estate). Legacy
+    // estates without the marker keep the parent-as-estate-root layout.
+    let is_init_project = deployment.project_dir.join(".eco").join("state.json").is_file();
+    let estate_root = if is_init_project {
+        deployment.project_dir.clone()
+    } else {
+        deployment
+            .project_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| deployment.project_dir.clone())
+    };
     let domains = ecompose::unique_domains_from_ecompose(&deployment.content, &deployment.project);
     let domain_branch_overrides = domain_branch_overrides_from_ecompose(&deployment.content);
     let domain_dev_flags = domain_dev_flags_from_ecompose(&deployment.content);
@@ -1796,6 +1813,11 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     embedded::run_bundled_script("provision.sh", &[deployment.project_dir.display().to_string()], "estate", &extra_env)?;
     bootstrap_local_postgres(&dev_services, &estate_root, &deployment.project)?;
     run_local_rust_migrations(&dev_services, &estate_root)?;
+
+    // Install `lxs:` services as local binaries so configure.sh/PM2 can run
+    // them in dev, mirroring the CT release path (native arch binary).
+    print_step(&format!("Installing local LXS binaries for {}", deployment.project));
+    install_lxs_services_local(&deployment, &estate_root)?;
 
     print_step(&format!("Generating local ecosystem config for {}", deployment.project));
     let mut configure_env: Vec<(String, String)> = vec![
@@ -1980,7 +2002,7 @@ fn ensure_local_domain_repos(
     content: &str,
 ) -> Result<(), String> {
     for domain in domains {
-        if domain == project {
+        if domain == project || domain == "." {
             continue;
         }
         let target_path = estate_root.join(domain);
@@ -4528,9 +4550,108 @@ fn install_remote_frontend_artifacts_release(
     Ok(bun_compiled)
 }
 
-/// Install `lxs:` services into the CT release dir artifacts/<name>.
-fn install_lxs_services_release(ctid: &str, deployment: &ProjectDeployment, ct_release_dir: &str) -> Result<Vec<String>, String> {
+/// Install `lxs:` services into the local dev workspace, mirroring the CT
+/// release path: fetch the native binary for this platform, install it under
+/// <project>/<service-name>/bin/<name> plus a start.sh + .env.example from the
+/// contract, so configure.sh's static-service discovery (start.sh) picks it up
+/// and PM2 runs it exactly like a source service.
+fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path) -> Result<Vec<String>, String> {
     let lxs_services: Vec<&ecompose::Service> = deployment.services.iter().filter(|s| !s.lxs.is_empty()).collect();
+    if lxs_services.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir).map(|s| s.registry).filter(|r| !r.is_empty());
+    // Native arch for the dev machine (darwin/aarch64 on Apple Silicon,
+    // linux/amd64 on x86_64 Linux, linux/arm64 on aarch64 Linux).
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let local_arch = match (os, arch) {
+        ("macos", "aarch64") => "darwin/aarch64".to_string(),
+        ("macos", "x86_64") => "darwin/x86_64".to_string(),
+        ("linux", "x86_64") => "linux/amd64".to_string(),
+        ("linux", "aarch64") => "linux/arm64".to_string(),
+        other => return Err(format!(
+            "eco up dev: no LXS artifact for local platform {other:?} — use eco up --remote or run on linux/darwin"
+        )),
+    };
+    let mut installed = Vec::new();
+    for service in lxs_services {
+        let (manifest, version, local_bin) = crate::commands::lxs::fetch_lxs_to_cache(&service.lxs, &local_arch, state_registry.as_deref())?;
+        let name = manifest.name.clone();
+        if name.is_empty() {
+            return Err(format!("LXS {} has no name in its manifest", service.lxs));
+        }
+        let service_dir = estate_root.join(&service.name);
+        let bin_dir = service_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).map_err(|e| format!("create {}: {e}", bin_dir.display()))?;
+        // The manifest's artifact may carry the short name (e.g. `auth`); we
+        // install it under the artifact name so configgen/configure resolve it.
+        let installed_name = service
+            .lxs
+            .split('@')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| name.clone());
+        let dest_bin = bin_dir.join(&installed_name);
+        std::fs::copy(&local_bin, &dest_bin).map_err(|e| format!("copy {} -> {}: {e}", local_bin.display(), dest_bin.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest_bin, std::fs::Permissions::from_mode(0o755));
+        }
+        // start.sh runs the binary; configure.sh discovers `<dir>/start.sh`
+        // as a `static` service and PM2 runs `bash start.sh`. The wrapper
+        // sources the generated .env (filled by configure.sh) and resolves an
+        // empty MONGODB_URI/REDIS_URL/DATABASE_URL to the estate-local
+        // managed DB so the binary never sees a blank connection string.
+        let db_name = service.name.replace('-', "_");
+        let start_sh = format!(
+            "#!/bin/bash\nset -euo pipefail\ncd \"$(dirname \"$0\")\"\nif [[ -f .env ]]; then set -a; source .env; set +a; fi\n: \"${{SERVER_PORT:?SERVER_PORT not set}}\"\n[[ -n \"${{MONGODB_URI:-}}\" ]] || export MONGODB_URI=\"mongodb://localhost:27017/{db_name}_{project}\"\n[[ -n \"${{REDIS_URL:-}}\" ]] || export REDIS_URL=\"redis://127.0.0.1:6379\"\n[[ -n \"${{DATABASE_URL:-}}\" ]] || export DATABASE_URL=\"\"\nexec ./bin/{installed_name}\n",
+            db_name = db_name,
+            project = deployment.project,
+            installed_name = installed_name,
+        );
+        std::fs::write(service_dir.join("start.sh"), start_sh).map_err(|e| format!("write start.sh: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&service_dir.join("start.sh"), std::fs::Permissions::from_mode(0o755));
+        }
+        // .env.example from the contract so configgen can fill secrets.
+        let mut env_example = String::new();
+        for key in manifest.contract.env.required.iter().chain(manifest.contract.env.optional.iter()) {
+            let value = manifest.contract.env.defaults.get(key).cloned().unwrap_or_default();
+            env_example.push_str(&format!("{key}={value}\n"));
+        }
+        // The LXS contract's db requirement owns a managed estate-local DB
+        // URI; leave the key blank so configure.sh fills it (same convention
+        // as a declared `mongodb@`/`postgresql@15`/`redis@7` runtime).
+        match manifest.contract.db.as_str() {
+            "mongodb@7" | "mongo" | "mongodb" => {
+                if !env_example.contains("MONGODB_URI=") {
+                    env_example.push_str("MONGODB_URI=\n");
+                }
+            }
+            "postgresql@15" | "postgres" | "postgresql" => {
+                if !env_example.contains("DATABASE_URL=") {
+                    env_example.push_str("DATABASE_URL=\n");
+                }
+            }
+            "redis@7" | "redis" => {
+                if !env_example.contains("REDIS_URL=") {
+                    env_example.push_str("REDIS_URL=\n");
+                }
+            }
+            _ => {}
+        }
+        std::fs::write(service_dir.join(".env.example"), env_example).map_err(|e| format!("write .env.example: {e}"))?;
+        print_step(&format!("Installed local LXS {}@{} as {}", name, version, service.name));
+        installed.push(service.name.clone());
+    }
+    Ok(installed)
+}
+
+/// Install `lxs:` services into the CT release dir artifacts/<name>.
+fn install_lxs_services_release(ctid: &str, deployment: &ProjectDeployment, ct_release_dir: &str) -> Result<Vec<String>, String> {    let lxs_services: Vec<&ecompose::Service> = deployment.services.iter().filter(|s| !s.lxs.is_empty()).collect();
     if lxs_services.is_empty() {
         return Ok(Vec::new());
     }

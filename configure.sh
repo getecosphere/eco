@@ -2156,6 +2156,33 @@ discover_services() {
         fi
       fi
     done < <(parse_manifest_services "$manifest_path")
+
+    # LXS services (`lxs:` in ecompose.yml) have no `path:`, so they are never
+    # source-discovered. `eco up dev` installs each as a local binary under
+    # <project>/<service_name>/ with a start.sh (see up.rs
+    # install_lxs_services_local); register them here so port allocation, env
+    # fills, gateway routing, and PM2 all treat them like any other service.
+    local -a lxs_scan_names=()
+    while IFS='|' read -r lxs_svc lxs_domain; do
+      [[ -z "$lxs_svc" || -z "$lxs_domain" ]] && continue
+      local lxs_install_dir="$manifest_root/$lxs_svc"
+      if [[ -d "$lxs_install_dir" && -f "$lxs_install_dir/start.sh" ]]; then
+        local already_known=false
+        for i in "${!svc_name[@]}"; do
+          if [[ "${svc_name[$i]}" == "$lxs_svc" ]]; then
+            already_known=true
+            break
+          fi
+        done
+        $already_known && continue
+        svc_name+=("$lxs_svc"); svc_type+=("static"); svc_dir+=("$lxs_install_dir")
+        svc_port_var+=("SERVER_PORT"); svc_env+=("$lxs_install_dir/.env"); svc_cmd+=("bash start.sh")
+        lxs_scan_names+=("$lxs_svc")
+      fi
+    done < <(parse_manifest_lxs_services "$manifest_path")
+    for lxs_svc in "${lxs_scan_names[@]}"; do
+      declared_sibling_names+=("$lxs_svc")
+    done
   fi
 
   # An estate commonly keeps reusable domains as immediate siblings. A

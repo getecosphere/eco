@@ -756,7 +756,9 @@ pub fn unique_domains_from_ecompose(content: &str, project: &str) -> Vec<String>
                 if let Some(path_val) = match_indented_value(line, 4, "path") {
                     let value = util::strip_quotes(path_val.trim());
                     let first_segment = value.split('/').next().unwrap_or("").to_string();
-                    if !first_segment.is_empty() && !domains.contains(&first_segment) {
+                    // "." means the project root itself is the service — not a
+                    // separate domain to clone.
+                    if !first_segment.is_empty() && first_segment != "." && !domains.contains(&first_segment) {
                         domains.push(first_segment);
                     }
                 }
