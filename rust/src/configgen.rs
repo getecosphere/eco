@@ -575,7 +575,7 @@ pub fn generate_all_auth(
                 lines.push(format!("STORAGE_BASE_URL=http://127.0.0.1:{sp}/api"));
                 // Browser-reachable content URL for avatar/cover images.
                 if !expose_hostname.is_empty() {
-                    lines.push(format!("STORAGE_PUBLIC_URL=https://{}", expose_hostname));
+                    lines.push(format!("STORAGE_PUBLIC_URL=https://{}/api/storage", expose_hostname));
                 }
             }
             env_files.insert(profile_name.clone(), lines.join("\n"));

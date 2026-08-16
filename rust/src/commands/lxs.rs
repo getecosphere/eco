@@ -1134,6 +1134,25 @@ fn github_api_contents_url(owner: &str, repo: &str, path: &str) -> String {
     format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}")
 }
 
+/// Fetch a file's text from GitHub via the contents API (base64), which is
+/// not cached by the raw.githubusercontent CDN the way raw URLs are — a raw
+/// URL can serve a stale version of a just-pushed manifest for minutes.
+fn http_get_github_text(owner: &str, repo: &str, path: &str, token: &str) -> Result<String, String> {
+    let url = github_api_contents_url(owner, repo, path);
+    let text = http_get_text(&url, token)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("parse contents response for {path}: {e}"))?;
+    let b64 = value
+        .get("content")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| format!("GitHub contents response for {path} has no content field"))?;
+    use base64::Engine as _;
+    let cleaned: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .map_err(|e| format!("decode base64 for {path}: {e}"))?;
+    String::from_utf8(bytes).map_err(|e| format!("utf8 for {path}: {e}"))
+}
+
 fn http_get_text(url: &str, token: &str) -> Result<String, String> {
     let mut req = ureq::get(url).set("User-Agent", "eco-cli");
     if !token.is_empty() {
@@ -1252,7 +1271,7 @@ fn fetch_lxs(target: &RegistryTarget, name: &str, version: Option<&str>, arch: &
                     pick_latest(&versions).ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
                 }
             };
-            let manifest_text = http_get_text(&github_raw_url(owner, repo, &format!("{name}/{version}/lxs.yml")), token)?;
+            let manifest_text = http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
             let manifest: LxsManifest = serde_yaml::from_str(&manifest_text).map_err(|e| format!("parse lxs.yml: {e}"))?;
             let artifact = manifest
                 .artifacts
