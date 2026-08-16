@@ -72,6 +72,11 @@ eco up --remote                # build locally → ship executables → run on t
 eco serve <subdomain>          # expose a local app: https://<sub>.getecosphere.com
 ```
 
+- `eco up dev` **auto-provisions missing dev runtimes** on your machine (it is
+  the build farm). On macOS it installs Homebrew on first use, then the declared
+  runtimes (node@20, postgresql@15, mongodb, redis, …) via brew. The first
+  Homebrew install asks for your sudo password — run `eco up dev` in an
+  interactive terminal once so it can prompt; later runs are non-interactive.
 - Detected frameworks: rust, go, spring-boot (java), nextjs, astro, vite, nuxt,
   node (plain), static. Use `eco init --no-detect` to scaffold blank.
 - `eco up` (dev + remote) checks composed LXS against the registry for newer

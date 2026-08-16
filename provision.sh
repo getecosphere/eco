@@ -580,7 +580,34 @@ ensure_mongodb_repo_debian() {
 }
 
 ensure_brew() {
-  need_cmd brew || fail "Homebrew is required on macOS. Install it first: https://brew.sh/"
+  if need_cmd brew; then
+    return
+  fi
+  # Homebrew is the standard runtime provider on macOS. Auto-install it so
+  # `eco up dev` provisions the missing runtimes instead of failing with a
+  # "install Homebrew first" message. Non-interactive: the official installer
+  # runs without prompts when run as the current user on Apple Silicon/Intel.
+  log "Homebrew not found — installing it (one-time)…"
+  if [[ "$(uname -m)" == "arm64" ]]; then
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  else
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  fi
+  # Homebrew on Apple Silicon lives under /opt/homebrew; make brew resolve for
+  # this shell and future non-interactive SSH sessions via the default PATH.
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    export PATH="/opt/homebrew/bin:$PATH"
+    # Persist for the user's shells so later `eco up` calls find brew too.
+    if [[ -f "$HOME/.zshrc" ]]; then
+      grep -q '/opt/homebrew/bin' "$HOME/.zshrc" || echo 'export PATH="/opt/homebrew/bin:$PATH"' >> "$HOME/.zshrc"
+    fi
+    if [[ -f "$HOME/.bashrc" ]]; then
+      grep -q '/opt/homebrew/bin' "$HOME/.bashrc" || echo 'export PATH="/opt/homebrew/bin:$PATH"' >> "$HOME/.bashrc"
+    fi
+  elif [[ -x /usr/local/bin/brew ]]; then
+    export PATH="/usr/local/bin:$PATH"
+  fi
+  need_cmd brew || fail "Homebrew install failed. Install it manually: https://brew.sh/"
 }
 
 # Installs the Rust toolchain on the developer machine (the build farm) as a
