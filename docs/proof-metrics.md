@@ -1,0 +1,163 @@
+# Ecosphere Proof — Framework Matrix + LXS Auth Binary
+
+> **Date:** 2026-08-16
+> **Goal:** Prove that `eco` composes the **auth LXS binary** into a project built
+> with ANY supported framework, and that signup/signin work **locally**, **on the
+> production CT (101)**, and **live over HTTPS**.
+> **Result:** 9/9 frameworks pass across all three surfaces. One LXS binary
+> (auth@1.0.0) serves identity in every framework, never rebuilt, never sourced
+> on the server.
+
+## 1. The refactor (`eco init` replaces startproject/adopt)
+
+The old scaffold era (`startproject`, `adopt`, `clearstarterproject`) was removed.
+Onboarding is now one command at the project root:
+
+```bash
+npx create-next-app myapp        # or cargo, go, maven, vite, astro, nuxt, node, static
+cd myapp && eco init             # auto-detect framework → ecompose.yml → binding
+eco lxs add auth@1.0.0           # compose the auth LXS BINARY from the registry
+eco up dev                       # run locally (native arch binary)
+eco up --remote                  # build locally, ship executable, run on CT
+```
+
+Key changes (commits in `getecosphere/eco`):
+
+| Change | Files |
+|---|---|
+| `detect.rs` — framework detection moved out of adopt, shared with `eco compose` | `src/detect.rs` |
+| `eco init` auto-detects Cargo.toml/go.mod/pom.xml/package.json → rust/go/spring-boot/nextjs/astro/vite/nuxt/node/static; validates existing manifests; `--no-detect` | `src/commands/wrappers.rs` |
+| Removed `startproject.rs`, `adopt.rs`, `clearstarterproject.rs` | — |
+| `eco up dev` installs each `lxs:` service as a **local native binary** (darwin/aarch64 or linux/amd64 from the registry) with `start.sh` + `.env.example`; empty DB URIs resolved to the estate-local managed DB | `src/commands/up.rs`, `configure.sh` |
+| `.eco/state.json` project dir = the only scanned root (no sibling discovery) | `src/commands/up.rs` |
+| PM2 name parsing fix + async-start retry | `src/commands/up.rs` |
+| `path: .` no longer creates a phantom domain to clone | `src/ecompose.rs` |
+| configgen honors `auth.email_verification.enabled` from ecompose.yml (remote env generation) | `src/configgen.rs` |
+| Remote deploys support **Go** (cross-compile linux/amd64), **Spring Boot** (mvn jar), **static** (dist), **plain Node** (bun-compile), **Nuxt** (`.output`) | `src/configgen.rs`, `src/commands/up.rs` |
+| provision.sh accepts `go`/`static` runtime tokens (macOS + Debian) | `provision.sh` |
+| auth@1.0.0 gained a `darwin/aarch64` artifact for native local dev | `lxs/registry` |
+
+## 2. The auth LXS binary
+
+- One versioned LXS: **auth@1.0.0** (`getecosphere/lxs-registry`).
+- Two static artifacts, same contract (JWT + Mongo + email-verification toggles):
+  - `linux/amd64` — **25 MB** (musl static, for the CT)
+  - `darwin/aarch64` — **22 MB** (native local dev)
+- Contract: `JWT_SECRET`, `MONGODB_URI`, `SERVER_PORT` required;
+  `EMAIL_VERIFICATION_REQUIRED` (default true), `EMAIL_VERIFICATION_TTL_HOURS`,
+  `BREVO_API_KEY`, `MAIL_FROM_*` optional.
+- The same binary is pulled from the cache by every proof project — **never
+  rebuilt, never re-sourced, on any machine or the server.**
+
+## 3. Proof matrix
+
+### 3.1 Local (`eco up dev`)
+
+Each project ran natively on the dev machine: framework service + auth binary via
+PM2. Signup/signin/wrong-password verified over HTTP.
+
+| Framework | Marker | Detect | register | login | wrongpass |
+|---|---|---|---|---|---|
+| Rust | Cargo.toml | rust | YES | YES | YES |
+| Go | go.mod | go | YES | YES | YES |
+| Spring Boot | pom.xml | java@17+maven | YES | YES | YES |
+| Next.js | package.json+next | nextjs | YES | YES | YES |
+| Vite | package.json+vite | vite | YES | YES | YES |
+| Astro | package.json+astro | astro | YES | YES | YES |
+| Nuxt | package.json+nuxt | nuxt | YES | YES | YES |
+| Node (plain) | package.json | node | YES | YES | YES |
+| Static (Leptos-style) | Cargo.toml+index.html | static | YES | YES | YES |
+
+### 3.2 Remote CT (`eco up --remote` → CT 101)
+
+Each project built locally (cross-compile / npm / mvn / bun) and shipped as
+executable-only artifacts to the shared app CT 101. Auth verified inside the CT.
+
+| Framework | CT deploy | register | login | wrongpass | auth port |
+|---|---|---|---|---|---|
+| Rust | ok | YES | YES | YES | 25434 |
+| Go | ok | YES | YES | YES | 23013 |
+| Spring Boot | ok | YES | YES | YES | 22628 |
+| Next.js | ok | YES | YES | YES | 22024 |
+| Vite | ok | YES | YES | YES | 22247 |
+| Astro | ok | YES | YES | YES | 24462 |
+| Nuxt | ok | YES | YES | YES | 25200 |
+| Node (plain) | ok (bun binary) | YES | YES | YES | 27120 |
+| Static | ok | YES | YES | YES | 25988 |
+
+### 3.3 Live HTTPS (`https://proof-<fw>.getecosphere.com`)
+
+Each estate exposed through Cloudflare Tunnel → proxy CT → CT 101. The public
+URL served the auth binary's `/api/auth/*`.
+
+| Framework | URL | register | login | wrongpass |
+|---|---|---|---|---|
+| Rust | https://proof-rust.getecosphere.com | YES | YES | YES |
+| Go | https://proof-go.getecosphere.com | YES | YES | YES |
+| Spring Boot | https://proof-spring-boot.getecosphere.com | YES | YES | YES |
+| Next.js | https://proof-nextjs.getecosphere.com | YES | YES | YES |
+| Vite | https://proof-vite.getecosphere.com | YES | YES | YES |
+| Astro | https://proof-astro.getecosphere.com | YES | YES | YES |
+| Nuxt | https://proof-nuxt.getecosphere.com | YES | YES | YES |
+| Node | https://proof-node.getecosphere.com | YES | YES | YES |
+| Static | https://proof-static.getecosphere.com | YES | YES | YES |
+
+**9/9 frameworks × 3 surfaces = 27/27 green.**
+
+## 4. What this proves
+
+1. **LXS is a binary.** The same auth@1.0.0 binary (25 MB linux / 22 MB darwin)
+   was composed into every framework — no source, no rebuild, no `npm install`,
+   no compiler on the CT. The server is a pure executable runner.
+2. **Framework-agnostic onboarding.** `eco init` detects whatever the user built
+   (9 ecosystems) and wires it into one estate manifest. Users keep their own
+   tooling; eco enters at the root.
+3. **Density.** All 9 estates (9 app services + 9 auth binaries) run on a single
+   shared CT 101 alongside the existing production estates — host-native LXC,
+   no per-estate container overhead.
+4. **One manifest, local → prod.** The exact same `ecompose.yml` drives
+   `eco up dev`, `eco up --remote`, and the live public URL. `auth.email_verification.enabled`
+   is honored by both configure.sh (local) and configgen (remote).
+
+## 5. Bugs found & fixed during the proof
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | `eco init` with `.` produced `project: project`, wrong name | canonicalize cwd name |
+| 2 | `path: .` became a phantom `.` domain to clone | skip `.` in `unique_domains_from_ecompose` |
+| 3 | `eco up dev` never ran LXS binaries locally (no install step) | `install_lxs_services_local` (native arch) |
+| 4 | Empty `MONGODB_URI=` in `.env` crashed auth | start.sh resolves empty DB URIs to estate-local DB |
+| 5 | init-project estate root resolved to parent dir | `.eco/state.json` → project dir is root |
+| 6 | PM2 `name: "x",` parsed with trailing comma → false "did not register" | strip trailing comma in `extract_pm2_app_names` |
+| 7 | `pm2 start` async → false negatives | retry loop in `assert_local_pm2_apps_present` |
+| 8 | provision.sh rejected `go` / `static` runtimes on macOS | added tokens (brew/apt/python3) |
+| 9 | remote configgen had no `go` / `spring-boot` exec | added `resolve_service_exec` branches + build/ship |
+| 10 | Nuxt build produced `.output` not copied | added `.output`/`.app/.output` to shipped subdirs + configgen entry + SSR marker |
+| 11 | plain Node produced no dist | bun-compile `index.js` → single linux-x64 binary |
+| 12 | static site not recognized as buildable remotely | `static` runtime → ship `dist/` for python http.server |
+| 13 | email verification defaulted ON remotely (blocked register) | configgen honors `auth.email_verification.enabled=false` |
+| 14 | getecosphere tunnel ingress/DNS misrouting | verified the `eco serve` tunnel path as the reliable public-URL mechanism |
+
+## 6. Infrastructure used
+
+- Dev machine: macOS (arm64), Rust 1.97, Go 1.26, Java 17, Maven 3.9, Node 20,
+  Bun 1.3, MongoDB 7 (managed local).
+- Proxmox host: `100.85.173.92`, agent `eco serve --port 8790`.
+- Shared app CT: **101** (also hosts apindo/assessment/crm/getecosphere/etc).
+- Proxy CT 100 with Cloudflare tunnels; zone `getecosphere.com`.
+- LXS registry: `getecosphere/lxs-registry` (local mirror at `~/ar-rahman/lxs/registry`).
+
+## 7. Reproduction
+
+```bash
+# scaffold any framework project, then:
+cd <project> && eco init
+eco lxs add auth@1.0.0
+# (optional) declare the estate hostname + disable email verification
+# auth: { email_verification: { enabled: false } }
+eco up dev          # local: curl register/login on the assigned auth port
+eco up --remote     # CT 101: systemd runs the shipped binaries
+eco serve <sub> --port <local>   # live public URL
+```
+
+The 9 proof estates live at `~/ar-rahman/proofs/proof-*`.
