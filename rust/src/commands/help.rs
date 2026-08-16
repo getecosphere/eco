@@ -33,6 +33,7 @@ Usage:
   eco serve <subdomain> [--port <port>] [--release]
   eco serve stop <subdomain>
   eco serve list
+  eco setgithubstatus [--clear] "<message>"   set the GitHub profile status (GraphQL)
   eco expose [path] [--dry-run]
   eco sync [--host <hostname>] [--ct <ctid>] [--service <name>] [--staging] [--dry-run]
   eco sync-staging [--host <hostname>] [--service <name>] [--dry-run]

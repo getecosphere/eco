@@ -46,6 +46,7 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
         "sync" => commands::sync::run_sync(rest),
         "sync-staging" => commands::sync::run_sync_staging(rest),
         "sendemail" => commands::sendemail::run_sendemail(rest),
+        "setgithubstatus" => commands::github_status::run_setgithubstatus(rest),
         "serve" => commands::serve::run_serve(rest),
         // internal: registry CLI mirror used by bundled bash scripts
         "registry" => commands::registry_cmd::run_registry_cli(rest),
