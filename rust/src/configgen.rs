@@ -139,6 +139,12 @@ pub fn resolve_service_exec(
                 return Ok((exec, service_dir.clone(), true));
             }
         }
+        // Nuxt (nitro) SSR: .output/server/index.mjs.
+        let nuxt_entry = format!("{read_service_dir}/.output/server/index.mjs");
+        if Path::new(&nuxt_entry).is_file() {
+            let exec = format!("node {service_dir}/.output/server/index.mjs");
+            return Ok((exec, service_dir.clone(), true));
+        }
         // Static dist served by python3 http.server on the allocated port.
         let dist = format!("{service_dir}/dist");
         let port_var = format!("${{{}}}", env_var_for(service, "PORT"));

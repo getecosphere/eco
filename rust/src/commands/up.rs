@@ -3320,7 +3320,7 @@ fn trim_dev_artifact(_dir: &Path, root: &Path) {
 
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
-    let subdirs = ["dist", "build", ".next", "output", "app/dist", "app/.next", "app/build", "public", "app/public"];
+    let subdirs = ["dist", "build", ".next", ".output", "output", "app/dist", "app/.next", "app/build", "app/.output", "public", "app/public"];
     let mut included: Vec<String> = Vec::new();
     for sub in subdirs {
         let path = Path::new(build_dir).join(sub);
@@ -3335,6 +3335,39 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         }
     }
     if included.is_empty() {
+        // Plain Node service (no framework build): Bun-compile the entry into
+        // a single linux-x64 binary so the CT still gets an executable-only
+        // artifact (no node_modules, no source). Entry is the `start`/`main`
+        // script target or the conventional index/server file.
+        let entry_candidates = ["index.js", "server.js", "main.js", "app.js", "src/index.js", "src/server.js", "src/main.js"];
+        let entry = entry_candidates
+            .iter()
+            .map(|p| Path::new(build_dir).join(p))
+            .find(|p| p.is_file());
+        if let Some(entry) = entry {
+            if builder_is_host() && util::command_on_path("bun") {
+                let out = artifact_dir.join(service_name);
+                print_step(&format!("Bun-compiling plain Node {} -> single linux-x64 binary", service_name));
+                let rel = entry
+                    .strip_prefix(Path::new(build_dir))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| entry.display().to_string());
+                run_command(
+                    "bun",
+                    &[
+                        "build".to_string(),
+                        "--compile".to_string(),
+                        "--target=bun-linux-x64".to_string(),
+                        rel,
+                        "--outfile".to_string(),
+                        out.display().to_string(),
+                    ],
+                    Path::new(build_dir),
+                )?;
+                std::fs::write(artifact_dir.join(".eco-bun"), service_name).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
         return Err(format!("builder produced no dist/build/.next/output under {build_dir}"));
     }
     if builder_is_host() {
@@ -3563,23 +3596,27 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     for service in deployment
         .services
         .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@") || r == "leptos"))
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@") || r == "leptos" || r == "static"))
     {
         let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
         let rel = if rel.is_empty() { service.path.clone() } else { rel };
         let candidate = deployment.project_dir.join(&rel);
         // Node frontends have package.json; Leptos/Rust frontends have
-        // Cargo.toml + index.html (the trunk CSR entry).
+        // Cargo.toml + index.html (the trunk CSR entry); static sites have
+        // Cargo.toml + index.html (served as plain dist) or start.sh.
         let is_leptos = service.runtimes.iter().any(|r| r == "leptos");
+        let is_static = service.runtimes.iter().any(|r| r == "static");
         let ok = if is_leptos {
             candidate.join("Cargo.toml").is_file() && candidate.join("index.html").is_file()
+        } else if is_static {
+            candidate.join("index.html").is_file()
         } else {
             candidate.join("package.json").is_file()
         };
         if !ok {
             return Err(format!(
                 "Cannot find local {} for service {} (looked at {})",
-                if is_leptos { "Cargo.toml + index.html (Leptos)" } else { "package.json" },
+                if is_leptos { "Cargo.toml + index.html (Leptos)" } else if is_static { "index.html (static)" } else { "package.json" },
                 service.name,
                 candidate.display()
             ));
@@ -3889,13 +3926,25 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         let build_dir = format!("{}/{}", builder_build_root(), service.name);
         let build_loc = if builder_is_host() { "on this machine (host builder)".to_string() } else { format!("on local builder ({})", builder_name()) };
         let is_leptos = dir.join("index.html").is_file() && !dir.join("package.json").is_file();
+        let is_static = service.runtimes.iter().any(|r| r == "static") || (dir.join("index.html").is_file() && !dir.join("package.json").is_file() && !is_leptos);
         print_step(&format!(
             "Building {} {}: {}",
             service.name,
             build_loc,
-            if is_leptos { "trunk build --release (Leptos wasm)" } else { "npm ci + npm run build" }
+            if is_leptos { "trunk build --release (Leptos wasm)" } else if is_static { "shipping static dist" } else { "npm ci + npm run build" }
         ));
         sync_dir_to_builder(dir, &build_dir)?;
+        if is_static {
+            // Static site: ship the source dir (index.html + assets) as the
+            // dist/ so the CT serves it via python http.server.
+            let artifact_dir = std::env::temp_dir().join(format!("eco-frontend-artifact-{}-{}", service.name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&artifact_dir);
+            std::fs::create_dir_all(&artifact_dir).map_err(|e| e.to_string())?;
+            copy_tree_excluding(dir, &artifact_dir.join("dist"), &(skip_none as fn(&str) -> bool))?;
+            frontend_artifacts.push((service.name.clone(), artifact_dir));
+            print_step(&format!("Built {} static artifact -> ship", service.name));
+            continue;
+        }
         let mut exports = String::from("set -euo pipefail\n");
         for (key, value) in &build_env {
             // Only shell-valid identifier keys can be exported; keys like
@@ -4591,6 +4640,7 @@ fn install_remote_frontend_artifacts_release(
         // Install natively so native modules match the linux arch.
         let ssr_marker = [
             ".next",
+            ".output",
             "dist/server/entry.mjs",
             "app/dist/server/entry.mjs",
             "build/index.js",
