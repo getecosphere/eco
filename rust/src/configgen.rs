@@ -326,6 +326,7 @@ pub fn build_caddyfile(
     frontend_port: u16,
     auth_port: Option<u16>,
     api_service_port: Option<(String, u16)>,
+    auth_ui_port: Option<u16>,
 ) -> String {
     let mut caddy = format!(
         "{{\n\tadmin off\n}}\n\n:{gateway_port} {{\n"
@@ -337,6 +338,14 @@ pub fn build_caddyfile(
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{ap}\n\t\t}}\n"));
         caddy.push_str("\t\thandle /api/auth/* {\n");
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{ap}\n\t\t}}\n"));
+    }
+    if let Some(up) = auth_ui_port {
+        caddy.push_str("\t\thandle /signin {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /signup {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /static/* {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
     }
     if let Some((name, port)) = api_service_port {
         caddy.push_str(&format!("\t\thandle /api/{name}/* {{\n"));
@@ -479,7 +488,7 @@ pub fn generate_all_auth(
             deploys
                 .iter()
                 .filter(|d| d.http)
-                .find(|d| !d.name.contains("auth"))
+                .find(|d| !d.name.contains("auth") && !d.name.contains("auth-ui") && !d.name.contains("auth_ui"))
                 .map(|d| d.port)
         })
         .unwrap_or(0);
@@ -495,7 +504,13 @@ pub fn generate_all_auth(
                     && !d.name.contains("auth")
             })
             .map(|d| (d.name.clone(), d.port));
-        let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port);
+        // auth-ui LXS (signin/signup pages) routes /signin, /signup, /static.
+        let auth_ui_port = deploys
+            .iter()
+            .filter(|d| d.http)
+            .find(|d| d.name.contains("auth-ui") || d.name.contains("auth_ui"))
+            .map(|d| d.port);
+        let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port, auth_ui_port);
         files.push(("Caddyfile".to_string(), caddy));
         // Record the gateway port so host-side exposure can find it.
         files.push((".env/gateway.env".to_string(), format!("PORT={gateway_port}\n")));
