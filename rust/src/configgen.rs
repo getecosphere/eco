@@ -58,6 +58,15 @@ pub fn resolve_service_exec(
 ) -> Result<(String, String, bool), String> {
     let read_artifacts = format!("{read_dir}/artifacts");
     let artifacts = format!("{release_dir}/artifacts");
+    // Static (Leptos-style / plain static) site: Cargo.toml + index.html,
+    // served from the shipped dist/ by python http.server.
+    if service.runtimes.iter().any(|r| r == "static") || (Path::new(&read_dir).join("artifacts").join(&service.name).join("dist").join("index.html").is_file()) {
+        let service_dir = format!("{artifacts}/{}", service.name);
+        let dist = format!("{service_dir}/dist");
+        let port_var = format!("${{{}}}", env_var_for(service, "PORT"));
+        let exec = format!("python3 -m http.server {port_var} --directory {dist} --bind 0.0.0.0");
+        return Ok((exec, service_dir.clone(), true));
+    }
     // Source Rust service: binary named `binary:` (or service/lxs name).
     if service.runtimes.iter().any(|r| r == "rust") {
         let bin = if !binary_override.is_empty() {
@@ -452,7 +461,11 @@ pub fn generate_all_auth(
     }
     // Caddyfile — gateway routes by role, detected flexibly (not just the
     // literal names `frontend`/`auth`/`backend`):
-    //   frontend: the HTTP service named `<project>-frontend` or `frontend`
+    //   frontend: the HTTP service named `<project>-frontend` or `frontend`;
+    //             fall back to the estate's primary source HTTP service (any
+    //             service that isn't auth/LXS), so a user estate whose app
+    //             service is named after the project (e.g. proof-spring-boot)
+    //             still gets a working gateway.
     //   auth:     the service whose name contains `auth`
     //   api:      the source HTTP service (rust/npm) that is not the frontend
     //             and not auth — i.e. the estate's own API/backend.
@@ -462,6 +475,13 @@ pub fn generate_all_auth(
         .filter(|d| d.http)
         .find(|d| d.name == "frontend" || d.name == format!("{project}-frontend"))
         .map(|d| d.port)
+        .or_else(|| {
+            deploys
+                .iter()
+                .filter(|d| d.http)
+                .find(|d| !d.name.contains("auth"))
+                .map(|d| d.port)
+        })
         .unwrap_or(0);
     if gateway_port > 0 && frontend_port > 0 {
         let auth_port = deploys.iter().filter(|d| d.http).find(|d| d.name.contains("auth")).map(|d| d.port);
