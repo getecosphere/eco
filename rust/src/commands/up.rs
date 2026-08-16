@@ -4223,9 +4223,13 @@ pub fn agent_list_estates() -> Vec<serde_json::Value> {
 }
 
 pub fn agent_read_service_env(project: &str, service_name: &str, staging: bool) -> Result<String, String> {
+    // v2 release-dir layout: the service env lives in the CT's immutable
+    // release dir under /opt/eco/<project>/current/.env/<service>.env. The old
+    // /opt/projects source tree no longer exists. ctid comes from the staged
+    // host manifest (the agent stages /opt/eco/deploys/<project>/current/).
+    let host_manifest = format!("/opt/eco/deploys/{project}/current/ecompose.yml");
     let cwd = util::current_dir();
-    let project_path = format!("/opt/projects/{project}");
-    let deployment = load_project_deployment(&project_path, &cwd)?;
+    let deployment = load_project_deployment(&host_manifest, &cwd)?;
     let ctid = if staging {
         let staging_config = ecompose::parse_staging(&deployment.content);
         let ct = staging_config.get("ct").cloned().unwrap_or_default();
@@ -4237,19 +4241,7 @@ pub fn agent_read_service_env(project: &str, service_name: &str, staging: bool) 
         deployment.ctid.clone()
     };
     ensure_ct_running(&ctid)?;
-    let service = deployment
-        .services
-        .iter()
-        .find(|s| s.name == service_name)
-        .ok_or_else(|| format!("service not found: {service_name}"))?;
-    // The staged estate source is flattened to /opt/projects/<project>, so a
-    // service path beginning with the estate core repo name (e.g.
-    // `assessment_core/frontend`) must strip it — otherwise the CT-side .env
-    // is never found on flattened estates and frontend builds bake empty
-    // PUBLIC_* values.
-    let estate_core = estate_core_name(&deployment.content);
-    let service_dir = resolve_ct_service_dir(service, &deployment.ct_project_root, &deployment.project_dir.display().to_string(), &estate_core);
-    let env_path = format!("{service_dir}/.env");
+    let env_path = format!("{CT_ECO_ROOT}/{project}/current/.env/{}.env", service_name);
     let output = pct_exec_capture(
         &ctid,
         &format!(

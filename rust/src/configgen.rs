@@ -221,6 +221,51 @@ pub fn build_systemd_units(
     units
 }
 
+/// Inject public service URLs into a frontend .env. Keys vary by framework
+/// (NEXT_PUBLIC_* / VITE_* / PUBLIC_*), so rewrite every variant that exists
+/// in the contract and append common aliases the frontend may read.
+fn inject_public_urls(env: &str, api: &str, auth: &str, profile: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut saw_api = false;
+    let mut saw_auth = false;
+    let mut saw_profile = false;
+    for line in env.lines() {
+        let key = line.split('=').next().unwrap_or("").trim().to_string();
+        let upper = key.to_uppercase();
+        let (val, is_url_key) = if upper.ends_with("_API_URL") || upper.ends_with("_API_BASE") || upper.ends_with("_API_BASE_URL") {
+            saw_api = true;
+            (api, true)
+        } else if upper.ends_with("_AUTH_URL") {
+            saw_auth = true;
+            (auth, true)
+        } else if upper.ends_with("_PROFILE_URL") {
+            saw_profile = true;
+            (profile, true)
+        } else {
+            (line, false)
+        };
+        if is_url_key {
+            lines.push(format!("{key}={val}"));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    // Append aliases the framework/build may expect even when the contract
+    // didn't list them (e.g. Next.js only ships NEXT_PUBLIC_API_URL).
+    if !saw_api {
+        lines.push(format!("NEXT_PUBLIC_API_URL={api}"));
+        lines.push(format!("VITE_API_URL={api}"));
+        lines.push(format!("PUBLIC_API_URL={api}"));
+    }
+    if !saw_auth {
+        lines.push(format!("NEXT_PUBLIC_AUTH_URL={auth}"));
+    }
+    if !saw_profile {
+        lines.push(format!("NEXT_PUBLIC_PROFILE_URL={profile}"));
+    }
+    lines.join("\n") + "\n"
+}
+
 /// Build the `.env` for each service from its shipped `.env.example` contract.
 /// Returns service name -> env file text (host-generated values merged).
 /// Every key from the shipped `.env.example` contract is written; the port var
@@ -338,6 +383,8 @@ pub fn build_caddyfile(
     auth_port: Option<u16>,
     api_service_port: Option<(String, u16)>,
     auth_ui_port: Option<u16>,
+    profile_port: Option<u16>,
+    profile_ui_port: Option<u16>,
 ) -> String {
     let mut caddy = format!(
         "{{\n\tadmin off\n}}\n\n:{gateway_port} {{\n"
@@ -361,8 +408,32 @@ pub fn build_caddyfile(
         caddy.push_str("\t\thandle /static/auth-ui.css {\n");
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
     }
+    if let Some(pp) = profile_ui_port {
+        caddy.push_str("\t\thandle /profile {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{pp}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /profile-edit {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{pp}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /static/profile-ui.css {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{pp}\n\t\t}}\n"));
+    }
+    if let Some(profile_port) = profile_port {
+        // profile-backend owns /api/profile/* and /api/users/* (name, avatar).
+        caddy.push_str("\t\thandle /api/profile/* {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{profile_port}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /api/users/*/avatar {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{profile_port}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /api/users/*/upload-cover-photo {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{profile_port}\n\t\t}}\n"));
+        caddy.push_str("\t\thandle /api/users/* {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{profile_port}\n\t\t}}\n"));
+    }
     if let Some((name, port)) = api_service_port {
         caddy.push_str(&format!("\t\thandle /api/{name}/* {{\n"));
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{port}\n\t\t}}\n"));
+        // Source backends commonly scope their API under a version prefix
+        // (e.g. actix `web::scope("/api/v1")`). Route that too so the
+        // frontend's NEXT_PUBLIC_API_URL={origin}/api/v1 resolves.
+        caddy.push_str("\t\thandle /api/v1/* {\n");
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{port}\n\t\t}}\n"));
     }
     caddy.push_str("\t\thandle {\n");
@@ -471,17 +542,34 @@ pub fn generate_all_auth(
             }
         }
     }
+    // profile-backend syncs identity from auth (AuthClient hits
+    // GET /auth/users/{id}); inject AUTH_BASE_URL pointing at auth's port so
+    // the peer call works on the CT. Mirrors configure.sh's
+    // resolve_peer_base_urls behaviour.
+    if let (Some(profile_name), Some(auth_port)) = (
+        deploys.iter().find(|d| d.name.contains("profile") && !d.name.contains("profile-ui") && !d.name.contains("profile_ui")).map(|d| d.name.clone()),
+        deploys.iter().filter(|d| d.http).find(|d| d.name.contains("auth")).map(|d| d.port),
+    ) {
+        if let Some(env) = env_files.get_mut(&profile_name) {
+            let mut lines: Vec<String> = env
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("AUTH_BASE_URL="))
+                .map(|l| l.to_string())
+                .collect();
+            lines.push(format!("AUTH_BASE_URL=http://127.0.0.1:{auth_port}/api"));
+            env_files.insert(profile_name.clone(), lines.join("\n"));
+        }
+    }
     // systemd EnvironmentFile must point at the .env file path on the CT.
     let mut env_paths: HashMap<String, String> = HashMap::new();
     for name in env_files.keys() {
         env_paths.insert(name.clone(), format!("{write_dir}/.env/{name}.env"));
     }
     let mut units = build_systemd_units(project, &deploys, &env_paths);
-    // .env files: relative path -> content
+    // .env files: relative path -> content. Declared here (the gateway block
+    // pushes Caddyfile into it), populated after the public-URL injection so
+    // frontends ship the resolved NEXT_PUBLIC_* addresses.
     let mut files: Vec<(String, String)> = Vec::new();
-    for (name, env) in &env_files {
-        files.push((format!(".env/{name}.env"), env.clone()));
-    }
     // Caddyfile — gateway routes by role, detected flexibly (not just the
     // literal names `frontend`/`auth`/`backend`):
     //   frontend: the HTTP service named `<project>-frontend` or `frontend`;
@@ -502,7 +590,7 @@ pub fn generate_all_auth(
             deploys
                 .iter()
                 .filter(|d| d.http)
-                .find(|d| !d.name.contains("auth") && !d.name.contains("auth-ui") && !d.name.contains("auth_ui"))
+                .find(|d| !d.name.contains("auth") && !d.name.contains("auth-ui") && !d.name.contains("auth_ui") && !d.name.contains("profile") && !d.name.contains("profile-ui") && !d.name.contains("profile_ui"))
                 .map(|d| d.port)
         })
         .unwrap_or(0);
@@ -516,6 +604,7 @@ pub fn generate_all_auth(
                     && d.name != "frontend"
                     && d.name != format!("{project}-frontend")
                     && !d.name.contains("auth")
+                    && !d.name.contains("profile")
             })
             .map(|d| (d.name.clone(), d.port));
         // auth-ui LXS (signin/signup pages) routes /signin, /signup, /static.
@@ -524,7 +613,19 @@ pub fn generate_all_auth(
             .filter(|d| d.http)
             .find(|d| d.name.contains("auth-ui") || d.name.contains("auth_ui"))
             .map(|d| d.port);
-        let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port, auth_ui_port);
+        // profile-backend LXS routes /api/profile/* and avatar/cover uploads.
+        let profile_port = deploys
+            .iter()
+            .filter(|d| d.http)
+            .find(|d| d.name.contains("profile") && !d.name.contains("profile-ui") && !d.name.contains("profile_ui"))
+            .map(|d| d.port);
+        // profile-ui LXS (profile edit page) routes /profile, /profile-edit.
+        let profile_ui_port = deploys
+            .iter()
+            .filter(|d| d.http)
+            .find(|d| d.name.contains("profile-ui") || d.name.contains("profile_ui"))
+            .map(|d| d.port);
+        let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port, auth_ui_port, profile_port, profile_ui_port);
         files.push(("Caddyfile".to_string(), caddy));
         // Record the gateway port so host-side exposure can find it.
         files.push((".env/gateway.env".to_string(), format!("PORT={gateway_port}\n")));
@@ -534,6 +635,52 @@ pub fn generate_all_auth(
             "[Unit]\nDescription={project} gateway\nAfter=network.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nWorkingDirectory={write_dir}\nExecStart=/usr/bin/caddy run --config {caddyfile_path} --adapter caddyfile\nRestart=always\nRestartSec=2\nKillSignal=SIGTERM\n\n[Install]\nWantedBy=multi-user.target\n"
         );
         units.push((format!("eco-{project}-gateway.service"), unit));
+    }
+
+    // Public service URLs for frontend builds. The gateway routes
+    //   /api/<api-service>/* → the estate's API backend
+    //   /api/auth/*          → the auth LXS
+    //   /api/profile/*       → the profile LXS
+    // Frontend build-time vars (NEXT_PUBLIC_* / PUBLIC_* / VITE_*) must point
+    // at those public addresses — the CT .env previously left them blank, so
+    // the browser fetched `/marketplace/products` against a relative URL and
+    // got 404. Inject them into the frontend service's env here.
+    if !expose_hostname.is_empty() {
+        let origin = format!("https://{expose_hostname}");
+        let frontend_deploy = deploys.iter().find(|d| d.port == frontend_port);
+        if let Some(frontend) = frontend_deploy {
+            // Mirror the gateway's role detection so the injected URLs match
+            // the Caddyfile routes exactly.
+            let api_name = deploys
+                .iter()
+                .filter(|d| d.http)
+                .find(|d| {
+                    d.port != frontend_port
+                        && d.name != "frontend"
+                        && d.name != format!("{project}-frontend")
+                        && !d.name.contains("auth")
+                        && !d.name.contains("profile")
+                })
+                .map(|d| d.name.clone())
+                .unwrap_or_default();
+            let public_api = if api_name.is_empty() {
+                origin.clone()
+            } else {
+                // Source backends scope under /api/v1 (see the gateway route
+                // added in build_caddyfile); the frontend appends the un-versioned
+                // resource path (e.g. /marketplace/products) to this base.
+                format!("{origin}/api/v1")
+            };
+            let public_auth = format!("{origin}/api/auth");
+            let public_profile = format!("{origin}/api/profile");
+            if let Some(env) = env_files.get_mut(&frontend.name) {
+                *env = inject_public_urls(env, &public_api, &public_auth, &public_profile);
+            }
+        }
+    }
+    // Populate the .env files after the public-URL injection above.
+    for (name, env) in &env_files {
+        files.push((format!(".env/{name}.env"), env.clone()));
     }
     Ok((files, units))
 }
