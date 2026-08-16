@@ -1672,6 +1672,7 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     // ONLY scanned root (no sibling-domain discovery, no parent estate). Legacy
     // estates without the marker keep the parent-as-estate-root layout.
     let is_init_project = deployment.project_dir.join(".eco").join("state.json").is_file();
+    print_lxs_update_notice(&deployment.content, &deployment.project_dir, lxs_check_disabled(&options));
     let estate_root = if is_init_project {
         deployment.project_dir.clone()
     } else {
@@ -3519,6 +3520,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
+    print_lxs_update_notice(&deployment.content, &deployment.project_dir, lxs_check_disabled(&options));
     // API URL + key: explicit env wins, else the `eco login`-stored auth
     // (defaulting the URL to the public api.getecosphere.com).
     let (api_url, api_key) = crate::commands::account::resolve_api_credentials()?;
@@ -4403,8 +4405,55 @@ fn provision_lxs_redis(ctid: &str, service_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_up(args: &[String]) -> Result<(), String> {
-    if args.first().map(|s| s.as_str()) == Some("dev") {
+/// Print a highlight when a composed LXS has a newer version available in the
+/// registry. Called by `eco up` (dev + remote) so the user learns about
+/// updates on every deploy; never blocks on an offline registry.
+///
+/// Can be turned off to focus on the current LXS versions or to speed up
+/// `eco up`:
+///   eco up --no-lxs-check        # per-command flag
+///   ECO_NO_LXS_CHECK=1 eco up    # or via env
+fn print_lxs_update_notice(content: &str, project_dir: &Path, skip: bool) {
+    if skip {
+        return;
+    }
+    if util::env_var_or("ECO_NO_LXS_CHECK", "").eq_ignore_ascii_case("1")
+        || util::env_var_or("ECO_NO_LXS_CHECK", "").eq_ignore_ascii_case("true")
+    {
+        return;
+    }
+    let state_registry = crate::commands::lxs::read_estate_state(project_dir)
+        .map(|s| s.registry)
+        .filter(|r| !r.is_empty());
+    let updates = crate::commands::lxs::lxs_updates_available(content, state_registry.as_deref());
+    if updates.is_empty() {
+        return;
+    }
+    util::println_stdout("\n[eco] LXS updates available:");
+    for (service, pinned, latest) in &updates {
+        let (name, _) = crate::commands::lxs::parse_pinned_ref(pinned);
+        let from_v = pinned.split('@').nth(1).unwrap_or("");
+        let to_v = latest.split('@').nth(1).unwrap_or("");
+        util::println_stdout(&format!(
+            "  {}  \x1b[1;33m{} -> {}\x1b[0m   run `eco lxs update {}`",
+            service, pinned, latest, name
+        ));
+        let note = crate::commands::lxs::changelog_note(&name, to_v, from_v, state_registry.as_deref());
+        if !note.is_empty() {
+            for line in note.lines() {
+                util::println_stdout(&format!("     {}", line));
+            }
+        }
+    }
+    util::println_stdout("  (latest from the registry; `eco lxs update` bumps ecompose.yml)\n");
+}
+
+/// Whether the caller asked to skip the LXS update check (`--no-lxs-check`).
+fn lxs_check_disabled(options: &HashMap<String, String>) -> bool {
+    options.get("no-lxs-check").map(|v| v == "true").unwrap_or(false)
+}
+
+pub fn run_up(args: &[String]) -> Result<(), String> {    if args.first().map(|s| s.as_str()) == Some("dev") {
         return run_up_dev(&args[1..]);
     }
     if args.iter().any(|a| a == "--remote") {
@@ -4429,6 +4478,7 @@ pub fn run_up(args: &[String]) -> Result<(), String> {
     let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
+    print_lxs_update_notice(&deployment.content, &deployment.project_dir, lxs_check_disabled(&options));
     let staging_config = ecompose::parse_staging(&deployment.content);
 
     if options.get("staging").map(|v| v == "true").unwrap_or(false) {

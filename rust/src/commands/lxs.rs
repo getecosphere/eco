@@ -696,6 +696,180 @@ fn collect_lxs(registry: &Path) -> Result<Vec<LxsManifest>, String> {
     Ok(out)
 }
 
+/// Resolve the latest available version of an LXS from the registry, without
+/// downloading the artifact. Returns (name, latest_version, Some(current) if
+/// an address/pinned check applies). Used by `eco up`'s update check and by
+/// `eco lxs update`.
+pub fn latest_available_version(name: &str, address: Option<&str>) -> Result<Option<String>, String> {
+    let target = resolve_registry_target(address)?;
+    let versions = match target {
+        RegistryTarget::Local(dir) => list_versions_local(&dir.join(name)),
+        RegistryTarget::Github { owner, repo, token } => list_versions_github(&owner, &repo, &token, name).unwrap_or_default(),
+    };
+    Ok(pick_latest(&versions))
+}
+
+/// Parse a `name@version` reference into (name, Some(version)).
+pub fn parse_pinned_ref(reference: &str) -> (String, Option<String>) {
+    match reference.rsplit_once('@') {
+        Some((n, v)) => (n.to_string(), Some(v.to_string())),
+        None => (reference.to_string(), None),
+    }
+}
+
+/// Fetch the changelog for a specific name@version from the registry (local
+/// path or GitHub). Returns the raw markdown; empty when unavailable.
+pub fn changelog_for_version(name: &str, version: &str, address: Option<&str>) -> Result<String, String> {
+    let target = resolve_registry_target(address)?;
+    match target {
+        RegistryTarget::Local(dir) => {
+            let path = dir.join(name).join(version).join("docs").join("changelog.md");
+            Ok(std::fs::read_to_string(&path).unwrap_or_default())
+        }
+        RegistryTarget::Github { owner, repo, token } => {
+            let url = github_raw_url(&owner, &repo, &format!("{name}/{version}/docs/changelog.md"));
+            Ok(http_get_text(&url, &token).unwrap_or_default())
+        }
+    }
+}
+
+/// Extract the changelog section(s) for versions strictly newer than `from`,
+/// as a compact "what changed" note. Sections look like `## 1.1.0 — title`.
+pub fn changelog_note(name: &str, latest: &str, from: &str, address: Option<&str>) -> String {
+    let raw = changelog_for_version(name, latest, address).unwrap_or_default();
+
+    let from_semver = parse_semver(from);
+    let mut note = String::new();
+    let mut current_header: Option<String> = None;
+    for line in raw.lines() {
+        let t = line.trim_end();
+        if let Some(header) = t.strip_prefix("## ") {
+            let version_part = header.split([' ', '—', '-']).next().unwrap_or("").trim();
+            let v = parse_semver(version_part);
+            let relevant = match (&v, &from_semver) {
+                (Some(nv), Some(fv)) => nv > fv,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if relevant {
+                current_header = Some(header.to_string());
+                note.push_str(&format!("\n{}", header));
+            } else {
+                current_header = None;
+            }
+            continue;
+        }
+        if current_header.is_some() && !t.is_empty() {
+            note.push_str(&format!("\n  {}", t.trim_start()));
+        }
+    }
+    note.trim().to_string()
+}
+
+/// List every composed `lxs:` service as (service_name, lxs_name, pinned_ref).
+pub fn composed_lxs(content: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut in_services = false;
+    let mut current_service = String::new();
+    for raw in content.lines() {
+        let line = raw.trim_end_matches('\r').trim_end();
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line == "services:" {
+            in_services = true;
+            continue;
+        }
+        if in_services && !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+            break;
+        }
+        if !in_services {
+            continue;
+        }
+        if let Some(name) = match_indented_key_2(line) {
+            current_service = name;
+            continue;
+        }
+        if !current_service.is_empty() {
+            if let Some(lxs_val) = match_indented_value_4(line, "lxs") {
+                let (lxs_name, pinned) = parse_pinned_ref(&lxs_val);
+                if let Some(pinned) = pinned {
+                    out.push((current_service.clone(), lxs_name.clone(), format!("{lxs_name}@{pinned}")));
+                }
+                current_service.clear();
+            }
+        }
+    }
+    out
+}
+
+/// Check every `lxs:` service declared in ecompose.yml content against the
+/// registry and return Vec<(service_name, pinned, latest)> where latest is a
+/// newer version. Fails silently (returns empty) when the registry is
+/// unreachable so `eco up` never blocks on an offline check.
+pub fn lxs_updates_available(content: &str, address: Option<&str>) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut in_services = false;
+    let mut current_service = String::new();
+    for raw in content.lines() {
+        let line = raw.trim_end_matches('\r').trim_end();
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line == "services:" {
+            in_services = true;
+            continue;
+        }
+        if in_services && !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+            break;
+        }
+        if !in_services {
+            continue;
+        }
+        if let Some(name) = match_indented_key_2(line) {
+            current_service = name;
+            continue;
+        }
+        if !current_service.is_empty() {
+            if let Some(lxs_val) = match_indented_value_4(line, "lxs") {
+                let (lxs_name, pinned) = parse_pinned_ref(&lxs_val);
+                if let Some(pinned) = pinned {
+                    if let Ok(Some(latest)) = latest_available_version(&lxs_name, address) {
+                        if latest != pinned && parse_semver(&latest).map(|l| l > parse_semver(&pinned).unwrap_or(SemVer { major: 0, minor: 0, patch: 0 })).unwrap_or(false) {
+                            out.push((current_service.clone(), format!("{lxs_name}@{pinned}"), format!("{lxs_name}@{latest}")));
+                        }
+                    }
+                }
+                current_service.clear();
+            }
+        }
+    }
+    out
+}
+
+fn match_indented_key_2(line: &str) -> Option<String> {
+    if line.len() >= 2 && line.starts_with("  ") && !line.starts_with("    ") {
+        if let Some(rest) = line.trim_start().strip_suffix(':') {
+            let key = rest.trim();
+            if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn match_indented_value_4(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("    {key}:");
+    if let Some(rest) = line.trim_end().strip_prefix(prefix.as_str()) {
+        let v = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
+}
+
 pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) -> Result<(LxsManifest, String, PathBuf), String> {
     let (name, pinned_version) = parse_lxs_ref(reference)?;
     let target = resolve_registry_target(address)?;
@@ -713,7 +887,6 @@ pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) ->
     }
     Ok((manifest, version, dest))
 }
-
 fn collect_lxs_github(owner: &str, repo: &str, token: &str) -> Result<Vec<LxsManifest>, String> {
     let mut out = Vec::new();
     let root_url = github_api_contents_url(owner, repo, "");
@@ -1413,6 +1586,245 @@ fn add_source_service_to_ecompose(service: &str, rel_path: &str) -> Result<(), S
     Ok(())
 }
 
+/// `eco lxs update [name]` — bump one (or all) composed LXS to the latest
+/// available version in ecompose.yml.
+fn run_lxs_update(args: &[String]) -> Result<(), String> {
+    let mut address: Option<String> = None;
+    let mut name_filter: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--address" => {
+                address = Some(args.get(i + 1).cloned().unwrap_or_default());
+                i += 2;
+            }
+            other if other.starts_with('-') => return Err(format!("Unknown eco lxs update option: {other}")),
+            other => {
+                name_filter = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    let cwd = util::current_dir();
+    let manifest_path = find_estate_ecompose(&cwd)?;
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let updates = lxs_updates_available(&content, address.as_deref());
+    if updates.is_empty() {
+        println!("[eco lxs] All composed LXS are up to date in {}", manifest_path.display());
+        return Ok(());
+    }
+
+    let mut any = false;
+    for (service, pinned, latest) in updates {
+        let lxs_name = parse_pinned_ref(&pinned).0;
+        if let Some(filter) = &name_filter {
+            if &lxs_name != filter {
+                continue;
+            }
+        }
+        upsert_service_ref(&manifest_path, &service, "lxs", &latest)?;
+        println!("[eco lxs] Updated {service}: {pinned} -> {latest}");
+        any = true;
+    }
+    if !any {
+        if let Some(filter) = name_filter {
+            return Err(format!("No update available for LXS \"{filter}\" in {}", manifest_path.display()));
+        }
+    }
+    println!("\nRun `eco up --remote` to deploy the updated LXS binaries.");
+    Ok(())
+}
+
+/// `eco lxs outdated [--address <registry>]` — show the composed LXS with
+/// their current vs latest registry version and a short changelog note.
+/// Independent of `eco up`; reports when everything is already up to date.
+fn run_lxs_outdated(args: &[String]) -> Result<(), String> {
+    let mut address: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--address" => {
+                address = Some(args.get(i + 1).cloned().unwrap_or_default());
+                i += 2;
+            }
+            other if other.starts_with('-') => return Err(format!("Unknown eco lxs outdated option: {other}")),
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    let cwd = util::current_dir();
+    let manifest_path = find_estate_ecompose(&cwd)?;
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let composed = composed_lxs(&content);
+    if composed.is_empty() {
+        println!("[eco lxs] No composed LXS found in {}", manifest_path.display());
+        return Ok(());
+    }
+
+    println!("[eco lxs] Composed LXS in {}:\n", manifest_path.display());
+    let mut outdated_count = 0;
+    for (service, name, pinned) in &composed {
+        let from_v = pinned.split('@').nth(1).unwrap_or("");
+        match latest_available_version(name, address.as_deref()) {
+            Ok(Some(latest)) if latest != from_v && parse_semver(&latest) > parse_semver(from_v) => {
+                outdated_count += 1;
+                util::println_stdout(&format!("  {}  \x1b[1;33m{} -> {}\x1b[0m", service, pinned, format!("{name}@{latest}")));
+                let note = changelog_note(name, &latest, from_v, address.as_deref());
+                if !note.is_empty() {
+                    for line in note.lines() {
+                        util::println_stdout(&format!("     {}", line));
+                    }
+                }
+                util::println_stdout(&format!("     update: `eco lxs update {name}`\n"));
+            }
+            Ok(Some(latest)) => {
+                util::println_stdout(&format!("  {}  {}  (\x1b[0;32mup to date\x1b[0m, latest {name}@{latest})", service, pinned));
+            }
+            _ => {
+                util::println_stdout(&format!("  {}  {}  (latest unknown — registry unreachable)", service, pinned));
+            }
+        }
+    }
+
+    if outdated_count == 0 {
+        util::println_stdout("\n[eco lxs] All composed LXS are up to date.");
+    } else {
+        util::println_stdout(&format!(
+            "\n[eco lxs] {outdated_count} update(s) available. Run `eco lxs update [name]` to bump, then `eco up --remote`."
+        ));
+    }
+    Ok(())
+}
+
+/// `eco lxs remove <name>` — remove a composed LXS service block from
+/// ecompose.yml.
+fn run_lxs_remove(args: &[String]) -> Result<(), String> {
+    let name = args.iter().find(|a| !a.starts_with('-')).cloned().ok_or_else(|| {
+        "usage: eco lxs remove <name>\nRemoves the composed LXS service (e.g. auth-backend) from ecompose.yml.".to_string()
+    })?;
+
+    let cwd = util::current_dir();
+    let manifest_path = find_estate_ecompose(&cwd)?;
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
+
+    // Find the service block: a 2-space `name:` line; capture through the next
+    // sibling (2-space key) or a top-level key or EOF.
+    let header = format!("  {name}:");
+    let mut start: Option<usize> = None;
+    let mut end: Option<usize> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let t = line.trim_end_matches('\r');
+        if start.is_none() && t == header {
+            start = Some(idx);
+            continue;
+        }
+        if let Some(s) = start {
+            if end.is_none() && idx > s {
+                let is_sibling = t.len() >= 2 && t.starts_with("  ") && !t.starts_with("    ") && t.ends_with(':');
+                let is_top = !t.trim_start().is_empty() && !t.starts_with(' ') && !t.starts_with('\t');
+                if is_sibling || is_top {
+                    end = Some(idx);
+                    break;
+                }
+            }
+        }
+    }
+    let Some(s) = start else {
+        return Err(format!("No service named \"{name}\" in {}", manifest_path.display()));
+    };
+    let e = end.unwrap_or(lines.len());
+    // Trim a trailing blank line that belonged to the removed block.
+    let mut new_lines = Vec::new();
+    new_lines.extend_from_slice(&lines[..s]);
+    let mut tail_start = e;
+    while tail_start < lines.len() && lines[tail_start].trim().is_empty() {
+        tail_start += 1;
+    }
+    new_lines.extend_from_slice(&lines[tail_start..]);
+
+    // Also drop this service from every `estates.<name>.services:` list and
+    // from a top-level `auth:` / `<name>:` config block (auth-backend removal
+    // should not leave a dangling auth: email_verification section).
+    let mut filtered = Vec::new();
+    let mut in_services_list = false;
+    let mut in_config_block: Option<String> = None;
+    let mut i = 0;
+    while i < new_lines.len() {
+        let line = new_lines[i].clone();
+        let t = line.trim_end_matches('\r');
+        // top-level config block for the removed lxs (e.g. `auth:`)
+        if let Some(rest) = t.strip_suffix(':') {
+            let key = rest.trim();
+            if key == name && !line.starts_with(' ') && !line.starts_with('\t') {
+                in_config_block = Some(key.to_string());
+                i += 1;
+                continue;
+            }
+        }
+        if let Some(_blk) = &in_config_block {
+            // skip this block's indented lines until a top-level key
+            if t.is_empty() {
+                filtered.push(line.clone());
+            } else if line.starts_with(' ') || line.starts_with('\t') {
+                // skip (part of the config block)
+            } else {
+                in_config_block = None;
+                continue; // re-process this line as a normal line
+            }
+            i += 1;
+            continue;
+        }
+        // services list entry
+        if t.trim() == format!("- {name}") {
+            i += 1;
+            continue;
+        }
+        // detect `services:` under an estates block by scanning: we simply
+        // remove `- <name>` lines under any indented `services:` that follows
+        // a top-level `estates:`. A simple approach: remember when a line is
+        // exactly `    services:` (4-space, under estates.<x>) and drop
+        // `      - <name>` entries until dedent.
+        if t == "    services:" {
+            in_services_list = true;
+            filtered.push(line.clone());
+            i += 1;
+            continue;
+        }
+        if in_services_list {
+            if t.starts_with("      ") {
+                if t.trim() == format!("- {name}") {
+                    i += 1;
+                    continue;
+                }
+                filtered.push(line.clone());
+                i += 1;
+                continue;
+            } else {
+                in_services_list = false;
+                continue;
+            }
+        }
+        filtered.push(line.clone());
+        i += 1;
+    }
+
+    let mut new_content = filtered.join("\n");
+    // Collapse multiple trailing blank lines at the very end.
+    while new_content.ends_with("\n\n") {
+        new_content.pop();
+    }
+    new_content = new_content.trim_end().to_string();
+    new_content.push('\n');
+
+    std::fs::write(&manifest_path, new_content).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    println!("[eco lxs] Removed {name} from {}", manifest_path.display());
+    Ok(())
+}
+
 fn run_lxs_add(args: &[String]) -> Result<(), String> {
     let mut address: Option<String> = None;
     let mut arch = "linux/amd64".to_string();
@@ -1515,11 +1927,14 @@ pub fn run_lxs(args: &[String]) -> Result<(), String> {
         "pull" => run_lxs_pull(&args[1..]),
         "verify" => run_lxs_verify(&args[1..]),
         "add" => run_lxs_add(&args[1..]),
+        "update" => run_lxs_update(&args[1..]),
+        "outdated" => run_lxs_outdated(&args[1..]),
+        "remove" | "rm" => run_lxs_remove(&args[1..]),
         "estates" => run_lxs_estates(&args[1..]),
         "init-registry" => run_lxs_init_registry(&args[1..]),
         "new" | "init" => run_lxs_new(&args[1..]),
         "help" | "-h" | "--help" => {
-            println!("eco lxs\n\nLXS (Linux Service) — versioned executable capabilities.\n\nUsage:\n  eco lxs new <name>                       scaffold a domain repo from a template\n  eco lxs build [path] [--arch linux/amd64,linux/arm64]\n  eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]  (auto patch bump)\n  eco lxs add <name>[@<version>] [--address <registry>]   compose an LXS binary\n  eco lxs add .                            register the current folder as a source LXS\n  eco lxs estates                          list estates on this machine\n  eco lxs init-registry [folder]           create a registry repo (git init + contract)\n  eco lxs search [query]\n  eco lxs list\n  eco lxs pull <name>@<version> [--arch linux/amd64]\n  eco lxs verify <name>@<version>\n");
+            println!("eco lxs\n\nLXS (Linux Service) — versioned executable capabilities.\n\nUsage:\n  eco lxs new <name>                       scaffold a domain repo from a template\n  eco lxs build [path] [--arch linux/amd64,linux/arm64]\n  eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]  (auto patch bump)\n  eco lxs add <name>[@<version>] [--address <registry>]   compose an LXS binary\n  eco lxs add .                            register the current folder as a source LXS\n  eco lxs update [name] [--address <registry>]   bump composed LXS to the latest\n  eco lxs outdated [--address <registry>]   show composed LXS vs latest (+ changelog)\n  eco lxs remove <name>                 remove a composed LXS service from ecompose.yml\n  eco lxs estates                          list estates on this machine\n  eco lxs init-registry [folder]           create a registry repo (git init + contract)\n  eco lxs search [query]\n  eco lxs list\n  eco lxs pull <name>@<version> [--arch linux/amd64]\n  eco lxs verify <name>@<version>\n");
             Ok(())
         }
         other => Err(format!("Unknown eco lxs subcommand: {other}\n\nRun \"eco lxs help\" for usage.")),
