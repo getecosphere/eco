@@ -182,7 +182,52 @@ Notes:
 - Auth binary reuse: **one 25 MB file, zero rebuilds**, across every framework
   and both local + remote surfaces.
 
-## 8. Reproduction
+## 8. Auth slim (v1.1.0) + LXS update management
+
+### 8.1 auth@1.1.0 — pure identity
+
+Avatar/cover upload, file serving, S3 storage and image/webp processing were
+removed from auth. Auth now only owns identity: login, register, JWT, email
+verification, transactional mail, `username`/`email`/`name`/`role`.
+
+| Binary | before | after | delta |
+|---|---|---|---|
+| auth linux/amd64 | 25.0 MB | **10.7 MB** | **−57%** |
+| auth darwin/aarch64 | 22.3 MB | **9.4 MB** | **−58%** |
+| profile linux/amd64 | 13.5 MB | **13.7 MB** | +0.1 MB (avatar upload) |
+| **net (auth+profile)** | **38.5 MB** | **24.4 MB** | **−14.1 MB** |
+
+Avatar/cover now belong to **profile@1.1.0**, which proxies uploads to the
+`storage` LXS (no S3/image deps added to profile — +0.1 MB only). Auth keeps
+MongoDB (the user database) and dropped `image`/`webp`/`aws-sdk-s3`.
+
+Verified live on CT 101: register + login OK, root `/` 200.
+
+### 8.2 LXS update management
+
+`eco up` (dev + remote, **on by default**) checks every composed `lxs:`
+service against the registry and highlights newer versions with a changelog
+"what changed" note:
+
+```text
+[eco] LXS updates available:
+  auth-backend  auth@1.0.0 -> auth@1.1.0   run `eco lxs update auth`
+     1.1.0 — pure identity (2026-08-16)
+       - Removed avatar/cover-photo upload, file serving, and storage ...
+```
+
+Turn it off to focus on the current versions or speed up deploys:
+`eco up --no-lxs-check` or `ECO_NO_LXS_CHECK=1`.
+
+Standalone commands (no `eco up` needed):
+
+| Command | What it does |
+|---|---|
+| `eco lxs outdated` | current vs latest for every composed LXS + changelog; reports "all up to date" |
+| `eco lxs update [name]` | bump one (or all) composed LXS to the latest in ecompose.yml |
+| `eco lxs remove <name>` | remove a composed LXS service (+ estates list + config block) |
+
+## 9. Reproduction
 
 ```bash
 # scaffold any framework project, then:
@@ -194,5 +239,6 @@ eco up dev          # local: curl register/login on the assigned auth port
 eco up --remote     # CT 101: systemd runs the shipped binaries
 eco serve <sub> --port <local>   # live public URL
 ```
+
 
 The 9 proof estates live at `~/ar-rahman/proofs/proof-*`.
