@@ -388,6 +388,7 @@ pub fn build_caddyfile(
     auth_ui_port: Option<u16>,
     profile_port: Option<u16>,
     profile_ui_port: Option<u16>,
+    storage_port: Option<u16>,
 ) -> String {
     let mut caddy = format!(
         "{{\n\tadmin off\n}}\n\n:{gateway_port} {{\n"
@@ -429,6 +430,10 @@ pub fn build_caddyfile(
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{profile_port}\n\t\t}}\n"));
         caddy.push_str("\t\thandle /api/users/* {\n");
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{profile_port}\n\t\t}}\n"));
+    }
+    if let Some(storage_port) = storage_port {
+        caddy.push_str("\t\thandle /api/storage/* {\n");
+        caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{storage_port}\n\t\t}}\n"));
     }
     if let Some((name, port)) = api_service_port {
         caddy.push_str(&format!("\t\thandle /api/{name}/* {{\n"));
@@ -560,7 +565,55 @@ pub fn generate_all_auth(
                 .map(|l| l.to_string())
                 .collect();
             lines.push(format!("AUTH_BASE_URL=http://127.0.0.1:{auth_port}/api"));
+            // profile-backend proxies avatar uploads to the storage LXS.
+            let storage_port = deploys
+                .iter()
+                .filter(|d| d.http)
+                .find(|d| d.name.contains("storage"))
+                .map(|d| d.port);
+            if let Some(sp) = storage_port {
+                lines.push(format!("STORAGE_BASE_URL=http://127.0.0.1:{sp}/api"));
+                // Browser-reachable content URL for avatar/cover images.
+                if !expose_hostname.is_empty() {
+                    lines.push(format!("STORAGE_PUBLIC_URL=https://{}", expose_hostname));
+                }
+            }
             env_files.insert(profile_name.clone(), lines.join("\n"));
+        }
+    }
+    // storage-backend LXS needs S3/MinIO config. Defaults to the managed
+    // MinIO CT creds (MINIO_ROOT_USER/PASSWORD) — the same values
+    // /etc/eco/minio.env holds. An estate overrides via env.
+    if let Some(storage_name) = deploys
+        .iter()
+        .find(|d| d.name.contains("storage"))
+        .map(|d| d.name.clone())
+    {
+        if let Some(env) = env_files.get_mut(&storage_name) {
+            let s3_endpoint = std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://192.168.88.60:9000".to_string());
+            let s3_region = std::env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+            let s3_bucket = std::env::var("S3_BUCKET").unwrap_or_else(|_| "eco-storage".to_string());
+            let s3_key = std::env::var("MINIO_ROOT_USER").or_else(|_| std::env::var("S3_ACCESS_KEY")).unwrap_or_else(|_| "ecoadmin".to_string());
+            let s3_secret = std::env::var("MINIO_ROOT_PASSWORD")
+                .or_else(|_| std::env::var("S3_SECRET_KEY"))
+                .unwrap_or_else(|_| "d39539934625f32d2262676dfb84a65db6ad14ba889895dce5ff98612ea89bf6".to_string());
+            let mut lines: Vec<String> = env
+                .lines()
+                .filter(|l| {
+                    !l.trim_start().starts_with("S3_ENDPOINT=")
+                        && !l.trim_start().starts_with("S3_REGION=")
+                        && !l.trim_start().starts_with("S3_BUCKET=")
+                        && !l.trim_start().starts_with("S3_ACCESS_KEY=")
+                        && !l.trim_start().starts_with("S3_SECRET_KEY=")
+                })
+                .map(|l| l.to_string())
+                .collect();
+            lines.push(format!("S3_ENDPOINT={s3_endpoint}"));
+            lines.push(format!("S3_REGION={s3_region}"));
+            lines.push(format!("S3_BUCKET={s3_bucket}"));
+            lines.push(format!("S3_ACCESS_KEY={s3_key}"));
+            lines.push(format!("S3_SECRET_KEY={s3_secret}"));
+            env_files.insert(storage_name.clone(), lines.join("\n"));
         }
     }
     // systemd EnvironmentFile must point at the .env file path on the CT.
@@ -593,7 +646,7 @@ pub fn generate_all_auth(
             deploys
                 .iter()
                 .filter(|d| d.http)
-                .find(|d| !d.name.contains("auth") && !d.name.contains("auth-ui") && !d.name.contains("auth_ui") && !d.name.contains("profile") && !d.name.contains("profile-ui") && !d.name.contains("profile_ui"))
+                .find(|d| !d.name.contains("auth") && !d.name.contains("auth-ui") && !d.name.contains("auth_ui") && !d.name.contains("profile") && !d.name.contains("profile-ui") && !d.name.contains("profile_ui") && !d.name.contains("storage"))
                 .map(|d| d.port)
         })
         .unwrap_or(0);
@@ -608,6 +661,7 @@ pub fn generate_all_auth(
                     && d.name != format!("{project}-frontend")
                     && !d.name.contains("auth")
                     && !d.name.contains("profile")
+                    && !d.name.contains("storage")
             })
             .map(|d| (d.name.clone(), d.port));
         // auth-ui LXS (signin/signup pages) routes /signin, /signup, /static.
@@ -628,7 +682,13 @@ pub fn generate_all_auth(
             .filter(|d| d.http)
             .find(|d| d.name.contains("profile-ui") || d.name.contains("profile_ui"))
             .map(|d| d.port);
-        let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port, auth_ui_port, profile_port, profile_ui_port);
+        // storage-backend LXS routes /api/storage/*.
+        let storage_port = deploys
+            .iter()
+            .filter(|d| d.http)
+            .find(|d| d.name.contains("storage"))
+            .map(|d| d.port);
+        let caddy = build_caddyfile(expose_hostname, gateway_port, frontend_port, auth_port, api_port, auth_ui_port, profile_port, profile_ui_port, storage_port);
         files.push(("Caddyfile".to_string(), caddy));
         // Record the gateway port so host-side exposure can find it.
         files.push((".env/gateway.env".to_string(), format!("PORT={gateway_port}\n")));
@@ -674,7 +734,7 @@ pub fn generate_all_auth(
                 // resource path (e.g. /marketplace/products) to this base.
                 format!("{origin}/api/v1")
             };
-            let public_auth = format!("{origin}/api/auth");
+            let public_auth = format!("{origin}/api");
             let public_profile = format!("{origin}/api/profile");
             if let Some(env) = env_files.get_mut(&frontend.name) {
                 *env = inject_public_urls(env, &public_api, &public_auth, &public_profile);
