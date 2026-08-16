@@ -72,6 +72,28 @@ pub fn resolve_service_exec(
         let bin_path = format!("{artifacts}/{}/bin/{bin}", service.name);
         return Ok((bin_path, release_dir.to_string(), true));
     }
+    // Source Go service: prebuilt static binary shipped as
+    // artifacts/<service>/bin/<name> (built on the dev machine for linux/amd64).
+    if service.runtimes.iter().any(|r| r == "go") {
+        let bin = if !service.binary.is_empty() {
+            service.binary.clone()
+        } else {
+            service.name.clone()
+        };
+        let bin_path = format!("{artifacts}/{}/bin/{bin}", service.name);
+        return Ok((bin_path, release_dir.to_string(), true));
+    }
+    // Spring Boot service: built jar shipped as artifacts/<service>/<name>.jar.
+    if service.runtimes.iter().any(|r| r == "java@17" || r == "maven") {
+        let jar = if !service.binary.is_empty() {
+            service.binary.clone()
+        } else {
+            service.name.clone()
+        };
+        let jar_path = format!("{artifacts}/{}/{jar}.jar", service.name);
+        let exec = format!("java -jar {}", jar_path);
+        return Ok((exec, release_dir.to_string(), true));
+    }
     // LXS-only service (no runtimes declared): a registry binary shipped into
     // artifacts/<service.name>/bin/<name>.
     if !service.lxs.is_empty() {
@@ -130,6 +152,8 @@ pub fn resolve_service_exec(
 pub fn env_var_for(service: &ecompose::Service, default: &str) -> String {
     if service.runtimes.iter().any(|r| r == "rust") {
         "SERVER_PORT".to_string()
+    } else if service.runtimes.iter().any(|r| r == "go") {
+        "PORT".to_string()
     } else if service.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@")) {
         "PORT".to_string()
     } else if !service.lxs.is_empty() {

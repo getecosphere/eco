@@ -2463,7 +2463,7 @@ fn deploy_estate(
     let rust_services: Vec<&ecompose::Service> = deployment
         .services
         .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+        .filter(|s| !s.path.is_empty() && (s.runtimes.iter().any(|r| r == "rust") || s.runtimes.iter().any(|r| r == "go")))
         .collect();
 
     // Remote mode (`eco up --remote`): the Rust binaries were cross-compiled on
@@ -3587,7 +3587,50 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         frontend_targets.push((service.clone(), rel, candidate));
     }
     if rust_targets.is_empty() && frontend_targets.is_empty() {
-        return Err("eco up --remote found no Rust or Node services in ecompose.yml to build and ship.".to_string());
+        // Not necessarily an error: an estate may ship only Go/Spring/LXS
+        // services with no Rust or Node. Continue so those still deploy.
+        print_step("no Rust or Node services to build (continuing with Go/Spring/LXS artifacts)");
+    }
+
+    // Go services: prebuilt static binaries. `go build` targets linux/amd64
+    // directly (Go cross-compiles out of the box with CGO_ENABLED=0).
+    let mut go_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
+    for service in deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "go"))
+    {
+        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let candidate = deployment.project_dir.join(&rel);
+        if !candidate.join("go.mod").is_file() {
+            return Err(format!(
+                "Cannot find local Go module for service {} (looked at {})",
+                service.name,
+                candidate.display()
+            ));
+        }
+        go_targets.push((service.clone(), rel, candidate));
+    }
+
+    // Spring Boot services: built fat jar shipped to the CT.
+    let mut spring_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
+    for service in deployment
+        .services
+        .iter()
+        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "java@17" || r == "maven"))
+    {
+        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let candidate = deployment.project_dir.join(&rel);
+        if !candidate.join("pom.xml").is_file() {
+            return Err(format!(
+                "Cannot find local Maven project for service {} (looked at {})",
+                service.name,
+                candidate.display()
+            ));
+        }
+        spring_targets.push((service.clone(), rel, candidate));
     }
 
     if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
@@ -3607,6 +3650,12 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 builder_name()
             ));
             print_step(&format!("  local source: {}", dir.display()));
+        }
+        for (service, _, dir) in &go_targets {
+            print_step(&format!("cross-compile Go {} from {} and ship binary", service.name, dir.display()));
+        }
+        for (service, _, dir) in &spring_targets {
+            print_step(&format!("build Spring Boot {} from {} and ship jar", service.name, dir.display()));
         }
         return Ok(());
     }
@@ -3757,8 +3806,67 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         let hash = compute_rust_input_hash(dir)?;
         hash_lines.push(format!("{rel} {hash}"));
     }
-    if artifacts.is_empty() && frontend_targets.is_empty() {
-        return Err("no Rust binaries or frontend dist were produced; aborting remote deploy.".to_string());
+    if artifacts.is_empty() && frontend_targets.is_empty() && go_targets.is_empty() && spring_targets.is_empty() {
+        return Err("no Rust/Go/Spring binaries or frontend dist were produced; aborting remote deploy.".to_string());
+    }
+
+    // Cross-compile Go services to a static linux/amd64 binary (Go builds
+    // cross-platform out of the box with CGO_ENABLED=0).
+    for (service, rel, dir) in &go_targets {
+        let bin_name = if !service.binary.is_empty() { service.binary.clone() } else { service.name.clone() };
+        print_step(&format!("Cross-compiling Go {} for linux/amd64", service.name));
+        let out_bin = std::env::temp_dir()
+            .join(format!("eco-go-{}-{}", service.name, std::process::id()))
+            .join(&bin_name);
+        std::fs::create_dir_all(out_bin.parent().unwrap()).map_err(|e| e.to_string())?;
+        let mut go_env: Vec<(String, String)> = vec![
+            ("GOOS".to_string(), "linux".to_string()),
+            ("GOARCH".to_string(), "amd64".to_string()),
+            ("CGO_ENABLED".to_string(), "0".to_string()),
+        ];
+        // Merge any build_env that makes sense (e.g. injected .env is not needed
+        // for Go builds — the binary reads env at runtime).
+        for (k, v) in build_env.iter() {
+            if k == "PATH" {
+                go_env.push((k.clone(), v.clone()));
+            }
+        }
+        run_command_env("go", &["build".to_string(), "-o".to_string(), out_bin.display().to_string(), ".".to_string()], dir, &go_env)?;
+        if !out_bin.is_file() {
+            return Err(format!("Go build for {} did not produce {}", service.name, out_bin.display()));
+        }
+        artifacts.push((service.name.clone(), bin_name, out_bin));
+        let hash = compute_rust_input_hash(dir).unwrap_or_else(|_| "go".to_string());
+        hash_lines.push(format!("{rel} {hash}"));
+    }
+
+    // Build Spring Boot services: `mvn package -DskipTests` produces the fat
+    // jar, shipped to the CT where `java -jar` runs it.
+    let mut spring_artifacts: Vec<(String, PathBuf)> = Vec::new();
+    for (service, rel, dir) in &spring_targets {
+        let jar_name = if !service.binary.is_empty() { service.binary.clone() } else { service.name.clone() };
+        print_step(&format!("Building Spring Boot {} (mvn package)", service.name));
+        run_command_env("mvn", &["package".to_string(), "-DskipTests".to_string(), "-q".to_string()], dir, &build_env)?;
+        // Find the fat jar (exclude *-original and *-plain).
+        let target_dir = dir.join("target");
+        let jar = std::fs::read_dir(&target_dir)
+            .map_err(|e| format!("read {}: {e}", target_dir.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "jar").unwrap_or(false))
+            .filter(|p| {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                !name.contains("original") && !name.contains("plain") && name != ".jar"
+            })
+            .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .ok_or_else(|| format!("No fat jar produced by mvn package for {}", service.name))?;
+        let jar_artifacts_dir = std::env::temp_dir().join(format!("eco-spring-artifacts-{}-{}", service.name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&jar_artifacts_dir);
+        std::fs::create_dir_all(&jar_artifacts_dir).map_err(|e| e.to_string())?;
+        std::fs::copy(&jar, jar_artifacts_dir.join(format!("{jar_name}.jar"))).map_err(|e| format!("copy jar: {e}"))?;
+        spring_artifacts.push((service.name.clone(), jar_artifacts_dir));
+        let hash = compute_rust_input_hash(dir).unwrap_or_else(|_| "spring".to_string());
+        hash_lines.push(format!("{rel} {hash}"));
     }
 
     // Build each Node/frontend service on the local Linux builder VM and
@@ -3766,6 +3874,9 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // skip). npm native modules are linux-x64 because the builder is x86_64.
     let mut frontend_artifacts: Vec<(String, PathBuf)> = Vec::new();
     let mut frontend_hash_lines: Vec<String> = Vec::new();
+    // Spring Boot fat jars ship through the same per-service artifact dir
+    // mechanism (tarballed into artifacts/<service>/).
+    frontend_artifacts.extend(spring_artifacts);
     for (service, rel, dir) in &frontend_targets {
         if !builder_available() {
             return Err(format!(
@@ -4381,7 +4492,7 @@ fn install_remote_rust_binaries_release(
     let rust_services: Vec<&ecompose::Service> = deployment
         .services
         .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
+        .filter(|s| !s.path.is_empty() && (s.runtimes.iter().any(|r| r == "rust") || s.runtimes.iter().any(|r| r == "go")))
         .collect();
     for service in rust_services {
         // binary: names the artifact; fall back to lxs name or service name.

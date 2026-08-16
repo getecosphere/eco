@@ -279,8 +279,13 @@ is_token_satisfied() {
     ffmpeg)
       need_cmd ffmpeg
       ;;
-    golang|golang@*)
+    golang|golang@*|go)
       need_cmd go
+      ;;
+    static)
+      # Leptos/static frontends are served by python3 http.server — built-in
+      # on macOS and Debian; nothing extra to provision.
+      need_cmd python3
       ;;
     rust)
       # Rust is only provisioned on the developer machine (build farm); the
@@ -845,8 +850,11 @@ OVERRIDE
       redis-cli -p 6379 ping >/dev/null 2>&1 \
         || fail "Redis did not start on port 6379"
       ;;
-    golang|golang@*)
+    golang|golang@*|go)
       apt_install golang-go
+      ;;
+    static)
+      need_cmd python3 || apt_install python3
       ;;
     rust)
       ensure_apt_repo_prereqs
@@ -1012,8 +1020,11 @@ install_token_macos() {
       start_managed_redis "$redis_server"
       ok "Managed Redis ready: $redis_server"
       ;;
-    golang|golang@*)
+    golang|golang@*|go)
       brew_install_formula go
+      ;;
+    static)
+      need_cmd python3 || brew_install_formula python@3.12
       ;;
     rust)
       install_rust_system_wide
