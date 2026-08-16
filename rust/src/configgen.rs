@@ -279,6 +279,9 @@ pub fn build_env_files(
 ) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let scope = std::env::var("ECO_REGISTRY_SCOPE").unwrap_or_else(|_| hostname());
+    // One shared JWT for the whole estate so every service can validate the
+    // tokens auth issues (auth, profile, chat, notifications, ...).
+    let shared_jwt = configgen_shared_jwt(&scope, project);
     for s in deploys {
         let port = ports.get(&s.name).copied().unwrap_or(0);
         let mut env = String::new();
@@ -316,7 +319,7 @@ pub fn build_env_files(
             .lines()
             .any(|l| l.strip_prefix("JWT_SECRET=").map(|v| !v.trim().is_empty()).unwrap_or(false));
         if !jwt_present {
-            let jwt = configgen_shared_jwt(&scope, project);
+            let jwt = shared_jwt.clone();
             let mut lines: Vec<String> = env
                 .lines()
                 .filter(|l| !l.trim().starts_with("JWT_SECRET="))
