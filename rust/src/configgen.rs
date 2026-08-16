@@ -355,7 +355,10 @@ pub fn build_caddyfile(
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
         caddy.push_str("\t\thandle /signup {\n");
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
-        caddy.push_str("\t\thandle /static/* {\n");
+        // auth-ui's own stylesheet (embedded, served at /static/auth-ui.css).
+        // Other /static/* (the estate's own frontend assets) stay with the
+        // frontend below.
+        caddy.push_str("\t\thandle /static/auth-ui.css {\n");
         caddy.push_str(&format!("\t\t\treverse_proxy 127.0.0.1:{up}\n\t\t}}\n"));
     }
     if let Some((name, port)) = api_service_port {
