@@ -4458,7 +4458,16 @@ fn deploy_generate_config_host(ctid: &str, deployment: &ProjectDeployment, host_
     // v2 manifest: the estate's public hostname lives under estates.<main>.hostname
     // (not the legacy top-level expose: block).
     let expose_hostname = main_estate.map(|e| e.hostname.clone()).unwrap_or_default();
-    let (files, units) = configgen::generate_all(&deployment.project, host_release_dir, ct_release_dir, &svc, &expose_hostname)?;
+    // auth.email_verification.enabled from ecompose.yml (mirrors configure.sh).
+    let auth_email_verification_enabled = ecompose_nested_auth_verification_enabled(&deployment.content);
+    let (files, units) = configgen::generate_all_auth(
+        &deployment.project,
+        host_release_dir,
+        ct_release_dir,
+        &svc,
+        &expose_hostname,
+        auth_email_verification_enabled.as_deref(),
+    )?;
     // Push .env files + Caddyfile into the release dir.
     for (rel, content) in &files {
         let target = format!("{ct_release_dir}/{rel}");
@@ -4659,6 +4668,37 @@ fn install_remote_frontend_artifacts_release(
         print_step(&format!("[CT {ctid}] Installed release frontend dist: {}", service.name));
     }
     Ok(bun_compiled)
+}
+
+/// Read `auth.email_verification.enabled` from ecompose.yml content (mirrors
+/// configure.sh's ecompose_nested_value for the auth block).
+fn ecompose_nested_auth_verification_enabled(content: &str) -> Option<String> {
+    let mut in_auth = false;
+    let mut in_email = false;
+    for raw in content.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line == "auth:" {
+            in_auth = true;
+            continue;
+        }
+        if in_auth && line == "  email_verification:" {
+            in_email = true;
+            continue;
+        }
+        if in_auth && !line.starts_with(' ') && line.contains(':') && line != "auth:" {
+            break;
+        }
+        if in_auth && in_email {
+            if let Some(rest) = line.trim_start().strip_prefix("enabled:") {
+                let v = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                return if v.is_empty() { None } else { Some(v) };
+            }
+        }
+    }
+    None
 }
 
 /// Install `lxs:` services into the local dev workspace, mirroring the CT

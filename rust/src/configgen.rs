@@ -201,14 +201,14 @@ pub fn build_systemd_units(
 /// (SERVER_PORT for rust, PORT for node/frontend) and JWT_SECRET are filled
 /// when the contract does not provide them.
 pub fn build_env_files(
-    services: &[ServiceDeploy],
+    deploys: &[ServiceDeploy],
     project: &str,
     ports: &HashMap<String, u16>,
     registry_values: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let scope = std::env::var("ECO_REGISTRY_SCOPE").unwrap_or_else(|_| hostname());
-    for s in services {
+    for s in deploys {
         let port = ports.get(&s.name).copied().unwrap_or(0);
         let mut env = String::new();
         for line in s.env_example.lines() {
@@ -363,6 +363,21 @@ pub fn generate_all(
     services: &[ecompose::Service],
     expose_hostname: &str,
 ) -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
+    generate_all_auth(project, read_dir, write_dir, services, expose_hostname, None)
+}
+
+/// `generate_all` with an optional `auth.email_verification.enabled` value from
+/// ecompose.yml (mirrors configure.sh's ecompose_nested_value lookup). When the
+/// estate explicitly disables email verification, the value is written into the
+/// auth service's .env so the LXS binary honors it without operator secrets.
+pub fn generate_all_auth(
+    project: &str,
+    read_dir: &str,
+    write_dir: &str,
+    services: &[ecompose::Service],
+    expose_hostname: &str,
+    auth_email_verification_enabled: Option<&str>,
+) -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
     let mut deploys: Vec<ServiceDeploy> = Vec::new();
     let mut ports: HashMap<String, u16> = HashMap::new();
     for svc in services {
@@ -398,7 +413,26 @@ pub fn generate_all(
             database,
         });
     }
-    let env_files = build_env_files(&deploys, project, &ports, &HashMap::new());
+    let mut env_files = build_env_files(&deploys, project, &ports, &HashMap::new());
+    // auth.email_verification.enabled=false from ecompose.yml: write it into
+    // the auth service's env so the LXS binary skips email verification
+    // (the default is required=true). Mirrors configure.sh's behavior.
+    if let Some(enabled) = auth_email_verification_enabled {
+        if let Some(auth_name) = deploys.iter().find(|d| d.name.contains("auth")).map(|d| d.name.clone()) {
+            if let Some(env) = env_files.get_mut(&auth_name) {
+                let v = enabled.trim();
+                if !v.is_empty() {
+                    let mut lines: Vec<String> = env
+                        .lines()
+                        .filter(|l| !l.trim_start().starts_with("EMAIL_VERIFICATION_REQUIRED="))
+                        .map(|l| l.to_string())
+                        .collect();
+                    lines.push(format!("EMAIL_VERIFICATION_REQUIRED={v}"));
+                    env_files.insert(auth_name.clone(), lines.join("\n"));
+                }
+            }
+        }
+    }
     // systemd EnvironmentFile must point at the .env file path on the CT.
     let mut env_paths: HashMap<String, String> = HashMap::new();
     for name in env_files.keys() {
