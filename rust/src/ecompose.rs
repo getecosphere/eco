@@ -712,9 +712,12 @@ pub fn parse_domains(content: &str) -> Vec<(String, Option<String>)> {
 pub fn unique_domains_from_ecompose(content: &str, project: &str) -> Vec<String> {
     let mut domains: Vec<String> = vec![project.to_string()];
     let mut in_domains = false;
-    let mut in_services = false;
-    let mut current_service = String::new();
 
+    // In ecompose v2 a `path:` service points INSIDE the estate repo (relative
+    // to the repo root) — it is NOT an external repo to clone. Only a legacy
+    // `domains:` block names sibling repos. Scanning path segments as domains
+    // was the v1 mental model and broke v2 manifests (e.g. `path: frontend`
+    // was treated as a missing git remote named "frontend").
     for raw in content.split('\n') {
         let line = raw.trim_end_matches('\r').trim_end();
         if line.is_empty() || line.trim_start().starts_with('#') {
@@ -722,15 +725,9 @@ pub fn unique_domains_from_ecompose(content: &str, project: &str) -> Vec<String>
         }
         if line == "domains:" {
             in_domains = true;
-            in_services = false;
             continue;
         }
-        if line == "services:" {
-            in_services = true;
-            in_domains = false;
-            continue;
-        }
-        if in_domains && starts_top_level_key(line) {
+        if starts_top_level_key(line) {
             in_domains = false;
         }
         if in_domains {
@@ -740,27 +737,6 @@ pub fn unique_domains_from_ecompose(content: &str, project: &str) -> Vec<String>
                 let value = raw_value.split(':').next().unwrap_or("").trim().to_string();
                 if !value.is_empty() && !domains.contains(&value) {
                     domains.push(value);
-                }
-            }
-            continue;
-        }
-        if in_services && starts_top_level_key(line) {
-            break;
-        }
-        if in_services {
-            if let Some(name) = match_indented_key(line, 2) {
-                current_service = name;
-                continue;
-            }
-            if !current_service.is_empty() {
-                if let Some(path_val) = match_indented_value(line, 4, "path") {
-                    let value = util::strip_quotes(path_val.trim());
-                    let first_segment = value.split('/').next().unwrap_or("").to_string();
-                    // "." means the project root itself is the service — not a
-                    // separate domain to clone.
-                    if !first_segment.is_empty() && first_segment != "." && !domains.contains(&first_segment) {
-                        domains.push(first_segment);
-                    }
                 }
             }
         }
