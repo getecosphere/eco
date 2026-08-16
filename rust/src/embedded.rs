@@ -161,12 +161,6 @@ pub fn package_root() -> PathBuf {
     bundled_root()
 }
 
-/// Resolve the absolute path used by startproject for the ecology mark.
-pub fn ecology_mark_path() -> PathBuf {
-    let root = ensure_bundled().unwrap_or_else(|_| bundled_root());
-    root.join("assets").join("ecology-mark.webp")
-}
-
 pub fn path_contains_segment(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "..")
 }

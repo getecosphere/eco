@@ -1272,7 +1272,7 @@ fn find_estate_ecompose(cwd: &Path) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "No ecompose.yml found from {} (walked up 8 levels) — run \"eco adopt\" first, or cd into an estate/project directory.",
+        "No ecompose.yml found from {} (walked up 8 levels) — run \"eco init\" first, or cd into an estate/project directory.",
         cwd.display()
     ))
 }

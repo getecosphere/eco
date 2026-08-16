@@ -1,4 +1,4 @@
-use crate::commands::adopt;
+use crate::detect;
 use crate::checklist;
 use crate::ecompose;
 use crate::repos;
@@ -117,9 +117,9 @@ fn service_already_declared(lines: &[String], service_name: &str) -> bool {
     lines.iter().any(|l| l == &target)
 }
 
-pub fn insert_services(content: &str, services: &[adopt::DetectedService]) -> (String, Vec<adopt::DetectedService>) {
+pub fn insert_services(content: &str, services: &[detect::DetectedService]) -> (String, Vec<detect::DetectedService>) {
     let mut lines = split_lines(content);
-    let new_services: Vec<adopt::DetectedService> = services
+    let new_services: Vec<detect::DetectedService> = services
         .iter()
         .filter(|s| !service_already_declared(&lines, &s.name))
         .cloned()
@@ -130,7 +130,7 @@ pub fn insert_services(content: &str, services: &[adopt::DetectedService]) -> (S
 
     let mut rendered: Vec<String> = Vec::new();
     for service in &new_services {
-        rendered.push(adopt::render_service_block(service));
+        rendered.push(detect::render_service_block(service));
         rendered.push(String::new());
     }
 
@@ -314,7 +314,7 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
     let manifest_path = ecompose::resolve_ecompose_file(".", &cwd)?;
     if !path_exists(&manifest_path) {
         return Err(format!(
-            "No ecompose.yml found at {} -- run \"eco adopt\" first to create one.",
+            "No ecompose.yml found at {} -- run \"eco init\" first to create one.",
             manifest_path.display()
         ));
     }
@@ -403,10 +403,10 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
 
     let mut content = initial_content.clone();
     let mut domains_to_add: Vec<String> = Vec::new();
-    let mut all_added_services: Vec<adopt::DetectedService> = Vec::new();
+    let mut all_added_services: Vec<detect::DetectedService> = Vec::new();
 
     for resolved in &resolved_targets {
-        let services = adopt::discover_services_at(&resolved.services_label, &resolved.service_dir);
+        let services = detect::discover_services_at(&resolved.services_label, &resolved.service_dir);
         let real_rel_path = resolved
             .service_dir
             .strip_prefix(&estate_root)
@@ -553,7 +553,7 @@ fn run_compose_refresh(args: &[String]) -> Result<(), String> {
     let estate_root = manifest_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| manifest_dir.clone());
     let workspace_root = workspace::find_workspace_root(&estate_root)?;
     let resolved = resolve_compose_target(&target, &estate_root, &workspace_root)?;
-    let services = adopt::discover_services_at(&resolved.services_label, &resolved.service_dir);
+    let services = detect::discover_services_at(&resolved.services_label, &resolved.service_dir);
     if services.is_empty() {
         return Err(format!("No services detected for {target}."));
     }
@@ -587,7 +587,7 @@ fn run_compose_refresh(args: &[String]) -> Result<(), String> {
         }
         let mut rendered: Vec<String> = Vec::new();
         for service in &services {
-            rendered.push(adopt::render_service_block(service));
+            rendered.push(detect::render_service_block(service));
             rendered.push(String::new());
         }
         let mut out = Vec::new();

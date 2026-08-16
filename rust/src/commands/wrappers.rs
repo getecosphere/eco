@@ -10,8 +10,11 @@ fn args_to_strings(args: &[String]) -> Vec<String> {
 pub fn run_init(args: &[String]) -> Result<(), String> {
     // Modern project model: `eco init <dir>` makes that directory the project
     // root (the only directory eco scans — no `*_core` naming, no sibling
-    // discovery). It scaffolds a minimal ecompose.yml + the gitignored
-    // .eco/state.json + .gitignore, then git-inits the project.
+    // discovery). It auto-detects the services already in the folder and
+    // scaffolds an ecompose.yml, then the gitignored .eco/state.json and a
+    // .gitignore, then git-inits the project. If an ecompose.yml already
+    // exists it is validated (never overwritten).
+    let no_detect = args.iter().any(|a| a == "--no-detect");
     let dir_arg = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| ".".to_string());
     let dir = Path::new(&dir_arg);
     if dir.exists() && !dir.is_dir() {
@@ -21,13 +24,52 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
     let project = dir
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            // `eco init .` — fall back to the canonical current directory's name.
+            dir.canonicalize()
+                .ok()
+                .and_then(|c| c.file_name().map(|s| s.to_string_lossy().to_string()))
+        })
         .unwrap_or_else(|| "project".to_string());
     let project = if project.is_empty() { "project".to_string() } else { project };
 
     let ecompose_path = dir.join("ecompose.yml");
     if !ecompose_path.is_file() {
-        let ecompose = format!("project: {project}\n\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n\n");
+        let mut ecompose = format!("project: {project}\n");
+        if !no_detect {
+            let services = crate::detect::detect_first_service(dir, &project);
+            if let Some(service) = services {
+                let block = crate::detect::render_service_block(&service);
+                ecompose.push_str("\nservices:\n");
+                ecompose.push_str(&block);
+                ecompose.push('\n');
+                println!("[eco] Detected {} service: {} ({})", service.name, service.path, service.runtimes.join(", "));
+            } else {
+                ecompose.push_str("\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n");
+                println!("[eco] No services detected (looked for Cargo.toml/go.mod/pom.xml/package.json). Edit ecompose.yml by hand, or run `eco lxs add <name>@<version>` to compose a registry LXS.\n");
+            }
+        } else {
+            ecompose.push_str("\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n");
+        }
         std::fs::write(&ecompose_path, ecompose).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+    } else {
+        // Validate the existing manifest instead of overwriting it.
+        let content = std::fs::read_to_string(&ecompose_path).map_err(|e| format!("read {}: {e}", ecompose_path.display()))?;
+        let project_line = content.lines().any(|l| l.trim_start().starts_with("project:"));
+        if !project_line {
+            return Err(format!(
+                "{} exists but has no `project:` line — fix the manifest and run `eco init` again.",
+                ecompose_path.display()
+            ));
+        }
+        match crate::ecompose::read_ecompose(&ecompose_path.display().to_string(), dir) {
+            Ok(_) => println!("[eco] {} exists and parses cleanly — leaving it untouched.", ecompose_path.display()),
+            Err(e) => return Err(format!(
+                "{} exists but failed to parse:\n  {e}\nFix the manifest and run `eco init` again.",
+                ecompose_path.display()
+            )),
+        }
     }
 
     // .eco/state.json — the gitignored estate binding + registry.
@@ -63,6 +105,7 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
     println!("  cd {dir_arg}");
     println!("  eco lxs add <name>    compose a registry LXS (binary)");
     println!("  cd <your-domain> && eco lxs add .   register a source LXS");
+    println!("  eco up dev            run the estate locally");
     println!("  eco up --remote       build locally + ship to the target");
     Ok(())
 }

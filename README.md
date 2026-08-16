@@ -132,7 +132,7 @@ only when the app earns.
 ## Open core
 
 - **`eco`** (this repo, public) — the CLI you can audit: `ecompose.yml`
-  parsing, `eco up --remote`, `eco up dev`, `lxs`, `serve`, `startproject`,
+  parsing, `eco init`, `eco up --remote`, `eco up dev`, `lxs`, `serve`,
   `git`. No secrets, no agent. Anyone can verify the CLI does nothing sneaky.
 - **`eco-server`** (private) — the control plane that runs on the ecosphere
   server: the `eco serve` agent, deploy orchestration, Cloudflare automation,

@@ -5,16 +5,13 @@ eco - manage large-scale projects using Domain-Driven Design by decomposing them
 
 Usage:
   eco help
-  eco init [args...]
+  eco init [dir] [--no-detect]
   eco install <tool>
   eco configure [args...]
   eco db
   eco db clear all
   eco db clear <service>
   eco show
-  eco startproject [name|.]
-  eco adopt [path]
-  eco clearstarterproject [path]
   eco compose add [repo-name|path]
   eco compose refresh <repo-name|path>
   eco compose expose <service> <hostname>
@@ -45,20 +42,16 @@ Usage:
   eco stress [--vus <n>] [--duration <s>] [--ramp-up <s>] [--hostname <url>] [--dry-run]
 
 Current command groups:
-  init        Run the bundled eco init workflow
+  init        Make the current (or given) directory an eco project: auto-detects
+              services already in the folder and writes ecompose.yml (validates
+              an existing one instead of overwriting), then .eco/state.json,
+              .gitignore, and git init. Use --no-detect to scaffold blank.
   install     Install infra-level tooling not tied to any one project
              (e.g. "eco install minio") -- run once per machine/CT
   configure   Run the bundled eco configure workflow
              Pass --non-interactive to accept defaults without prompts
   db          Guarded database operations for a declared service
   show        Show the current service URLs/ports from ecosystem.config.js
-  startproject Interactively scaffold a new estate from reusable repos
-  adopt       Generate ecompose.yml for an existing standalone project
-             (detects services by scanning for pom.xml/Cargo.toml/package.json)
-  clearstarterproject Remove the placeholder starter runtime files from the
-              estate core repo (traditionally <project>_composition, suggested
-              <project>_core), keeping the service contract files so a real
-              frontend/backend can replace the starter
   compose     Add a repo to an existing ecompose.yml
              "eco compose add" with no args offers an arrow-key checklist of
              "eco compose add <name>" clones that one catalog repo into the
@@ -110,12 +103,9 @@ Current command groups:
 
 Examples:
   eco init
+  eco init myapp --no-detect
   eco install minio
   eco show
-  eco startproject jitc
-  eco startproject .
-  eco adopt
-  eco adopt chronic/chronic_core
   eco compose add
   eco compose add gameserver
   eco compose add ../gameserver
@@ -155,10 +145,10 @@ Cloudflare automation env:
 
 GitHub automation env:
   ECO_GITHUB_API_KEY
-                 GitHub token used by startproject to create and push the
-                 estate core repo, <project>_core, owning ecompose.yml
-                 (legacy <project>_bootstrap / <project>_composition names
-                 are still accepted)
+                 GitHub token used for LXS publish and remote repo automation
+                 (creating/pushing the estate core repo). Not required for
+                 `eco init`, local dev, or `eco up --remote` on a host that
+                 already holds the estate.
 "##;
     print!("{text}");
     Ok(())

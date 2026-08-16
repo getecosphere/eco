@@ -17,9 +17,8 @@ Usage:
   eco install minio
 
   minio         Installs MinIO (prebuilt binary) and starts it running locally.
-                Prints the endpoint/credentials to paste into "eco startproject"'s
-                object storage prompt, or directly into an existing
-                ecompose.yml's storage.minio block.
+                Prints the endpoint/credentials to paste directly into an
+                existing ecompose.yml's storage.minio block.
   onnxruntime   Installs the onnxruntime shared library used by RAG/embedding
                 services (rag domain). On Linux/CTs it is placed at
                 /opt/eco-tools/libonnxruntime.so; on macOS via Homebrew.

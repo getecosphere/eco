@@ -4,8 +4,8 @@ use serde::Deserialize;
 // embedded the estate domain git URLs into the binary. It's gone. Eco is now
 // source-code-agnostic: reusable capabilities come from the LXS registry and
 // source ships from the developer workspace, so no central catalog is needed.
-// These helpers remain (empty) so `eco compose add`/`startproject` compile;
-// they resolve from git URLs / local clones instead.
+// These helpers remain (empty) so `eco compose add` compiles; they resolve
+// from git URLs / local clones instead.
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoEntry {

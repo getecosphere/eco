@@ -1,10 +1,7 @@
-use crate::ecompose;
 use crate::util;
 use std::path::Path;
 
-const DEFAULT_CT_TEMPLATE: &str = "local:vztmpl/eco-npm-rust-mongo_1_amd64.tar.zst";
-const DEFAULT_SHARED_TOOLS: &[&str] = &["git", "openssh-client", "curl", "jq", "ca-certificates"];
-const IGNORED_DIR_NAMES: &[&str] = &[
+pub const IGNORED_DIR_NAMES: &[&str] = &[
     "node_modules",
     "target",
     ".next",
@@ -16,6 +13,13 @@ const IGNORED_DIR_NAMES: &[&str] = &[
     "__pycache__",
 ];
 
+#[derive(Debug, Clone)]
+pub struct DetectedService {
+    pub name: String,
+    pub path: String,
+    pub runtimes: Vec<String>,
+}
+
 fn path_exists(p: &Path) -> bool {
     p.exists()
 }
@@ -24,13 +28,22 @@ fn read_text_file(p: &Path) -> Option<String> {
     std::fs::read_to_string(p).ok()
 }
 
-/// Same runtime detection as configure.sh's discover_services.
+/// Detect the service type + runtimes for a single project directory.
+/// Types mirror configure.sh's discover_services:
+///   spring-boot | rust | static (Leptos) | go | nextjs | astro | vite | nuxt | node
 pub fn detect_service_type(dir: &Path) -> Option<(String, Vec<String>)> {
     if dir.join("pom.xml").is_file() {
         return Some(("spring-boot".to_string(), vec!["java@17".to_string(), "maven".to_string()]));
     }
     if dir.join("Cargo.toml").is_file() {
+        if dir.join("index.html").is_file() {
+            // Leptos/Rust frontend: built static dist is served as a static site.
+            return Some(("static".to_string(), vec!["static".to_string()]));
+        }
         return Some(("rust".to_string(), vec!["rust".to_string()]));
+    }
+    if dir.join("go.mod").is_file() {
+        return Some(("go".to_string(), vec!["go".to_string()]));
     }
     let package_json_raw = read_text_file(&dir.join("package.json"));
     if let Some(raw) = package_json_raw {
@@ -52,33 +65,22 @@ pub fn detect_service_type(dir: &Path) -> Option<(String, Vec<String>)> {
             }
             Err(_) => std::collections::HashMap::new(),
         };
+        let node_runtime = vec!["node@20".to_string(), "npm".to_string(), "pm2".to_string()];
         if deps.contains_key("next") {
-            return Some(("nextjs".to_string(), vec!["node@20".to_string(), "npm".to_string(), "pm2".to_string()]));
+            return Some(("nextjs".to_string(), node_runtime));
+        }
+        if deps.contains_key("astro") {
+            return Some(("astro".to_string(), node_runtime));
         }
         if deps.contains_key("vite") {
-            return Some(("vite".to_string(), vec!["node@20".to_string(), "npm".to_string(), "pm2".to_string()]));
+            return Some(("vite".to_string(), node_runtime));
         }
-        return Some(("node".to_string(), vec!["node@20".to_string(), "npm".to_string(), "pm2".to_string()]));
+        if deps.contains_key("nuxt") {
+            return Some(("nuxt".to_string(), node_runtime));
+        }
+        return Some(("node".to_string(), node_runtime));
     }
     None
-}
-
-pub fn detect_db_runtimes(dir: &Path) -> Vec<String> {
-    let contents = read_text_file(&dir.join(".env.example"))
-        .or_else(|| read_text_file(&dir.join(".env")))
-        .unwrap_or_default();
-    let cargo_toml = read_text_file(&dir.join("Cargo.toml")).unwrap_or_default();
-    let mut runtimes = Vec::new();
-    if contains_line(&contents, "MONGO(?:DB)?_URI=") || cargo_toml.contains("mongodb") {
-        runtimes.push("mongodb@7".to_string());
-    }
-    if contains_line(&contents, "REDIS_URL=") || cargo_toml.contains("redis") {
-        runtimes.push("redis@7".to_string());
-    }
-    if contains_line_multiline(&contents, "DATABASE_URL|DB_URL") && contents.to_lowercase().contains("postgres") {
-        runtimes.push("postgresql@15".to_string());
-    }
-    runtimes
 }
 
 fn contains_line(content: &str, key_pattern: &str) -> bool {
@@ -107,11 +109,22 @@ fn contains_line_multiline(content: &str, _pattern: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone)]
-pub struct DetectedService {
-    pub name: String,
-    pub path: String,
-    pub runtimes: Vec<String>,
+pub fn detect_db_runtimes(dir: &Path) -> Vec<String> {
+    let contents = read_text_file(&dir.join(".env.example"))
+        .or_else(|| read_text_file(&dir.join(".env")))
+        .unwrap_or_default();
+    let cargo_toml = read_text_file(&dir.join("Cargo.toml")).unwrap_or_default();
+    let mut runtimes = Vec::new();
+    if contains_line(&contents, "MONGO(?:DB)?_URI=") || cargo_toml.contains("mongodb") {
+        runtimes.push("mongodb@7".to_string());
+    }
+    if contains_line(&contents, "REDIS_URL=") || cargo_toml.contains("redis") {
+        runtimes.push("redis@7".to_string());
+    }
+    if contains_line_multiline(&contents, "DATABASE_URL|DB_URL") && contents.to_lowercase().contains("postgres") {
+        runtimes.push("postgresql@15".to_string());
+    }
+    runtimes
 }
 
 /// Recursively scan a directory for services, stopping at project markers.
@@ -153,6 +166,8 @@ pub fn scan_for_services(scan_dir: &Path, label: &str, rel_path: &str) -> Vec<De
     services
 }
 
+/// Discover every service under an estate root (each top-level dir is scanned
+/// with its dir name as the label).
 pub fn discover_estate_services(estate_root: &Path) -> Vec<DetectedService> {
     let entries = util::sorted_dir_entries(estate_root);
     let mut services = Vec::new();
@@ -170,8 +185,41 @@ pub fn discover_estate_services(estate_root: &Path) -> Vec<DetectedService> {
     services
 }
 
+/// Scan a single directory (and its children) as one labeled service tree.
 pub fn discover_services_at(label: &str, dir_path: &Path) -> Vec<DetectedService> {
     scan_for_services(dir_path, label, "")
+}
+
+/// The first service (if any) directly inside `dir` — used by `eco init` so
+/// a freshly created app in a folder is picked up as a single service.
+pub fn detect_first_service(dir: &Path, label: &str) -> Option<DetectedService> {
+    if detect_service_type(dir).is_some() {
+        // The project root itself is a service: path "." (relative to the
+        // estate root = this dir), named after the project.
+        let mut runtimes = detect_service_type(dir).map(|(_, r)| r).unwrap_or_default();
+        runtimes.extend(detect_db_runtimes(dir));
+        return Some(DetectedService {
+            name: label.to_string(),
+            path: ".".to_string(),
+            runtimes,
+        });
+    }
+    let entries = util::sorted_dir_entries(dir);
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if IGNORED_DIR_NAMES.contains(&name.as_str()) {
+            continue;
+        }
+        let found = scan_for_services(&path, label, "");
+        if let Some(first) = found.into_iter().next() {
+            return Some(first);
+        }
+    }
+    None
 }
 
 pub fn render_service_block(service: &DetectedService) -> String {
@@ -189,7 +237,7 @@ pub fn build_ecompose_content(project_name: &str, ct_id: u64, hostname: &str, se
         "ct:".to_string(),
         format!("  id: {ct_id}"),
         format!("  hostname: {hostname}"),
-        format!("  template: {DEFAULT_CT_TEMPLATE}"),
+        "  template: local:vztmpl/eco-npm-rust-mongo_1_amd64.tar.zst".to_string(),
         "  storage: local-lvm".to_string(),
         "  disk: 16".to_string(),
         "  bridge: vmbr0".to_string(),
@@ -199,13 +247,8 @@ pub fn build_ecompose_content(project_name: &str, ct_id: u64, hostname: &str, se
         "  swap: 1024".to_string(),
         "  unprivileged: 1".to_string(),
         String::new(),
-        "shared_tools:".to_string(),
+        "services:".to_string(),
     ];
-    for tool in DEFAULT_SHARED_TOOLS {
-        lines.push(format!("  - {tool}"));
-    }
-    lines.push(String::new());
-    lines.push("services:".to_string());
     for service in services {
         lines.push(render_service_block(service));
         lines.push(String::new());
@@ -213,91 +256,8 @@ pub fn build_ecompose_content(project_name: &str, ct_id: u64, hostname: &str, se
     format!("{}\n", lines.join("\n"))
 }
 
-pub fn run_adopt(args: &[String]) -> Result<(), String> {
-    let cwd = util::current_dir();
-    let input = args.first().cloned().unwrap_or_else(|| ".".to_string());
-    let target_dir = cwd.join(&input);
-    let estate_root = target_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| target_dir.clone());
-    let ecompose_path = target_dir.join("ecompose.yml");
-
-    if !path_exists(&target_dir) {
-        return Err(format!("No such directory: {}", target_dir.display()));
-    }
-    if path_exists(&ecompose_path) {
-        return Err(format!(
-            "ecompose.yml already exists at {} -- edit it directly, or remove it first to regenerate.",
-            ecompose_path.display()
-        ));
-    }
-
-    let services = discover_estate_services(&estate_root);
-
-    util::println_stdout("Adopting project into eco:");
-    util::println_stdout(&format!("  manifest dir: {}", target_dir.display()));
-    util::println_stdout(&format!("  estate root:  {}", estate_root.display()));
-    util::println_stdout("");
-
-    if services.is_empty() {
-        util::println_stdout(
-            "No services detected (looked for pom.xml/Cargo.toml/package.json in every top-level directory under the estate root).\nYou can still generate a manifest and add services to it by hand.\n",
-        );
-    } else {
-        util::println_stdout("Detected services:");
-        for service in &services {
-            let runtimes = if service.runtimes.is_empty() {
-                "(none)".to_string()
-            } else {
-                service.runtimes.join(", ")
-            };
-            util::println_stdout(&format!("  {} -- path: {}, runtimes: {}", service.name, service.path, runtimes));
-        }
-        util::println_stdout("");
-    }
-
-    let default_project_name = estate_root
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "project".to_string());
-    let project_name_input = crate::checklist::prompt_line(&format!("Project name [{default_project_name}]: "))?;
-    let project_name = if project_name_input.is_empty() {
-        default_project_name.clone()
-    } else {
-        project_name_input
-    };
-
-    let ct_id_input = crate::checklist::prompt_line("Proxmox CT id (leave blank to fill in later): ")?;
-    let ct_id: u64 = ct_id_input.trim().parse().unwrap_or(0);
-
-    let hostname_input = crate::checklist::prompt_line(&format!("CT hostname [{project_name}]: "))?;
-    let hostname = if hostname_input.is_empty() { project_name.clone() } else { hostname_input };
-
-    let content = build_ecompose_content(&project_name, ct_id, &hostname, &services);
-
-    util::println_stdout(&format!("\nProposed {}:\n\n{content}\n", ecompose_path.display()));
-    util::println_stdout(
-        "Note: expose/deploy blocks are intentionally left out -- add them by hand\n(see assessment/assessment_core/ecompose.yml or training/training_core/ecompose.yml\nfor examples) once this estate has a public hostname set up.\n",
-    );
-
-    let confirmation = crate::checklist::prompt_line(&format!(
-        "Write this to {}? [y/N]: ",
-        ecompose_path.display()
-    ))?
-    .to_lowercase();
-    if confirmation != "y" && confirmation != "yes" {
-        return Err("Cancelled.".to_string());
-    }
-
-    std::fs::write(&ecompose_path, content)
-        .map_err(|e| format!("Cannot write {}: {e}", ecompose_path.display()))?;
-    util::println_stdout(&format!("Wrote {}", ecompose_path.display()));
-    util::println_stdout(&format!("Next: run \"eco configure\" from {}", target_dir.display()));
-    Ok(())
-}
-
+// Keep the signature referenced by callers that import `path_exists` from here.
 #[allow(dead_code)]
-fn _assert_parse(services: &[DetectedService]) {
-    let _ = ecompose::parse_services;
+fn _path_exists(p: &Path) -> bool {
+    path_exists(p)
 }
