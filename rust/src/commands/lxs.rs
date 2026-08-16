@@ -430,14 +430,27 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
 // eco lxs publish
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub(crate) fn parse_lxs_ref(ref_str: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_lxs_ref(ref_str: &str) -> Result<(String, Option<String>), String> {
     let mut parts = ref_str.rsplitn(2, '@');
-    let version = parts.next().unwrap_or("").trim().to_string();
-    let name = parts.next().unwrap_or("").trim().to_string();
-    if name.is_empty() || version.is_empty() {
-        return Err(format!("invalid LXS reference: {ref_str} (expected name@version)"));
+    let tail = parts.next().unwrap_or("").trim().to_string();
+    let head = parts.next().map(|s| s.trim().to_string());
+    match head {
+        // No `@` present: only one part, the whole string is the name.
+        None => {
+            if tail.is_empty() {
+                Err(format!("invalid LXS reference: {ref_str} (expected name[@version])"))
+            } else {
+                Ok((tail, None))
+            }
+        }
+        Some(name) => {
+            if name.is_empty() || tail.is_empty() {
+                Err(format!("invalid LXS reference: {ref_str} (expected name[@version])"))
+            } else {
+                Ok((name, Some(tail)))
+            }
+        }
     }
-    Ok((name, version))
 }
 
 pub(crate) fn load_manifest(path: &Path) -> Result<LxsManifest, String> {
@@ -873,7 +886,7 @@ fn match_indented_value_4(line: &str, key: &str) -> Option<String> {
 pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) -> Result<(LxsManifest, String, PathBuf), String> {
     let (name, pinned_version) = parse_lxs_ref(reference)?;
     let target = resolve_registry_target(address)?;
-    let (manifest, version, bytes) = fetch_lxs(&target, &name, Some(&pinned_version), arch)?;
+    let (manifest, version, bytes) = fetch_lxs(&target, &name, pinned_version.as_deref(), arch)?;
     let short = arch.replace("linux/", "linux-");
     let cache = Path::new(&util::home_dir()).join(".cache").join("eco").join("lxs").join(&name).join(&version).join(&short);
     std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
@@ -1880,7 +1893,14 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
     let (_, version, dest) = fetch_lxs_to_cache(&effective_ref, &arch, effective_address)?;
     println!("[eco lxs] Added {name}@{version} ({arch}) -> {} [verified]", dest.display());
 
-    let service = format!("{name}-backend");
+    // Naming: an LXS is a backend by default (`<name>-backend`). A frontend
+    // LXS (name ends in `-ui`/`-frontend`) keeps its own name so the gateway
+    // can route /signin /signup to it and the frontend fallback skips it.
+    let service = if name.ends_with("-ui") || name.ends_with("-frontend") {
+        name.clone()
+    } else {
+        format!("{name}-backend")
+    };
     add_lxs_service_to_ecompose(&service, &format!("{name}@{version}"))?;
     ensure_estate_state(&estate_root, address.as_deref().unwrap_or(""))?;
     Ok(())
