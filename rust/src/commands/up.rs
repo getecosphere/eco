@@ -6,6 +6,8 @@ use sha2::Digest;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+const FALLBACK_CT_TEMPLATE: &str = "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst";
+
 fn parse_options(args: &[String]) -> (HashMap<String, String>, Vec<String>) {
     let mut options = HashMap::new();
     let mut positionals = Vec::new();
@@ -336,6 +338,9 @@ pub fn load_project_deployment(input: &str, start_dir: &Path) -> Result<ProjectD
     // the ct: block is absent so ecompose.yml stays customer-focused.
     if ct.get("id").map(|s| s.is_empty()).unwrap_or(true) {
         ct.insert("id".to_string(), "101".to_string());
+    }
+    if ct.get("template").map(|s| s.is_empty()).unwrap_or(true) {
+        ct.insert("template".to_string(), FALLBACK_CT_TEMPLATE.to_string());
     }
     for (k, v) in [("storage", "local-lvm"), ("disk", "16"), ("bridge", "vmbr0"), ("ip", "dhcp"), ("cores", "1"), ("memory", "1024"), ("swap", "512"), ("unprivileged", "1")] {
         if ct.get(k).map(|s| s.is_empty()).unwrap_or(true) {
