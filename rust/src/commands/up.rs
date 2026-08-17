@@ -1654,7 +1654,10 @@ fn builder_available() -> bool {
 }
 
 fn skip_build_sync(name: &str) -> bool {
-    ["node_modules", "target", ".git", ".env"].contains(&name)
+    // Build/dev artifacts must never be synced into the remote build dir: a
+    // stale local `.next`/`.vite` can carry dev-baked public URLs (localhost)
+    // into a production frontend build. Regenerable — the build recreates them.
+    ["node_modules", "target", ".git", ".env", ".env.local", ".next", ".vite", ".cache", ".eco"].contains(&name)
 }
 
 // Syncs a local tree into the build location (VM or host cache).
