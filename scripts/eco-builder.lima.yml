@@ -1,0 +1,43 @@
+# eco-builder — the Lima Linux VM that builds production artifacts.
+#
+# Production CTs never compile: everything is built here, inside a controlled
+# Linux environment, then shipped to the server as executables. This is what
+# makes the "no build steps on the server" + "no production binary built on a
+# raw client OS" compliance story (SOC2/ISO27001) real.
+#
+# Bootstrap the instance once with:
+#   limactl start --name eco-builder --tty=false scripts/eco-builder.lima.yml
+#   limactl shell eco-builder -- sudo bash /tmp/eco-builder-bootstrap.sh
+#
+# Ubuntu 22.04 (jammy), native arch — Rust artifacts are cross-compiled to
+# x86_64-unknown-linux-musl with zigbuild (same output as prod CTs); Node
+# builds emit platform-agnostic dist + linux-x64 Bun binaries.
+images:
+- location: "https://cloud-images.ubuntu.com/releases/jammy/release-20260705/ubuntu-22.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+  digest: "sha256:9c2ddc65079f9a285ca7c9efabdee6d58ff7dd2b08a130114426d2020506db7a"
+  variant: "server"
+
+# Matches the reference Multipass builder (4 vCPU / 6 GB / sparse 40 GB).
+cpus: 4
+memory: "6GiB"
+disk: "40GiB"
+
+# No host folder is mounted into the build VM. Sources travel in via
+# `limactl copy`/tar (eco's sync_dir_to_builder), and build output travels
+# back the same way — there is no live host<->guest mount an attacker could
+# swap mid-build (TOCTOU). This also keeps the guest toolchain self-contained.
+mounts: []
+
+# Auto-provision nothing else; the bootstrap script installs the pinned
+# toolchain (rust + musl target, zig, cargo-zigbuild, node, bun, pnpm, build
+# essentials).
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y build-essential pkg-config curl ca-certificates \
+        git xz-utils python3 python3-venv make libssl-dev sqlite3

@@ -13,6 +13,7 @@ pub const INSTALL_ONNXRUNTIME_SH: &str = include_str!("../../install-onnxruntime
 pub const INSTALL_REDIS_SH: &str = include_str!("../../install-redis.sh");
 pub const INSTALL_CLOUDFLARED_SH: &str = include_str!("../../install-cloudflared.sh");
 pub const ECOLOGY_MARK: &[u8] = include_bytes!("../../assets/ecology-mark.webp");
+pub const SVELTEKIT_BUN_RECIPE_MJS: &str = include_str!("../../sveltekit-bun-recipe.mjs");
 
 const BUNDLED: &[(&str, &str)] = &[
     ("configure.sh", CONFIGURE_SH),

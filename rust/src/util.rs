@@ -16,7 +16,7 @@ use std::os::unix::process::ExitStatusExt;
 /// deploy requests whose `X-Eco-Protocol` does not match, so a stale client
 /// can't ship a payload the agent mis-reads (e.g. the artifacts/bin layout
 /// change). Bump this when you change what a deploy payload/request means.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// HTTP header the client sends to declare its protocol version, and the
 /// semver release it was built from (for the upgrade hint in error messages).

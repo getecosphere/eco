@@ -1242,6 +1242,78 @@ fn skip_none(_: &str) -> bool {
     false
 }
 
+/// Files that can contain developer credentials or workspace-only state must
+/// never enter a deploy artifact. This filter is intentionally shared by
+/// source-backed runtime packages (Python and plain static sites).
+fn skip_sensitive_artifact_entry(name: &str) -> bool {
+    name == ".env"
+        || name.starts_with(".env.")
+        || matches!(
+            name,
+            ".git"
+                | ".eco"
+                | ".ssh"
+                | ".DS_Store"
+                | "node_modules"
+                | "target"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | ".next"
+                | ".vite"
+                | ".cache"
+        )
+        || name.ends_with(".log")
+}
+
+fn collect_payload_files(root: &Path, dir: &Path, out: &mut Vec<serde_json::Value>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            return Err(format!("deploy payload must not contain symlinks: {}", path.display()));
+        }
+        if file_type.is_dir() {
+            collect_payload_files(root, &path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(format!("deploy payload contains unsupported file type: {}", path.display()));
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| format!("payload path escaped root: {}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let digest = sha2::Sha256::digest(&bytes);
+        out.push(serde_json::json!({
+            "path": rel,
+            "size": bytes.len(),
+            "sha256": crate::registry::hex_encode(&digest),
+        }));
+    }
+    Ok(())
+}
+
+fn write_payload_manifest(payload_dir: &Path, project: &str) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect_payload_files(payload_dir, payload_dir, &mut files)?;
+    files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    files.dedup_by(|a, b| a["path"] == b["path"]);
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "project": project,
+        "cli_version": env!("CARGO_PKG_VERSION"),
+        "target": { "os": "linux", "arch": "amd64" },
+        "files": files,
+    });
+    let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    std::fs::write(payload_dir.join("artifact-manifest.json"), format!("{text}\n"))
+        .map_err(|e| format!("write artifact manifest: {e}"))
+}
+
 fn copy_tree_excluding(src: &Path, dst: &Path, skip: &dyn Fn(&str) -> bool) -> Result<(), String> {
     if !src.is_dir() {
         return Ok(());
@@ -1519,39 +1591,53 @@ fn ensure_cross_toolchain() -> Result<Option<PathBuf>, String> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Local Linux builder (eco-builder VM) — where Node/Rust artifacts are built so
-// production CTs never compile anything. Default driver is Multipass
-// (`multipass exec <ECO_BUILDER>`); override with ECO_BUILDER_CMD on machines
-// where Multipass is unavailable (M1: `limactl shell <name> --`, etc.).
+// production CTs never compile anything and production binaries are never built
+// on the raw client OS (SOC2/ISO27001). Default driver is Lima
+// (`limactl shell <name> --`); falls back to Multipass (`multipass exec`)
+// when Lima is absent. Override the exec command with ECO_BUILDER_CMD.
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn builder_name() -> String {
     util::env_var_or("ECO_BUILDER", "eco-builder")
 }
 
-// Build node artifacts directly on the dev machine (no VM) when the user sets
-// ECO_BUILDER=host, or when no VM driver is available. Correct for node builds
-// because the artifact (dist / JS bundle / Bun binary) is platform-agnostic —
-// the CT installs its own linux-x64 runtime deps (or runs the Bun binary).
+// The compliance stance: production binaries are built inside an isolated
+// Linux builder VM (Lima preferred, Multipass fallback), never on the raw
+// client OS. Host mode (`ECO_BUILDER=host`) is an explicit opt-out for
+// prototyping only — never the default for a production `eco up --remote`.
 fn builder_is_host() -> bool {
-    let mode = util::env_var_or("ECO_BUILDER", "");
-    if mode == "host" {
-        return true;
-    }
-    // A VM is only used when one is explicitly requested (ECO_BUILDER=<name>)
-    // or reachable via Multipass. With no VM driver, build on the host — a
-    // dev machine always has the toolchain, and the artifact is platform-
-    // agnostic anyway. This is what makes `eco up --remote` seamless for a
-    // fresh laptop with no ECO_BUILDER set.
-    if !mode.is_empty() {
-        return false;
-    }
-    !multipass_available()
+    util::env_var_or("ECO_BUILDER", "") == "host"
+}
+
+fn limactl_available() -> bool {
+    run_capture("limactl", &["--version".to_string()], &util::current_dir())
+        .map(|c| c.code == 0)
+        .unwrap_or(false)
 }
 
 fn multipass_available() -> bool {
     run_capture("multipass", &["version".to_string()], &util::current_dir())
         .map(|c| c.code == 0)
         .unwrap_or(false)
+}
+
+// Prefer the Lima driver over Multipass. `ECO_BUILDER_CMD` overrides the whole
+// exec command, so no driver-specific dispatch applies when it is set.
+fn builder_driver_is_lima() -> bool {
+    if !util::env_var_or("ECO_BUILDER_CMD", "").is_empty() {
+        return false;
+    }
+    limactl_available()
+}
+
+fn builder_driver_is_available() -> bool {
+    if builder_is_host() {
+        return true;
+    }
+    if !util::env_var_or("ECO_BUILDER_CMD", "").is_empty() {
+        return true;
+    }
+    builder_driver_is_lima() || multipass_available()
 }
 
 // Build a PATH that includes the usual dev-toolchain locations so the host
@@ -1597,10 +1683,13 @@ fn host_builder_path() -> String {
     path.join(":")
 }
 
-// Where node builds land: the VM (/home/ubuntu/build) or the host cache.
+// Where node builds land: the VM (/home/ubuntu/build or /home/eco.guest/build)
+// or the host cache.
 fn builder_build_root() -> String {
     if builder_is_host() {
         format!("{}/.cache/eco/build", util::home_dir())
+    } else if builder_driver_is_lima() {
+        "/home/eco.guest/build".to_string()
     } else {
         "/home/ubuntu/build".to_string()
     }
@@ -1611,7 +1700,11 @@ fn builder_cmd() -> Vec<String> {
     if !cmd.is_empty() {
         return cmd.split_whitespace().map(|s| s.to_string()).collect();
     }
-    vec!["multipass".to_string(), "exec".to_string(), builder_name(), "--".to_string()]
+    if builder_driver_is_lima() {
+        vec!["limactl".to_string(), "shell".to_string(), builder_name(), "--".to_string()]
+    } else {
+        vec!["multipass".to_string(), "exec".to_string(), builder_name(), "--".to_string()]
+    }
 }
 
 fn builder_exec(script: &str) -> Result<util::Captured, String> {
@@ -1637,6 +1730,28 @@ fn builder_exec(script: &str) -> Result<util::Captured, String> {
     run_capture(&args[0], &args[1..], &util::current_dir())
 }
 
+// Push a local file into the builder VM. Multipass: `multipass transfer`; Lima:
+// `limactl copy <local> <name>:<remote>`.
+fn builder_transfer_push(local: &Path, remote: &str) -> Result<(), String> {
+    let local = local.display().to_string();
+    if builder_driver_is_lima() {
+        return run_command("limactl", &["copy".to_string(), local, format!("{}:{remote}", builder_name())], &util::current_dir());
+    }
+    let args = vec!["transfer".to_string(), local, format!("{}:{remote}", builder_name())];
+    run_command("multipass", &args, &util::current_dir())
+}
+
+// Pull a file from the builder VM back to the host. Multipass:
+// `multipass transfer <name>:<remote> <local>`; Lima: `limactl copy`.
+fn builder_transfer_pull(remote: &str, local: &Path) -> Result<(), String> {
+    let local = local.display().to_string();
+    if builder_driver_is_lima() {
+        return run_command("limactl", &["copy".to_string(), format!("{}:{remote}", builder_name()), local], &util::current_dir());
+    }
+    let args = vec!["transfer".to_string(), format!("{}:{remote}", builder_name()), local];
+    run_command("multipass", &args, &util::current_dir())
+}
+
 fn builder_exec_ok(script: &str) -> Result<(), String> {
     let result = builder_exec(script)?;
     if result.code != 0 {
@@ -1649,7 +1764,17 @@ fn builder_available() -> bool {
     if builder_is_host() {
         return true;
     }
-    let mut args = vec!["info".to_string(), builder_name()];
+    if !util::env_var_or("ECO_BUILDER_CMD", "").is_empty() {
+        return true;
+    }
+    if builder_driver_is_lima() {
+        // `limactl list` shows Running only for a started instance.
+        let args = vec!["list".to_string(), "-f".to_string(), "{{.Name}} {{.Status}}".to_string()];
+        return run_capture("limactl", &args, &util::current_dir())
+            .map(|c| c.code == 0 && c.stdout.contains(&format!("{} Running", builder_name())))
+            .unwrap_or(false);
+    }
+    let args = vec!["info".to_string(), builder_name()];
     run_capture("multipass", &args, &util::current_dir()).map(|c| c.code == 0).unwrap_or(false)
 }
 
@@ -1688,11 +1813,9 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
         &util::current_dir(),
     )?;
     let remote_tar = format!("/tmp/eco-builder-sync-{}.tar.gz", std::process::id());
-    let mut transfer_args = vec!["transfer".to_string(), tar_path.display().to_string(), format!("{}:{}", builder_name(), remote_tar)];
-    run_command("multipass", &transfer_args, &util::current_dir())?;
+    builder_transfer_push(&tar_path, &remote_tar)?;
     builder_exec_ok(&format!("mkdir -p {} && tar xzf {} -C {}", shell_single_quote(dest), remote_tar, shell_single_quote(dest)))?;
     let _ = std::fs::remove_file(&tar_path);
-    let _ = transfer_args;
     Ok(())
 }
 
@@ -1716,6 +1839,14 @@ fn trim_dev_artifact(_dir: &Path, root: &Path) {
 
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
+    // SvelteKit adapter-node that will be bun-compiled ships only the compiled
+    // binary + a static `client/` dir (the recipe copies build/client next to
+    // the binary); the raw `build/` tree would duplicate the client and blow
+    // the payload past the cap. `included` still lists `build` so the SSR/bun
+    // path is taken; the copy below skips it.
+    let sveltekit_bun = builder_is_host()
+        && util::command_on_path("bun")
+        && Path::new(build_dir).join("build").join("client").is_dir();
     let subdirs = ["dist", "build", ".next", ".output", "output", "app/dist", "app/.next", "app/build", "app/.output", "public", "app/public"];
     let mut included: Vec<String> = Vec::new();
     for sub in subdirs {
@@ -1768,6 +1899,12 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
     }
     if builder_is_host() {
         for sub in &included {
+            // SvelteKit bun builds ship the compiled binary + a static
+            // `client/` dir; the raw build/ tree (with its own client copy)
+            // would double the payload.
+            if sveltekit_bun && sub == "build" {
+                continue;
+            }
             copy_tree_excluding(&Path::new(build_dir).join(sub), &artifact_dir.join(sub), &(skip_none as fn(&str) -> bool))?;
         }
         // Trim dev/build-cache cruft from the artifact so the shipped payload
@@ -1814,36 +1951,41 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             remote_tar,
             included.join(" ")
         ))?;
-        let mut pull_args = vec!["transfer".to_string(), format!("{}:{}", builder_name(), remote_tar), "/tmp/eco-builder-artifact.tar.gz".to_string()];
-        run_command("multipass", &pull_args, &util::current_dir())?;
+        builder_transfer_pull(&remote_tar, Path::new("/tmp/eco-builder-artifact.tar.gz"))?;
         run_command("tar", &["xzf".to_string(), "/tmp/eco-builder-artifact.tar.gz".to_string(), "-C".to_string(), artifact_dir.display().to_string()], &util::current_dir())?;
         builder_exec(&format!("rm -f {}", remote_tar))?;
-        let _ = pull_args;
     }
     // Bun-compile SSR node apps (host builder mode) into a single linux-x64
     // binary so the CT needs no node_modules. The build output's server entry
     // imports runtime deps from node_modules, so the compile runs where npm ci
     // ran (the build dir), not in the copied artifact.
     //
-    // SvelteKit adapter-node builds (build/index.js + build/client) are the
-    // exception: the node server serves client assets from disk relative to
-    // its entry, and `bun build --compile` embeds only the server, so the
-    // binary looks for the client in its embedded $bunfs/root/client, never
-    // finds it, and 404s every /_app/immutable/* asset. Ship the build/ tree
-    // as-is and let the CT run `node build/index.js` instead.
+    // SvelteKit adapter-node builds (build/index.js + build/client) are handled
+    // specially: `bun build --compile` embeds only the server, so the client
+    // assets (served from disk by adapter-node) must be embedded separately and
+    // materialized at startup. prepare_sveltekit_bun_recipe patches the built
+    // handler to read the asset dir from env and emits build-eco/ (base64
+    // client chunks + a wrapper entry). The wrapper is the compile entry.
     if builder_is_host() && util::command_on_path("bun") {
         let sveltekit_client = Path::new(build_dir).join("build").join("client");
-        if builder_is_host() && sveltekit_client.is_dir() {
+        let is_sveltekit = builder_is_host() && sveltekit_client.is_dir();
+        if is_sveltekit {
             print_step(&format!(
-                "SvelteKit adapter-node build ({}), skipping bun-compile — served via `node build/index.js`",
+                "SvelteKit adapter-node build ({}): preparing self-contained bun recipe",
                 sveltekit_client.display()
             ));
-            return Ok(());
+            prepare_sveltekit_bun_recipe(Path::new(build_dir))?;
         }
-        let server_entry = ["build/index.js", "build/server.js", "build/index.mjs", "build/index.cjs"]
-            .iter()
-            .map(|p| Path::new(build_dir).join(p))
-            .find(|p| p.is_file());
+        let server_entry = [
+            "build-eco/eco-entry.js",
+            "build/index.js",
+            "build/server.js",
+            "build/index.mjs",
+            "build/index.cjs",
+        ]
+        .iter()
+        .map(|p| Path::new(build_dir).join(p))
+        .find(|p| p.is_file());
         if let Some(entry) = server_entry {
             let out = artifact_dir.join(service_name);
             print_step(&format!("Bun-compiling {} (SSR node app) -> single linux-x64 binary", service_name));
@@ -1862,7 +2004,144 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 Path::new(build_dir),
             )?;
             std::fs::write(artifact_dir.join(".eco-bun"), service_name).map_err(|e| e.to_string())?;
+            // SvelteKit adapter-node: ship the client assets as static files
+            // next to the binary. The wrapper points the server at
+            // dirname(execPath)/client, so no node_modules ever reach the CT.
+            if is_sveltekit {
+                copy_tree_excluding(&sveltekit_client, &artifact_dir.join("client"), &|_| false)?;
+                print_step(&format!(
+                    "SvelteKit client assets shipped next to binary ({} files)",
+                    count_tree_files(&sveltekit_client)
+                ));
+            }
         }
+    }
+    Ok(())
+}
+
+fn count_tree_files(dir: &Path) -> usize {
+    let mut n = 0;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                n += count_tree_files(&e.path());
+            } else {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+// Cross-compile a Rust service to x86_64-unknown-linux-musl inside the local
+// Linux builder VM, then pull the binary back to a temp dir. Mirrors the
+// host-side zigbuild path (workspace `-p` handling, target-dir resolution) but
+// keeps production binaries out of the raw client OS — the SOC2/ISO27001 fix.
+fn cross_compile_rust_on_builder(service: &str, dir: &Path, package: &str, build_env: &[(String, String)]) -> Result<PathBuf, String> {
+    if !builder_driver_is_available() {
+        return Err(format!(
+            "{} is a Rust service but no local Linux builder VM is reachable. Provision it with Lima (`brew install lima && limactl start --name eco-builder scripts/eco-builder.lima.yml`), or set ECO_BUILDER=host to build on this machine (dev only).",
+            service
+        ));
+    }
+    if !builder_available() {
+        return Err(format!(
+            "{} is a Rust service but the local builder VM `{}` is not running. Start it (`limactl start {}`).",
+            service,
+            builder_name(),
+            builder_name()
+        ));
+    }
+    // Sync the source into the VM build root (never a live mount — copy-in so
+    // no host folder can be swapped mid-build / TOCTOU).
+    let build_dir = format!("{}/{}", builder_build_root(), service);
+    print_step(&format!("Syncing {} source into builder VM ({})", service, build_dir));
+    sync_dir_to_builder(dir, &build_dir)?;
+    // Determine the workspace root from INSIDE the VM so `-p` builds resolve
+    // against the synced layout, not the host paths.
+    let workspace_root = builder_exec(&format!(
+        "cd {} && cargo metadata --no-deps --format-version 1 2>/dev/null | grep -o '\"workspace_root\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4 || true",
+        shell_single_quote(&build_dir)
+    ))
+    .ok()
+    .map(|c| c.stdout.trim().to_string())
+    .filter(|s| !s.is_empty() && Path::new(s).is_absolute())
+    .unwrap_or_default();
+    let workspace_build = !workspace_root.is_empty() && workspace_root != build_dir;
+    // Export the same build env the host path used (SQLX_OFFLINE, PUBLIC_*),
+    // plus a PATH that finds zig/cargo-zigbuild inside the VM.
+    let mut exports = String::from("set -euo pipefail\n");
+    for (key, value) in build_env {
+        if is_shell_ident(key) {
+            exports.push_str(&format!("export {}={}\n", key, shell_single_quote(value)));
+        }
+    }
+    // The VM's zig lives in /usr/local/bin and rustup in ~/.cargo/bin; prepend
+    // them to PATH before running cargo so non-login `bash -c` finds them.
+    exports.push_str("export PATH=\"$HOME/.cargo/bin:/usr/local/bin:$PATH\"\n");
+    let build_args = if workspace_build {
+        format!("cargo zigbuild --release -p {} --target x86_64-unknown-linux-musl", shell_single_quote(package))
+    } else {
+        format!("cargo zigbuild --release --target x86_64-unknown-linux-musl")
+    };
+    let script = format!("cd {} && {exports}{build_args}", shell_single_quote(&build_dir));
+    builder_exec_ok(&script)?;
+    // Resolve the real target dir inside the VM (workspace builds land in the
+    // workspace root's target/), then pull the binary back.
+    let target_dir = if workspace_build {
+        builder_exec(&format!("cd {} && cargo metadata --no-deps --format-version 1 2>/dev/null | grep -o '\"target_directory\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4 || true", shell_single_quote(&workspace_root)))
+            .ok()
+            .map(|c| c.stdout.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{workspace_root}/target"))
+    } else {
+        format!("{build_dir}/target")
+    };
+    let remote_bin = format!("{target_dir}/x86_64-unknown-linux-musl/release/{package}");
+    let local_dir = std::env::temp_dir().join(format!("eco-rust-builder-{}-{}", service, std::process::id()));
+    let _ = std::fs::remove_dir_all(&local_dir);
+    std::fs::create_dir_all(&local_dir).map_err(|e| format!("create {}: {e}", local_dir.display()))?;
+    let local_bin = local_dir.join(package);
+    let exists = builder_exec(&format!("test -f {} && echo yes || echo no", shell_single_quote(&remote_bin)))
+        .map(|c| c.stdout.trim() == "yes")
+        .unwrap_or(false);
+    if !exists {
+        return Err(format!("cross-compiled binary not found in builder VM: {remote_bin}"));
+    }
+    builder_transfer_pull(&remote_bin, &local_bin)?;
+    if !local_bin.is_file() {
+        return Err(format!("failed to pull cross-compiled binary from builder VM: {remote_bin}"));
+    }
+    print_step(&format!("Pulled {} binary from builder VM ({} bytes)", package, std::fs::metadata(&local_bin).map(|m| m.len()).unwrap_or(0)));
+    Ok(local_bin)
+}
+
+/// Prepare a SvelteKit adapter-node build for bun-compilation by running the
+/// bundled recipe script: patch build/handler.js to serve client assets from
+/// an env-configurable dir, and emit build-eco/ (embedded base64 client chunks
+/// + a wrapper entry that materializes them and starts the server).
+fn prepare_sveltekit_bun_recipe(build_dir: &Path) -> Result<(), String> {
+    let recipe = build_dir.join("sveltekit-bun-recipe.mjs");
+    std::fs::write(&recipe, crate::embedded::SVELTEKIT_BUN_RECIPE_MJS)
+        .map_err(|e| format!("write sveltekit recipe: {e}"))?;
+    let result = run_capture(
+        "node",
+        &[
+            recipe.display().to_string(),
+            build_dir.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+    if result.code != 0 {
+        let detail = if result.stderr.trim().is_empty() {
+            result.stdout.trim().to_string()
+        } else {
+            result.stderr.trim().to_string()
+        };
+        return Err(format!("SvelteKit bun recipe failed: {detail}"));
+    }
+    if result.stdout.trim().contains("sveltekit bun recipe ready") {
+        print_step(result.stdout.trim());
     }
     Ok(())
 }
@@ -2150,7 +2429,11 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         print_step(&format!("agent: {base}"));
         print_step("cross-toolchain: x86_64-unknown-linux-musl via cargo-zigbuild");
         for (service, _, dir) in &rust_targets {
-            print_step(&format!("cross-compile {} from {} and ship binary", service.name, dir.display()));
+            if builder_is_host() {
+                print_step(&format!("cross-compile {} from {} and ship binary", service.name, dir.display()));
+            } else {
+                print_step(&format!("cross-compile {} in builder VM ({}): zigbuild x86_64-unknown-linux-musl", service.name, builder_name()));
+            }
         }
         for (service, _, dir) in &frontend_targets {
             print_step(&format!(
@@ -2169,7 +2452,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let zig_dir = ensure_cross_toolchain()?;
+    let zig_dir: Option<PathBuf> = if builder_is_host() {
+        ensure_cross_toolchain()?
+    } else {
+        // Rust cross-compiles run inside the builder VM (pinned toolchain) —
+        // no zig/cargo-zigbuild needs to live on the client machine.
+        None
+    };
     let mut build_env: Vec<(String, String)> = vec![("SQLX_OFFLINE".to_string(), "true".to_string())];
     if let Some(zig_dir) = &zig_dir {
         let path = std::env::var("PATH").unwrap_or_default();
@@ -2191,11 +2480,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         }
     }
 
-    // Best-effort: pull each service's generated .env from the CT so the local
-    // compile sees the same values as production (build.rs inputs, feature
-    // flags, PUBLIC_* build-time vars for frontends). The CT .env is generated
-    // state on the CT and never leaves the host.
-    for (service, _, dir) in rust_targets.iter().chain(frontend_targets.iter()) {
+    // Fetch only public build-time values for frontends. Native builds never
+    // receive a production service environment: runtime secrets stay on the
+    // server and are injected into the activated release there.
+    for (service, _, dir) in &frontend_targets {
         let url = format!(
             "{base}/v1/estates/{}/services/{}/env{deploy_query}",
             project_path_segment(&deployment.project),
@@ -2220,18 +2508,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 print_step(&format!("Staging has no .env for {} yet — using production .env for the build", service.name));
             }
         }
-        let is_frontend = frontend_targets.iter().any(|(s, _, _)| s.name == service.name);
         if let Some(text) = env_text {
             for line in text.lines() {
                 if let Some((key, value)) = parse_env_line(line) {
-                    // Security boundary: frontend builds only ever receive the
-                    // public build-time subset (PUBLIC_* / VITE_* /
-                    // NEXT_PUBLIC_*) — those are sent to the browser anyway and
-                    // must be inlined. Secrets in the prod .env (DB URIs, JWT,
-                    // API keys) never reach a frontend build. Rust builds get
-                    // the full env in memory for compile-time metadata only; the
-                    // binary reads its env at runtime from the CT.
-                    if is_frontend && !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
+                    if !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
                         continue;
                     }
                     if !build_env.iter().any(|(existing, _)| existing == &key) {
@@ -2249,17 +2529,15 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // first deploy where the CT .env was generated from an older example.
         // Empty values fall back to the code's defaults; CT-provided values win.
         // Same PUBLIC_*-only filter as above.
-        if is_frontend {
-            let example_path = dir.join(".env.example");
-            if let Ok(text) = std::fs::read_to_string(&example_path) {
-                for line in text.lines() {
-                    if let Some((key, value)) = parse_env_line(line) {
-                        if !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
-                            continue;
-                        }
-                        if !build_env.iter().any(|(existing, _)| existing == &key) {
-                            build_env.push((key, value));
-                        }
+        let example_path = dir.join(".env.example");
+        if let Ok(text) = std::fs::read_to_string(&example_path) {
+            for line in text.lines() {
+                if let Some((key, value)) = parse_env_line(line) {
+                    if !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
+                        continue;
+                    }
+                    if !build_env.iter().any(|(existing, _)| existing == &key) {
+                        build_env.push((key, value));
                     }
                 }
             }
@@ -2276,6 +2554,16 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             continue;
         };
         print_step(&format!("Cross-compiling {} ({package}) for x86_64-unknown-linux-musl", service.name));
+        // Compliance default: production binaries are cross-compiled inside the
+        // isolated Linux builder VM. Host zigbuild is the explicit ECO_BUILDER=host
+        // (dev-only) path.
+        if !builder_is_host() {
+            let binary = cross_compile_rust_on_builder(&service.name, dir, &package, &build_env)?;
+            artifacts.push((service.name.clone(), package.clone(), binary));
+            let hash = compute_rust_input_hash(dir)?;
+            hash_lines.push(format!("{rel} {hash}"));
+            continue;
+        }
         // Workspace members cannot be built from the member dir alone ("current
         // package believes it's in a workspace when it's not"). Detect the
         // workspace root via cargo metadata and build with `-p <package>` from
@@ -2361,9 +2649,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         copy_tree_excluding(
             dir,
             &artifact_dir,
-            &(|name: &str| {
-                matches!(name, "__pycache__" | ".venv" | "venv" | "node_modules" | ".git" | "target" | "dist" | ".next")
-            }) as &dyn Fn(&str) -> bool,
+            &(skip_sensitive_artifact_entry as fn(&str) -> bool),
         )?;
         let requirements = dir.join("requirements.txt");
         if requirements.is_file() {
@@ -2477,10 +2763,19 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     frontend_artifacts.extend(spring_artifacts);
     frontend_artifacts.extend(python_artifacts);
     for (service, rel, dir) in &frontend_targets {
+        if !builder_driver_is_available() {
+            return Err(format!(
+                "{} is a Node service but no local Linux builder VM is reachable. Provision it with Lima (`brew install lima && limactl start --name eco-builder scripts/eco-builder.lima.yml`), or set ECO_BUILDER=host to build on this machine (dev only).",
+                service.name
+            ));
+        }
         if !builder_available() {
             return Err(format!(
-                "{} is a Node service but no local builder is reachable. Provision the eco-builder VM (see docs/guide/dev-toolchain-free-cts.md) or set ECO_BUILDER.",
-                service.name
+                "{} is a Node service but the local builder VM `{}` is not running. Start it (`limactl start {}` or `multipass start {}`).",
+                service.name,
+                builder_name(),
+                builder_name(),
+                builder_name()
             ));
         }
         let hash = compute_frontend_input_hash(dir, &build_env)?;
@@ -2503,7 +2798,7 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             let artifact_dir = std::env::temp_dir().join(format!("eco-frontend-artifact-{}-{}", service.name, std::process::id()));
             let _ = std::fs::remove_dir_all(&artifact_dir);
             std::fs::create_dir_all(&artifact_dir).map_err(|e| e.to_string())?;
-            copy_tree_excluding(dir, &artifact_dir.join("dist"), &(skip_none as fn(&str) -> bool))?;
+            copy_tree_excluding(dir, &artifact_dir.join("dist"), &(skip_sensitive_artifact_entry as fn(&str) -> bool))?;
             frontend_artifacts.push((service.name.clone(), artifact_dir));
             print_step(&format!("Built {} static artifact -> ship", service.name));
             continue;
@@ -2611,20 +2906,24 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("ecompose.yml"), &deployment.content).map_err(|e| e.to_string())?;
+        write_payload_manifest(&payload_dir, &deployment.project)?;
         let tar_path = payload_dir.join("payload.tar.gz");
-        run_command(
+        run_command_env(
             "tar",
             &[
                 "czf".to_string(),
                 tar_path.display().to_string(),
+                "--no-xattrs".to_string(),
                 "-C".to_string(),
                 payload_dir.display().to_string(),
                 "artifacts".to_string(),
                 "rust-hashes".to_string(),
                 "frontend-hashes".to_string(),
                 "ecompose.yml".to_string(),
+                "artifact-manifest.json".to_string(),
             ],
             &util::current_dir(),
+            &[("COPYFILE_DISABLE".to_string(), "1".to_string())],
         )?;
         // Payload size cap — the pricing hook. The shipped payload is the
         // built artifacts + the manifest only (no source).
@@ -2895,4 +3194,44 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
         installed.push(service.name.clone());
     }
     Ok(installed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensitive_artifact_filter_blocks_secrets_and_workspace_state() {
+        for name in [".env", ".env.production", ".git", ".eco", ".ssh", "debug.log", "node_modules"] {
+            assert!(skip_sensitive_artifact_entry(name), "expected {name} to be excluded");
+        }
+        for name in ["index.html", "app.py", "requirements.txt", "public"] {
+            assert!(!skip_sensitive_artifact_entry(name), "expected {name} to be shippable");
+        }
+    }
+
+    #[test]
+    fn payload_manifest_records_sha256_and_size() {
+        let root = std::env::temp_dir().join(format!("eco-payload-manifest-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("artifacts/web")).unwrap();
+        std::fs::write(root.join("artifacts/web/index.html"), b"hello").unwrap();
+        std::fs::write(root.join("ecompose.yml"), b"project: sample\n").unwrap();
+        std::fs::write(root.join("rust-hashes"), b"\n").unwrap();
+        std::fs::write(root.join("frontend-hashes"), b"\n").unwrap();
+
+        write_payload_manifest(&root, "sample").unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("artifact-manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["project"], "sample");
+        let entry = manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == "artifacts/web/index.html")
+            .unwrap();
+        assert_eq!(entry["size"], 5);
+        assert_eq!(entry["sha256"].as_str().unwrap().len(), 64);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
