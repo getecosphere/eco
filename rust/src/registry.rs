@@ -495,10 +495,9 @@ pub fn get_or_allocate_port(
         }
 
         if port.is_none() {
-            let candidates = max_port - min_port + 1;
-            let start_offset = rand::thread_rng().gen_range(0..candidates);
-            for offset in 0..candidates {
-                let candidate = min_port + ((start_offset + offset) % candidates);
+            // Bin-packing: fill the lowest free port first so the band stays
+            // dense and released holes are reused before anything higher.
+            for candidate in min_port..=max_port {
                 if used.contains(&candidate) || port_in_use(candidate) {
                     continue;
                 }

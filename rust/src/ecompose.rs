@@ -255,6 +255,10 @@ pub struct Service {
     pub r#type: String,
     pub dir: String,
     pub binary: String,
+    /// Requested host port offset. Eco maps it into the host port band:
+    /// `actual = PORT_BAND_BASE + port` (e.g. `port: 7030` → `27030`). 0 means
+    /// "no preference" — the registry bin-packs the lowest free port.
+    pub port: u32,
     pub grants_secrets: Vec<String>,
     pub grants_network: Vec<String>,
     /// Route-protection declarations (`access.routes`): path + access level.
@@ -439,6 +443,7 @@ pub fn parse_services(content: &str) -> Vec<Service> {
                 r#type: String::new(),
                 dir: String::new(),
                 binary: String::new(),
+                port: 0,
                 grants_secrets: Vec::new(),
                 grants_network: Vec::new(),
                 access_routes: Vec::new(),
@@ -535,6 +540,11 @@ pub fn parse_services(content: &str) -> Vec<Service> {
             }
             if let Some(bin_val) = match_indented_value(line, 4, "binary") {
                 c.binary = util::strip_quotes(bin_val.trim());
+                in_runtimes = false;
+                continue;
+            }
+            if let Some(port_val) = match_indented_value(line, 4, "port") {
+                c.port = port_val.trim().parse::<u32>().unwrap_or(0);
                 in_runtimes = false;
                 continue;
             }
