@@ -10,8 +10,8 @@ This repository (`getecosphere/eco`) is the **public, client-only** build of the
 Eco CLI. The host-side control plane — the `eco serve --port 8790` agent, the
 deploy engine, Cloudflare automation, accounts, and the infra ops commands
 (`eco prox`/`ct`/`proxy`/`ports`/`db`/`sendemail`/`expose`) — lives in the
-**private** `getecosphere/eco-server` repo, which builds the full binary used on
-the dev machine and the remote host.
+**private** `getecosphere/eco-server` repo, which builds the eco-server binary
+deployed **only to the Proxmox host** (it is not installed on dev machines).
 
 Consequences for this repo:
 
