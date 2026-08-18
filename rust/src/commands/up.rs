@@ -293,7 +293,7 @@ fn cargo_package_name(cargo_toml: &str) -> Option<String> {
 }
 
 fn print_step(message: &str) {
-    util::println_stdout(&format!("\n[eco up] {message}"));
+    util::println_stdout(&format!("\n{message}"));
 }
 
 pub struct ProjectDeployment {
@@ -673,7 +673,7 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     assert_local_pm2_apps_present(&ecosystem_config, &deployment.project_dir)?;
     print_step(&format!("Completed local dev bootstrap for {}", deployment.project));
 
-    util::println_stdout("\n[eco up] Following PM2 logs — press Ctrl+C to stop\n");
+    util::println_stdout("\nFollowing PM2 logs — press Ctrl+C to stop\n");
     let status = std::process::Command::new("pm2")
         .args(["logs".to_string(), "--lines".to_string(), "50".to_string()])
         .stdin(std::process::Stdio::inherit())
@@ -3058,7 +3058,7 @@ fn print_lxs_update_notice(content: &str, project_dir: &Path, skip: bool) {
     if updates.is_empty() {
         return;
     }
-    util::println_stdout("\n[eco] LXS updates available:");
+    util::println_stdout("\nLXS updates available:");
     for (service, pinned, latest) in &updates {
         let (name, _) = crate::commands::lxs::parse_pinned_ref(pinned);
         let from_v = pinned.split('@').nth(1).unwrap_or("");
