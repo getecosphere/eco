@@ -44,10 +44,10 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
                 ecompose.push_str("\nservices:\n");
                 ecompose.push_str(&block);
                 ecompose.push('\n');
-                println!("[eco] Detected {} service: {} ({})", service.name, service.path, service.runtimes.join(", "));
+                println!("Detected {} service: {} ({})", service.name, service.path, service.runtimes.join(", "));
             } else {
                 ecompose.push_str("\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n");
-                println!("[eco] No services detected (looked for Cargo.toml/go.mod/pom.xml/package.json/manage.py/app.py/*.csproj). Edit ecompose.yml by hand, or run `eco lxs add <name>@<version>` to compose a registry LXS.\n");
+                println!("No services detected (looked for Cargo.toml/go.mod/pom.xml/package.json/manage.py/app.py/*.csproj). Edit ecompose.yml by hand, or run `eco lxs add <name>@<version>` to compose a registry LXS.\n");
             }
         } else {
             ecompose.push_str("\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n");
@@ -64,7 +64,7 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
             ));
         }
         match crate::ecompose::read_ecompose(&ecompose_path.display().to_string(), dir) {
-            Ok(_) => println!("[eco] {} exists and parses cleanly — leaving it untouched.", ecompose_path.display()),
+            Ok(_) => println!("{} exists and parses cleanly — leaving it untouched.", ecompose_path.display()),
             Err(e) => return Err(format!(
                 "{} exists but failed to parse:\n  {e}\nFix the manifest and run `eco init` again.",
                 ecompose_path.display()
@@ -98,7 +98,7 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
         )?;
     }
 
-    println!("[eco] Initialized project {project} in {}/", dir.display());
+    println!("Initialized project {project} in {}/", dir.display());
     println!("  ecompose.yml      the manifest (project root = the only scanned dir)");
     println!("  .eco/state.json   gitignored estate binding + registry");
     println!("\nNext:");
