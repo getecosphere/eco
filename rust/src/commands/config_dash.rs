@@ -93,6 +93,7 @@ const HTML: &str = r#"<!doctype html>
     position:sticky; top:0; z-index:5; }
   header.main h2 { margin:0; font-size:1.15rem; letter-spacing:-.02em; }
   header.main .path { color:var(--muted); font-size:.8rem; font-family:"DM Mono",ui-monospace,monospace; }
+  header.main .desc { color:#8d8493; font-size:.85rem; margin-top:.15rem; }
   .openlinks { display:flex; gap:.5rem; margin-top:.55rem; }
   .openlink { display:inline-flex; align-items:center; gap:.3rem; padding:.38rem .8rem; border-radius:8px;
     background:#fff; border:1px solid var(--line); color:var(--accent); font-weight:700; font-size:.8rem; text-decoration:none; }
@@ -173,6 +174,7 @@ const HTML: &str = r#"<!doctype html>
   <header class="main">
     <h2 id="estateTitle" data-i18n="selectEstate">Select an estate on the left</h2>
     <div class="path" id="estatePath"></div>
+    <div class="desc" id="estateDesc"></div>
     <div class="openlinks">
       <a id="openProd" class="openlink" target="_blank" rel="noopener" data-i18n="openProd">Open prod ↗</a>
       <a id="openLocal" class="openlink" target="_blank" rel="noopener" data-i18n="openLocal">Open local ↗</a>
@@ -203,7 +205,7 @@ const I18N = {
     treeLoading:'Loading estates…', sidebarHint:'Save → applies after', sidebarHint2:'. Prod env read-only &amp; hidden by default.',
     selectEstate:'Select an estate on the left', openProd:'Open prod ↗', openLocal:'Open local ↗',
     tabLxs:'LXS Config', tabRaw:'ecompose.yml', tabEnv:'Prod env',
-    general:'General', projectName:'Project name', mainEstate:'Main estate', hostname:'Hostname', saveGeneral:'Save General',
+    general:'General', projectName:'Project name', mainEstate:'Main estate', hostname:'Hostname', description:'Description', saveGeneral:'Save General',
     saving:'Saving…', saved:'Saved.', runUp:'Saved. Run `eco up` to apply.',
     coreDomain:'Core domain (source)', reusableLxs:'Reusable LXS (registry)', badgeCore:'CORE', badgeLxs:'LXS',
     lxsNoSchema:'This LXS has no config schema yet (contract v2 fields).',
@@ -218,7 +220,7 @@ const I18N = {
     treeLoading:'Memuat estate…', sidebarHint:'Simpan → berlaku setelah', sidebarHint2:'. Prod env read-only &amp; tersembunyi default.',
     selectEstate:'Pilih estate di sidebar', openProd:'Buka di prod ↗', openLocal:'Buka lokal ↗',
     tabLxs:'LXS Config', tabRaw:'ecompose.yml', tabEnv:'Prod env',
-    general:'Umum', projectName:'Nama project', mainEstate:'Estate utama', hostname:'Hostname', saveGeneral:'Simpan Umum',
+    general:'Umum', projectName:'Nama project', mainEstate:'Estate utama', hostname:'Hostname', description:'Deskripsi', saveGeneral:'Simpan Umum',
     saving:'Menyimpan…', saved:'Tersimpan.', runUp:'Tersimpan. Jalankan `eco up` untuk menerapkan.',
     coreDomain:'Core domain (sumber)', reusableLxs:'Reusable LXS (registry)', badgeCore:'CORE', badgeLxs:'LXS',
     lxsNoSchema:'LXS ini belum menyatakan schema konfigurasi (contract v2 fields).',
@@ -341,6 +343,8 @@ async function selectEstate(e, wrapNode) {
   CURRENT.path = e.path;
   $('#estateTitle').textContent = CURRENT.project;
   $('#estatePath').textContent = e.path;
+  $('#estateDesc').textContent = CURRENT.description || '';
+  $('#estateDesc').style.display = CURRENT.description ? '' : 'none';
   const prod = $('#openProd'), loc = $('#openLocal');
   if (CURRENT.prodUrl) { prod.href = CURRENT.prodUrl; prod.hidden = false; } else prod.hidden = true;
   if (CURRENT.localUrl) { loc.href = CURRENT.localUrl; loc.hidden = false; } else loc.hidden = true;
@@ -370,15 +374,18 @@ function renderGeneral() {
   mk(t('projectName'), 'project', CURRENT.project);
   mk(t('mainEstate'), 'main', CURRENT.main);
   mk(t('hostname'), 'hostname', CURRENT.hostname);
+  const ddesc = document.createElement('div'); ddesc.style.cssText = 'grid-column:1/-1';
+  ddesc.innerHTML = `<label>${t('description')}</label><input id="gen-description" value="${esc(CURRENT.description||'')}" style="width:100%">`;
+  grow.appendChild(ddesc);
   g.appendChild(grow);
   const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = t('saveGeneral'); btn.type = 'button';
   const st = document.createElement('span'); st.className = 'status';
   btn.onclick = async () => {
     btn.disabled = true; st.className = 'status'; st.textContent = t('saving');
     const r = await fetch('/api/general' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ project: $('#gen-project').value.trim(), main: $('#gen-main').value.trim(), hostname: $('#gen-hostname').value.trim() }) });
+      body: JSON.stringify({ project: $('#gen-project').value.trim(), main: $('#gen-main').value.trim(), hostname: $('#gen-hostname').value.trim(), description: $('#gen-description').value.trim() }) });
     const res = await r.text();
-    if (r.ok) { st.className = 'status ok'; st.textContent = t('saved'); loadEstates(); }
+    if (r.ok) { st.className = 'status ok'; st.textContent = t('saved'); loadEstates(); selectEstate(ESTATES.find(x => x.path === CURRENT.path)); }
     else { st.className = 'status err'; st.textContent = res; }
     btn.disabled = false;
   };
@@ -780,7 +787,6 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
     let project = ecompose::parse_project_name(content);
     let hostname = ecompose::parse_estates(content).first().map(|e| e.hostname.clone()).unwrap_or_default();
     let registry = registry_address(estate_root);
-
     let mut svc_values = Vec::new();
     for svc in &services {
         let mut entry = serde_json::Map::new();
@@ -838,10 +844,26 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
         "project": project,
         "main": ecompose::parse_main(&content),
         "hostname": hostname,
+        "description": top_level_value(content, "description"),
         "prodUrl": if hostname.is_empty() { String::new() } else { format!("https://{}", hostname) },
         "localUrl": local_dev_url(estate_root, &project, &services),
         "services": svc_values,
     }))
+}
+
+/// Read a top-level scalar key (e.g. `description:`) from ecompose.yml.
+fn top_level_value(content: &str, key: &str) -> String {
+    let prefix = format!("{key}:");
+    for raw in content.split('\n') {
+        let line = raw.trim_end_matches('\r');
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line.starts_with(&prefix) {
+            return crate::util::strip_quotes(line[prefix.len()..].trim());
+        }
+    }
+    String::new()
 }
 
 /// Best-effort local dev URL for an estate: the `-frontend`/-app PM2 app port
@@ -994,9 +1016,9 @@ fn apply_secret(estate_root: &Path, service: &str, key: &str, value: &str) -> Re
     std::fs::write(&env_path, lines.join("\n") + "\n").map_err(|e| format!("write {}: {e}", env_path.display()))
 }
 
-/// Replace top-level `key: value` lines (project, main) and the first
-/// `hostname:` under the estates block. Leaves everything else untouched.
-fn apply_general(content: &str, project: &str, main: &str, hostname: &str) -> Result<String, String> {
+/// Replace top-level scalar keys (project, main, description, hostname under
+/// estates). Leaves everything else untouched.
+fn apply_general(content: &str, project: &str, main: &str, hostname: &str, description: &str) -> Result<String, String> {
     if project.trim().is_empty() {
         return Err("project name cannot be empty".to_string());
     }
@@ -1005,6 +1027,7 @@ fn apply_general(content: &str, project: &str, main: &str, hostname: &str) -> Re
     let mut hostname_done = false;
     let mut project_done = false;
     let mut main_done = false;
+    let mut desc_done = false;
     for line in content.lines() {
         let trimmed = line.trim_end_matches('\r');
         if trimmed.starts_with("project:") && !line.starts_with(' ') {
@@ -1015,6 +1038,11 @@ fn apply_general(content: &str, project: &str, main: &str, hostname: &str) -> Re
         if trimmed.starts_with("main:") && !line.starts_with(' ') {
             out.push(format!("main: {}", main.trim()));
             main_done = true;
+            continue;
+        }
+        if trimmed.starts_with("description:") && !line.starts_with(' ') {
+            out.push(format!("description: \"{}\"", description.trim()));
+            desc_done = true;
             continue;
         }
         if trimmed == "estates:" && !line.starts_with(' ') {
@@ -1033,11 +1061,21 @@ fn apply_general(content: &str, project: &str, main: &str, hostname: &str) -> Re
         }
         out.push(line.to_string());
     }
+    let mut insert_at = 0;
     if !project_done {
         out.insert(0, format!("project: {}", project.trim()));
+        insert_at += 1;
+    } else {
+        insert_at = 1;
     }
     if !main_done && !main.trim().is_empty() {
-        out.insert(1, format!("main: {}", main.trim()));
+        out.insert(insert_at, format!("main: {}", main.trim()));
+        insert_at += 1;
+    } else if main_done {
+        insert_at += 1;
+    }
+    if !desc_done && !description.trim().is_empty() {
+        out.insert(insert_at, format!("description: \"{}\"", description.trim()));
     }
     Ok(out.join("\n") + "\n")
 }
@@ -1240,6 +1278,7 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                         serde_json::json!({
                             "project": project,
                             "path": path,
+                            "description": top_level_value(&content, "description"),
                             "services": services.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
                             "prodUrl": if hostname.is_empty() { String::new() } else { format!("https://{}", hostname) },
                             "localUrl": local_dev_url(&dir, project, &services),
@@ -1292,7 +1331,8 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                         let project = req["project"].as_str().unwrap_or("").to_string();
                         let main = req["main"].as_str().unwrap_or("").to_string();
                         let hostname = req["hostname"].as_str().unwrap_or("").to_string();
-                        let next = apply_general(&content, &project, &main, &hostname)?;
+                        let description = req["description"].as_str().unwrap_or("").to_string();
+                        let next = apply_general(&content, &project, &main, &hostname, &description)?;
                         std::fs::write(&file, next).map_err(|e| format!("write {}: {e}", file.display()))
                     }) {
                         Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
@@ -1423,11 +1463,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_general_updates_project_main_hostname() {
-        let content = "project: old\nmain: old\n\nestates:\n  old:\n    hostname: old.example.com\n    services: []\n\nservices:\n  a:\n    lxs: x@1.0.0\n";
-        let out = apply_general(content, "new", "new", "new.example.com").unwrap();
+    fn apply_general_updates_project_main_hostname_description() {
+        let content = "project: old\nmain: old\n\ndescription: \"Old desc\"\nestates:\n  old:\n    hostname: old.example.com\n    services: []\n\nservices:\n  a:\n    lxs: x@1.0.0\n";
+        let out = apply_general(content, "new", "new", "new.example.com", "A new estate").unwrap();
         assert!(out.starts_with("project: new\nmain: new\n"));
+        assert!(out.contains("description: \"A new estate\""));
+        assert!(!out.contains("Old desc"));
         assert!(out.contains("    hostname: new.example.com"));
         assert!(out.contains("services:\n  a:\n    lxs: x@1.0.0"), "services must survive: {out}");
+    }
+
+    #[test]
+    fn apply_general_inserts_description_when_missing() {
+        let content = "project: x\nservices:\n  a:\n    lxs: x@1.0.0\n";
+        let out = apply_general(content, "x", "", "", "Fresh description").unwrap();
+        assert!(out.starts_with("project: x\ndescription: \"Fresh description\"\n"), "{out}");
+        assert!(out.contains("services:\n  a:\n    lxs: x@1.0.0"));
     }
 }
