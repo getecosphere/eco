@@ -106,6 +106,43 @@ const HTML: &str = r#"<!doctype html>
   .ctxmenu .head { font-size:.68rem; letter-spacing:.07em; text-transform:uppercase; color:#8d8493; padding:.3rem .75rem .2rem; }
   .hint { padding:.6rem 1rem .8rem; color:var(--muted); font-size:.78rem; border-top:1px solid var(--line); }
   .hint code { background:var(--chipbg); padding:.02rem .3rem; border-radius:4px; }
+  /* ---------- auth bar ---------- */
+  .authbar { padding:.6rem .8rem; border-top:1px solid var(--line); display:flex; align-items:center; gap:.6rem; }
+  .authbar .signin { flex:1; padding:.5rem; border:0; border-radius:8px; background:var(--accent); color:#fff; font-weight:700; cursor:pointer; }
+  .authbar .authed { display:flex; align-items:center; gap:.55rem; width:100%; }
+  .authed .avatar { width:30px; height:30px; border-radius:50%; object-fit:cover; background:var(--chipbg); }
+  .authed .who { flex:1; min-width:0; }
+  .authed .who span { display:block; font-weight:700; font-size:.84rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .authed .who small { display:block; color:var(--muted); font-size:.72rem; }
+  .authbar .signout { border:0; background:none; color:var(--muted); cursor:pointer; font-size:.78rem; padding:.3rem .4rem; border-radius:6px; }
+  .authbar .signout:hover { background:#f1eef6; color:var(--text); }
+  /* ---------- modal ---------- */
+  .modal { position:fixed; inset:0; background:rgba(23,20,29,.45); display:flex; align-items:center; justify-content:center; z-index:200; }
+  .modalcard { background:#fff; border-radius:14px; padding:1.4rem 1.5rem; width:min(360px, 92vw); box-shadow:0 20px 60px rgba(0,0,0,.25); }
+  .modalcard h3 { margin:0 0 .2rem; }
+  .modalcard .modalsub { margin:0 0 1rem; color:var(--muted); font-size:.82rem; }
+  .modalcard label { display:block; font-size:.76rem; color:var(--muted); margin:.6rem 0 .2rem; }
+  .modalcard input { width:100%; padding:.5rem .6rem; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  .modalacts { display:flex; gap:.6rem; justify-content:flex-end; margin-top:1rem; }
+  .modalcard .status { display:block; min-height:1.2em; margin-top:.6rem; }
+  /* ---------- homepage ---------- */
+  .home .hero { padding:2.4rem 0 .4rem; }
+  .home .hero h2 { margin:0; font-size:1.9rem; letter-spacing:-.04em; line-height:1.1; }
+  .home .hero p { color:var(--muted); max-width:560px; margin:.6rem 0 0; }
+  .home .cta { display:flex; gap:.6rem; margin-top:1.1rem; }
+  .stats { display:flex; gap:1.5rem; margin:1.8rem 0; }
+  .stats .stat { font-size:1.5rem; font-weight:800; letter-spacing:-.03em; }
+  .stats .stat small { display:block; font-size:.72rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  .hsection { margin:1.6rem 0 .6rem; font-size:.78rem; letter-spacing:.08em; text-transform:uppercase; color:#8d8493; }
+  .hcards { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:.8rem; }
+  .hcard { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.9rem 1rem; cursor:pointer; }
+  .hcard:hover { border-color:var(--accent); }
+  .hcard .top { display:flex; align-items:center; gap:.6rem; }
+  .hcard .top img { width:22px; height:22px; border-radius:5px; }
+  .hcard .top b { font-size:.95rem; }
+  .hcard p { margin:.4rem 0 0; color:var(--muted); font-size:.82rem; min-height:2.4em; }
+  .hcard .links { display:flex; gap:.35rem; margin-top:.55rem; }
+  .hcard .links .rowlink { opacity:1; }
   /* ---------- main ---------- */
   main { flex:1; overflow:auto; height:100vh; }
   header.main { padding:1.1rem 1.6rem .8rem; border-bottom:1px solid var(--line); background:#fff;
@@ -189,6 +226,14 @@ const HTML: &str = r#"<!doctype html>
   </div>
   <div id="searchwrap"><input id="search" type="search" data-i18n-ph="search" placeholder="Search estates, services, keys…"></div>
   <div id="tree"><p class="hint" data-i18n="treeLoading">Loading estates…</p></div>
+  <div class="authbar" id="authbar">
+    <button class="signin" id="authSignIn" hidden data-i18n="signIn">Sign in</button>
+    <div class="authed" id="authAuthed" hidden>
+      <img class="avatar" id="authAvatar" alt="">
+      <div class="who"><span id="authName"></span><small id="authRole"></small></div>
+      <button class="signout" id="authSignOut" title="" data-i18n="signOut">Sign out</button>
+    </div>
+  </div>
   <div class="hint"><span data-i18n="sidebarHint">Save → applies after</span> <code>eco up</code><span data-i18n="sidebarHint2">. Prod env read-only &amp; hidden by default.</span></div>
 </aside>
 <main>
@@ -207,11 +252,27 @@ const HTML: &str = r#"<!doctype html>
     </nav>
   </header>
   <div class="content">
-    <section class="panel active" id="p-lxs"><p class="empty" data-i18n="selectEstate">Select an estate on the left to start.</p></section>
+    <section class="panel active" id="p-home"><p class="empty" data-i18n="homeLoading">Loading…</p></section>
+    <section class="panel" id="p-lxs"><p class="empty" data-i18n="selectEstate">Select an estate on the left to start.</p></section>
     <section class="panel" id="p-raw"><p class="empty">—</p></section>
     <section class="panel" id="p-env"><p class="empty">—</p></section>
   </div>
 </main>
+<div class="modal" id="loginModal" hidden>
+  <div class="modalcard">
+    <h3 data-i18n="loginTitle">Sign in</h3>
+    <p class="modalsub" id="loginSub">—</p>
+    <label data-i18n="username">Username or email</label>
+    <input id="loginUser" type="text" autocomplete="username">
+    <label data-i18n="password">Password</label>
+    <input id="loginPass" type="password" autocomplete="current-password">
+    <div class="modalacts">
+      <button class="ghost" id="loginCancel" data-i18n="cancel">Cancel</button>
+      <button class="save" id="loginGo" data-i18n="signIn">Sign in</button>
+    </div>
+    <p class="status" id="loginStatus"></p>
+  </div>
+</div>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -238,6 +299,13 @@ const I18N = {
     startDev:'Start dev (eco up dev)', devStarting:'Starting dev…', devRunning:'Dev running.', devDone:'Dev ready.',
     devFail:'Dev failed (see log).', devAlready:'eco up dev already running.', devLog:'log', stopHint:'or stop it in a terminal', localDev:'Local dev',
     pm2Pause:'Pause', pm2Stop:'Stop', pm2Delete:'Delete',
+    signIn:'Sign in', signOut:'Sign out', cancel:'Cancel', username:'Username or email', password:'Password',
+    loginTitle:'Sign in', loginSub:'Authenticate against the running estate auth (auth LXS).',
+    loginNoAuth:'No auth LXS running — start an estate with eco up dev first.', loginBad:'Sign-in failed.',
+    home:'Home', homeLoading:'Loading…', homeTitle:'Your estates, one console.',
+    homeSub:'Ecosphere Genie — configure, run, and monitor every estate: core domains and reusable LXS from one place.',
+    homeCtaDev:'Start an estate', homeCtaSignin:'Sign in', homeCtaBrowse:'Browse estates', homeStatsEstates:'estates', homeStatsServices:'services',
+    homeEstates:'Your estates', homeLoggedInAs:'Signed in as',
   },
   id: {
     subtitle:'konfigurasi estate (dev)', search:'Cari estate, service, key…',
@@ -256,6 +324,13 @@ const I18N = {
     startDev:'Jalankan dev (eco up dev)', devStarting:'Memulai dev…', devRunning:'Dev berjalan.', devDone:'Dev siap.',
     devFail:'Dev gagal (lihat log).', devAlready:'eco up dev sedang berjalan.', devLog:'log', stopHint:'atau hentikan di terminal', localDev:'Local dev',
     pm2Pause:'Jeda', pm2Stop:'Hentikan', pm2Delete:'Hapus',
+    signIn:'Masuk', signOut:'Keluar', cancel:'Batal', username:'Username atau email', password:'Password',
+    loginTitle:'Masuk', loginSub:'Autentikasi terhadap auth LXS estate yang berjalan.',
+    loginNoAuth:'Auth LXS belum berjalan — start estate dengan eco up dev dulu.', loginBad:'Gagal masuk.',
+    home:'Beranda', homeLoading:'Memuat…', homeTitle:'Semua estate kamu, satu console.',
+    homeSub:'Ecosphere Genie — konfigurasi, jalankan, dan pantau setiap estate: core domain dan LXS reusable dari satu tempat.',
+    homeCtaDev:'Jalankan estate', homeCtaSignin:'Masuk', homeCtaBrowse:'Jelajahi estate', homeStatsEstates:'estate', homeStatsServices:'service',
+    homeEstates:'Estate kamu', homeLoggedInAs:'Masuk sebagai',
   }
 };
 let LANG = localStorage.getItem('ecoGenieLang') || 'en';
@@ -328,11 +403,20 @@ async function loadEstates() {
   ESTATES = await r.json();
   renderTree();
   const pref = qs.get('dir');
-  if (pref) { const e = ESTATES.find(x => x.path === pref); if (e) selectEstate(e); }
-  else if (ESTATES.length) selectEstate(ESTATES[0]);
+  if (pref) { const e = ESTATES.find(x => x.path === pref); if (e) selectEstate(e); else showHome(); }
+  else showHome();
 }
 function renderTree() {
   const tree = $('#tree'); tree.innerHTML = '';
+  const homeNode = document.createElement('div'); homeNode.className = 'estate';
+  const homeRow = document.createElement('div'); homeRow.className = 'row';
+  const homeCaret = document.createElement('span'); homeCaret.className = 'caret'; homeCaret.textContent = '';
+  const homeImg = document.createElement('img'); homeImg.className = 'favicon'; homeImg.width = 16; homeImg.height = 16; homeImg.alt = '';
+  homeImg.src = '/favicon-32.png';
+  const homeName = document.createElement('span'); homeName.textContent = t('home');
+  homeRow.append(homeCaret, homeImg, homeName);
+  homeRow.onclick = () => { showHome(); document.querySelectorAll('.estate').forEach(n => n.classList.remove('active')); };
+  homeNode.appendChild(homeRow); tree.appendChild(homeNode);
   for (const e of ESTATES) {
     const wrap = document.createElement('div'); wrap.className = 'estate'; wrap.dataset.path = cssId(e.path);
     const row = document.createElement('div'); row.className = 'row';
@@ -379,6 +463,10 @@ async function selectEstate(e, wrapNode) {
   document.querySelectorAll('.estate-children').forEach(n => { n.style.display = 'none'; n.parentElement.querySelector('.caret').textContent = '▸'; });
   if (wrapNode) { wrapNode.classList.add('active'); wrapNode.querySelector('.estate-children').style.display = 'block';
     wrapNode.querySelector('.caret').textContent = '▾'; }
+  $('#tabs').style.display = 'flex';
+  $('#p-home').classList.remove('active');
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  $('#p-lxs').classList.add('active');
   const r = await fetch('/api/estate' + q({ dir: e.path }));
   if (!r.ok) return setStatus(await r.text(), 'err');
   CURRENT = await r.json();
@@ -664,9 +752,127 @@ $('#search').addEventListener('input', (e) => {
     if (first) first.scrollIntoView({ behavior:'smooth', block:'center' });
   }
 });
+/* ---------------- auth ---------------- */
+let AUTH = null, ME = null;
+const TOKEN_KEY = 'ecoGenieToken';
+function avatarFor(name, size) {
+  const c = document.createElement('div');
+  c.style.cssText = `width:${size||30}px;height:${size||30}px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:${Math.round((size||30)*0.42)}px;background:${colorFor(name||'?')};flex:none;`;
+  c.textContent = (name || '?').trim().charAt(0).toUpperCase();
+  return c;
+}
+function colorFor(s) {
+  const colors = ['#5b3fd6','#1a5fb4','#0e7490','#b45309','#be185d','#15803d','#7c3aed','#c2410c'];
+  let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return colors[h % colors.length];
+}
+async function refreshAuth() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) { setAuthed(null); return; }
+  const r = await fetch('/api/me' + q({ token }));
+  if (!r.ok) { setAuthed(null); localStorage.removeItem(TOKEN_KEY); return; }
+  const d = await r.json();
+  ME = d; setAuthed(d.user, d.avatarUrl);
+}
+function setAuthed(user, avatarUrl) {
+  $('#authSignIn').hidden = !!user;
+  $('#authAuthed').hidden = !user;
+  if (!user) { ME = null; if (CURRENT) renderHome(); return; }
+  const av = $('#authAvatar');
+  const name = user.name || user.username;
+  $('#authName').textContent = name;
+  $('#authRole').textContent = user.role || '';
+  $('#authSignOut').title = t('signOut');
+  if (avatarUrl && (avatarUrl.startsWith('http') || avatarUrl.startsWith('/'))) {
+    av.src = avatarUrl; av.onerror = () => { av.replaceWith(avatarFor(name)); };
+  } else {
+    av.replaceWith(avatarFor(name));
+    $('#authAuthed').prepend(avatarFor(name));
+  }
+}
+async function doLogin(user, pass) {
+  const st = $('#loginStatus'); st.className = 'status'; st.textContent = t('saving');
+  const r = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username: user, password: pass }) });
+  const d = await r.json();
+  if (!r.ok || !d.token) { st.className = 'status err'; st.textContent = d.message || t('loginBad'); return; }
+  localStorage.setItem(TOKEN_KEY, d.token);
+  $('#loginModal').hidden = true;
+  await refreshAuth();
+  renderHome();
+}
+function openLogin() {
+  const cfg = AUTH || { authAvailable: false };
+  if (!cfg.authAvailable) { $('#loginSub').textContent = t('loginNoAuth'); return; }
+  $('#loginSub').textContent = t('loginSub');
+  $('#loginUser').value = ''; $('#loginPass').value = '';
+  $('#loginStatus').textContent = '';
+  $('#loginModal').hidden = false;
+  setTimeout(() => $('#loginUser').focus(), 30);
+}
+$('#authSignIn').onclick = openLogin;
+$('#authSignOut').onclick = async () => {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) fetch('/api/auth/logout', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ token }) });
+  localStorage.removeItem(TOKEN_KEY); ME = null;
+  setAuthed(null);
+};
+$('#loginGo').onclick = () => doLogin($('#loginUser').value.trim(), $('#loginPass').value);
+$('#loginPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#loginGo').click(); });
+$('#loginCancel').onclick = () => { $('#loginModal').hidden = true; };
+/* ---------------- home ---------------- */
+function showHome() {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  $('#p-home').classList.add('active');
+  $('#tabs').style.display = 'none';
+  renderHome();
+}
+function renderHome() {
+  const sec = $('#p-home'); sec.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className = 'home';
+  const hero = document.createElement('div'); hero.className = 'hero';
+  const h = document.createElement('h2'); h.textContent = t('homeTitle'); hero.appendChild(h);
+  const p = document.createElement('p'); p.textContent = t('homeSub'); hero.appendChild(p);
+  const cta = document.createElement('div'); cta.className = 'cta';
+  const b1 = document.createElement('button'); b1.className = 'save';
+  b1.textContent = ME ? t('homeCtaBrowse') : (AUTH && AUTH.authAvailable ? t('homeCtaSignin') : t('homeCtaDev'));
+  b1.onclick = () => { if (ME) { if (ESTATES.length) selectEstate(ESTATES[0]); } else if (AUTH && AUTH.authAvailable) openLogin(); else if (ESTATES.length) selectEstate(ESTATES[0]); };
+  cta.appendChild(b1);
+  if (ME) { const b2 = document.createElement('button'); b2.className = 'ghost'; b2.textContent = t('signOut'); b2.onclick = () => $('#authSignOut').click(); cta.appendChild(b2); }
+  hero.appendChild(cta); wrap.appendChild(hero);
+  const stats = document.createElement('div'); stats.className = 'stats';
+  const services = ESTATES.reduce((n, e) => n + (e.services || []).length, 0);
+  stats.innerHTML = `<div class="stat">${ESTATES.length}<small>${t('homeStatsEstates')}</small></div>
+    <div class="stat">${services}<small>${t('homeStatsServices')}</small></div>`;
+  wrap.appendChild(stats);
+  const hs = document.createElement('div'); hs.className = 'hsection'; hs.textContent = t('homeEstates'); wrap.appendChild(hs);
+  const cards = document.createElement('div'); cards.className = 'hcards';
+  for (const e of ESTATES) {
+    const card = document.createElement('div'); card.className = 'hcard';
+    const top = document.createElement('div'); top.className = 'top';
+    const img = document.createElement('img'); img.src = '/api/estate-favicon' + q({ dir: e.path }); img.alt = '';
+    img.onerror = () => img.remove();
+    const b = document.createElement('b'); b.textContent = e.project; top.append(img, b);
+    card.appendChild(top);
+    const d = document.createElement('p'); d.textContent = e.description || ''; card.appendChild(d);
+    const links = document.createElement('div'); links.className = 'links';
+    links.appendChild(rowLink('globe', e.prodUrl, t('openProd')));
+    links.appendChild(rowLink('monitor', e.localUrl, t('openLocal')));
+    card.appendChild(links);
+    card.onclick = () => selectEstate(e);
+    cards.appendChild(card);
+  }
+  wrap.appendChild(cards);
+  sec.appendChild(wrap);
+}
 /* ---------------- boot ---------------- */
-setLang(LANG);
-loadEstates();
+(async () => {
+  setLang(LANG);
+  const ar = await fetch('/api/auth-config');
+  AUTH = await ar.json();
+  await refreshAuth();
+  await loadEstates();
+})();
 </script>
 </body>
 </html>"#;
@@ -1192,10 +1398,13 @@ fn detect_dev_url(env_key: &str, needles: &[&str]) -> Option<String> {
 }
 
 fn auth_base_url() -> Option<String> {
-    detect_dev_url("ECO_GENIE_AUTH_URL", &["auth-backend", "auth_backend", "auth-back"])
+    detect_dev_url(
+        "ECO_GENIE_AUTH_URL",
+        &["auth-backend", "auth_backend", "rwid-auth", "auth"],
+    )
 }
 fn profile_base_url() -> Option<String> {
-    detect_dev_url("ECO_GENIE_PROFILE_URL", &["profile-backend", "profile_backend"])
+    detect_dev_url("ECO_GENIE_PROFILE_URL", &["profile-backend", "profile_backend", "profile"])
 }
 
 /// Forward a request to a detected dev LXS and return its raw response.
