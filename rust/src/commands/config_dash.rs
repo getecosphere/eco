@@ -79,6 +79,14 @@ const HTML: &str = r#"<!doctype html>
   .estate > .row { display:flex; align-items:center; gap:.5rem; padding:.42rem .55rem; border-radius:8px; cursor:pointer; }
   .estate > .row:hover { background:#f1eef6; }
   .estate.active > .row { background:var(--chipbg); color:var(--accent); font-weight:700; }
+  .rowlinks { margin-left:auto; display:flex; gap:2px; opacity:0; transition:opacity .12s; }
+  .row:hover .rowlinks { opacity:1; }
+  .rowlink { width:22px; height:22px; padding:0; display:inline-flex; align-items:center; justify-content:center;
+    border:0; background:transparent; border-radius:6px; cursor:pointer; color:var(--accent); }
+  .rowlink:hover { background:var(--chipbg); }
+  .rowlink svg { width:14px; height:14px; }
+  .rowlink.off { color:#c3bcc9; cursor:default; }
+  .rowlink.off:hover { background:transparent; }
   .caret { width:18px; flex:none; color:var(--muted); font-size:1rem; display:inline-block; text-align:center; transition:transform .12s; }
   .estate-children { margin-left:1.05rem; border-left:1px solid var(--line); padding-left:.35rem; }
   .svc { display:flex; align-items:center; gap:.4rem; padding:.32rem .5rem; border-radius:7px; color:var(--muted); font-size:.86rem; cursor:pointer; }
@@ -301,6 +309,18 @@ function estateCtxItems(e) {
   ];
 }
 /* ---------------- tree ---------------- */
+const ICONS = {
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+  monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+};
+function rowLink(icon, url, title) {
+  const b = document.createElement('button');
+  b.className = 'rowlink' + (url ? '' : ' off');
+  b.title = url ? title : title + ' (—)';
+  b.innerHTML = ICONS[icon];
+  b.onclick = (ev) => { ev.stopPropagation(); if (url) window.open(url, '_blank'); };
+  return b;
+}
 async function loadEstates() {
   const r = await fetch('/api/estates');
   ESTATES = await r.json();
@@ -320,7 +340,10 @@ function renderTree() {
     img.src = '/api/estate-favicon' + q({ dir: e.path });
     img.onerror = () => img.remove();
     const name = document.createElement('span'); name.textContent = e.project;
-    row.append(caret, img, name);
+    const links = document.createElement('span'); links.className = 'rowlinks';
+    links.appendChild(rowLink('globe', e.prodUrl, t('openProd')));
+    links.appendChild(rowLink('monitor', e.localUrl, t('openLocal')));
+    row.append(caret, img, name, links);
     row.onclick = () => {
       const isOpen = children.style.display === 'block';
       if (isOpen) { children.style.display = 'none'; caret.textContent = '▸'; }
@@ -416,13 +439,17 @@ function renderGeneral() {
   const devBtn = document.createElement('button'); devBtn.className = 'save'; devBtn.textContent = t('startDev'); devBtn.type = 'button';
   const devSt = document.createElement('span'); devSt.className = 'status';
   dacts.append(devBtn, devSt); dev.appendChild(dacts);
-  const devLog = document.createElement('details'); devLog.style.display = 'none';
+  const devLog = document.createElement('details'); devLog.style.display = 'none'; devLog.open = true;
   const devLogSum = document.createElement('summary'); devLogSum.textContent = t('devLog'); devLog.appendChild(devLogSum);
-  const devPre = document.createElement('pre'); devPre.style.cssText = 'font:11px/1.4 "DM Mono",ui-monospace,monospace; max-height:220px; overflow:auto; background:#faf9f7; border:1px solid var(--line); border-radius:8px; padding:.6rem; margin:.5rem 0 0;';
+  const devPre = document.createElement('pre'); devPre.style.cssText = 'font:11px/1.4 "DM Mono",ui-monospace,monospace; max-height:300px; overflow:auto; background:#141018; color:#c9d3dd; border-radius:8px; padding:.6rem; margin:.5rem 0 0; white-space:pre-wrap;';
   devLog.appendChild(devPre); dev.appendChild(devLog);
   sec.appendChild(dev);
 
   let pollTimer = null;
+  const showLog = () => { devLog.style.display = 'block'; };
+  const appendLog = (lines) => {
+    if (lines && lines.length) { showLog(); devPre.textContent = lines.join('\n'); devPre.scrollTop = devPre.scrollHeight; }
+  };
   const refreshLocal = (url) => {
     const loc = $('#openLocal');
     if (url) { CURRENT.localUrl = url; loc.href = url; loc.hidden = false; }
@@ -432,10 +459,10 @@ function renderGeneral() {
     if (!r.ok) return;
     const d = await r.json();
     refreshLocal(d.localUrl);
-    if (d.log && d.log.length) { devLog.style.display = 'block'; devPre.textContent = d.log.join('\n'); }
+    appendLog(d.log);
     if (d.running) {
       devBtn.disabled = true; devSt.textContent = t('devRunning');
-      if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(pollDev, 3000);
+      if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(pollDev, 2000);
     } else if (d.done) {
       devBtn.disabled = false; devSt.textContent = d.ok ? t('devDone') : t('devFail');
       if (pollTimer) clearTimeout(pollTimer); pollTimer = null;
@@ -443,6 +470,7 @@ function renderGeneral() {
   }
   devBtn.onclick = async () => {
     devBtn.disabled = true; devSt.className = 'status'; devSt.textContent = t('devStarting');
+    showLog(); appendLog([t('devStarting')]);
     const r = await fetch('/api/dev-up' + q({ dir: CURRENT.path }), { method:'POST' });
     const res = await r.text();
     if (!r.ok) {
