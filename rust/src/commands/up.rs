@@ -2311,6 +2311,95 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             return Ok(());
         }
 
+        // Astro adapter-node standalone (dist/server/entry.mjs + dist/client):
+        // same treatment as SvelteKit — bun-compile in the builder VM and ship
+        // the client assets next to the binary. Handles both root and
+        // workspace (`app/dist`) layouts.
+        let astro_client = format!("{build_dir}/dist/client");
+        let astro_entry = format!("{build_dir}/dist/server/entry.mjs");
+        let astro_client_app = format!("{build_dir}/app/dist/client");
+        let astro_entry_app = format!("{build_dir}/app/dist/server/entry.mjs");
+        let is_astro = builder_exec(&format!(
+            "if ( test -d {} && test -f {} ) || ( test -d {} && test -f {} ); then echo yes; else echo no; fi",
+            shell_single_quote(&astro_client),
+            shell_single_quote(&astro_entry),
+            shell_single_quote(&astro_client_app),
+            shell_single_quote(&astro_entry_app),
+        ))
+        .map(|c| c.stdout.trim() == "yes")
+        .unwrap_or(false);
+        if is_astro {
+            print_step(&format!(
+                "Astro adapter-node build ({}): preparing self-contained bun recipe in builder VM",
+                astro_client
+            ));
+            let local_recipe = std::env::temp_dir().join(format!(
+                "eco-astro-bun-recipe-{}.mjs",
+                std::process::id()
+            ));
+            std::fs::write(&local_recipe, crate::embedded::ASTRO_BUN_RECIPE_MJS)
+                .map_err(|e| format!("write astro recipe: {e}"))?;
+            let remote_recipe = format!(
+                "/tmp/eco-astro-bun-recipe-{}.mjs",
+                std::process::id()
+            );
+            builder_transfer_push(&local_recipe, &remote_recipe)?;
+
+            let stage = format!("{build_dir}/.eco-astro-stage");
+            let remote_tar = format!(
+                "/tmp/eco-astro-artifact-{}.tar.gz",
+                std::process::id()
+            );
+            // The recipe patches node_modules/@astrojs/node serve-static in the
+            // build dir and emits build-eco/eco-entry.js; the wrapper imports
+            // the server entry (root or workspace) via a relative specifier
+            // that bun resolves from the build dir. Ship the matching client.
+            let client_dir = if builder_exec(&format!("test -f {} && echo yes || echo no", shell_single_quote(&astro_entry))).map(|c| c.stdout.trim() == "yes").unwrap_or(false) {
+                astro_client
+            } else {
+                astro_client_app
+            };
+            builder_exec_ok(&format!(
+                "set -euo pipefail; command -v bun >/dev/null; node {recipe} {build_dir}; rm -rf {stage}; mkdir -p {stage}/client; cd {build_dir}; bun build --compile --target=bun-linux-x64 build-eco/eco-entry.js --outfile {stage}/{service}; cp -r {client_dir}/. {stage}/client/; printf %s {service_q} > {stage}/.eco-bun; tar czf {remote_tar} -C {stage} .",
+                recipe = shell_single_quote(&remote_recipe),
+                build_dir = shell_single_quote(build_dir),
+                client_dir = shell_single_quote(&client_dir),
+                stage = shell_single_quote(&stage),
+                service = shell_single_quote(service_name),
+                service_q = shell_single_quote(service_name),
+                remote_tar = shell_single_quote(&remote_tar),
+            ))?;
+
+            let local_tar = std::env::temp_dir().join(format!(
+                "eco-astro-artifact-{}.tar.gz",
+                std::process::id()
+            ));
+            builder_transfer_pull(&remote_tar, &local_tar)?;
+            run_command(
+                "tar",
+                &[
+                    "xzf".to_string(),
+                    local_tar.display().to_string(),
+                    "-C".to_string(),
+                    artifact_dir.display().to_string(),
+                ],
+                &util::current_dir(),
+            )?;
+            let _ = builder_exec(&format!(
+                "rm -f {} {}; rm -rf {}",
+                shell_single_quote(&remote_recipe),
+                shell_single_quote(&remote_tar),
+                shell_single_quote(&stage)
+            ));
+            let _ = std::fs::remove_file(&local_recipe);
+            let _ = std::fs::remove_file(&local_tar);
+            print_step(&format!(
+                "Bun-compiled {} (Astro) in builder VM -> self-contained Linux artifact",
+                service_name
+            ));
+            return Ok(());
+        }
+
         if nextjs_standalone {
             // Assemble the standalone artifact inside the builder VM, then pull
             // it to the local artifact dir.
@@ -2361,6 +2450,16 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             ));
             prepare_sveltekit_bun_recipe(Path::new(build_dir))?;
         }
+        // Astro @astrojs/node standalone: dist/server/entry.mjs + dist/client.
+        let astro_client = Path::new(build_dir).join("dist").join("client");
+        let is_astro = builder_is_host() && astro_client.is_dir() && Path::new(build_dir).join("dist").join("server").join("entry.mjs").is_file();
+        if is_astro {
+            print_step(&format!(
+                "Astro adapter-node build ({}): preparing self-contained bun recipe",
+                astro_client.display()
+            ));
+            prepare_astro_bun_recipe(Path::new(build_dir))?;
+        }
         let server_entry = [
             "build-eco/eco-entry.js",
             "build/index.js",
@@ -2397,6 +2496,14 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 print_step(&format!(
                     "SvelteKit client assets shipped next to binary ({} files)",
                     count_tree_files(&sveltekit_client)
+                ));
+            }
+            // Astro adapter-node: same — dist/client ships next to the binary.
+            if is_astro {
+                copy_tree_excluding(&astro_client, &artifact_dir.join("client"), &|_| false)?;
+                print_step(&format!(
+                    "Astro client assets shipped next to binary ({} files)",
+                    count_tree_files(&astro_client)
                 ));
             }
         }
@@ -2526,6 +2633,32 @@ fn prepare_sveltekit_bun_recipe(build_dir: &Path) -> Result<(), String> {
         return Err(format!("SvelteKit bun recipe failed: {detail}"));
     }
     if result.stdout.trim().contains("sveltekit bun recipe ready") {
+        print_step(result.stdout.trim());
+    }
+    Ok(())
+}
+
+fn prepare_astro_bun_recipe(build_dir: &Path) -> Result<(), String> {
+    let recipe = build_dir.join("astro-bun-recipe.mjs");
+    std::fs::write(&recipe, crate::embedded::ASTRO_BUN_RECIPE_MJS)
+        .map_err(|e| format!("write astro recipe: {e}"))?;
+    let result = run_capture(
+        "node",
+        &[
+            recipe.display().to_string(),
+            build_dir.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+    if result.code != 0 {
+        let detail = if result.stderr.trim().is_empty() {
+            result.stdout.trim().to_string()
+        } else {
+            result.stderr.trim().to_string()
+        };
+        return Err(format!("Astro bun recipe failed: {detail}"));
+    }
+    if result.stdout.trim().contains("astro bun recipe ready") {
         print_step(result.stdout.trim());
     }
     Ok(())

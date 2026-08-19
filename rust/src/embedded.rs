@@ -14,6 +14,7 @@ pub const INSTALL_REDIS_SH: &str = include_str!("../../install-redis.sh");
 pub const INSTALL_CLOUDFLARED_SH: &str = include_str!("../../install-cloudflared.sh");
 pub const ECOLOGY_MARK: &[u8] = include_bytes!("../../assets/ecology-mark.webp");
 pub const SVELTEKIT_BUN_RECIPE_MJS: &str = include_str!("../../sveltekit-bun-recipe.mjs");
+pub const ASTRO_BUN_RECIPE_MJS: &str = include_str!("../../astro-bun-recipe.mjs");
 pub const ECO_BUILDER_LIMA_YML: &str = include_str!("../../scripts/eco-builder.lima.yml");
 pub const ECO_BUILDER_BOOTSTRAP_SH: &str = include_str!("../../scripts/eco-builder-bootstrap.sh");
 
