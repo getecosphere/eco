@@ -68,6 +68,7 @@ const HTML: &str = r#"<!doctype html>
   .svc { padding:.3rem .5rem; border-radius:7px; color:var(--muted); font-size:.86rem; cursor:pointer; }
   .svc:hover { background:#f4f2f5; color:var(--text); }
   .svc .b { font-family:"DM Mono",ui-monospace,monospace; color:var(--text); }
+  .favicon { width:16px; height:16px; border-radius:4px; object-fit:contain; flex:none; }
   .hint { padding:.6rem 1rem .8rem; color:var(--muted); font-size:.78rem; border-top:1px solid var(--line); }
   .hint code { background:var(--chipbg); padding:.02rem .3rem; border-radius:4px; }
   /* ---------- main ---------- */
@@ -176,8 +177,12 @@ function renderTree() {
     const wrap = document.createElement('div'); wrap.className = 'estate';
     const row = document.createElement('div'); row.className = 'row';
     const caret = document.createElement('span'); caret.className = 'caret'; caret.textContent = '▸';
+    const img = document.createElement('img');
+    img.className = 'favicon'; img.width = 16; img.height = 16; img.alt = '';
+    img.src = '/api/estate-favicon' + q({ dir: e.path });
+    img.onerror = () => img.remove();
     const name = document.createElement('span'); name.textContent = e.project;
-    row.append(caret, name);
+    row.append(caret, img, name);
     // Click toggles expand/collapse; expanding also loads the estate.
     row.onclick = () => {
       const isOpen = children.style.display === 'block';
@@ -478,6 +483,91 @@ fn resolve_estate_dir(root: &Path, raw: &str) -> Result<PathBuf, String> {
         }
     }
     Err("unknown estate dir (not under the discovered estates root)".to_string())
+}
+
+fn favicon_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Resolve an estate's favicon. Checks known frontend layouts in preference
+/// order (png > ico > svg — svg files sometimes reference a missing master
+/// png and render empty), then falls back to a bounded walk for favicon.* .
+fn estate_favicon(dir: &Path) -> Option<(Vec<u8>, &'static str)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for p in [
+        "frontend/images/favicon-32.png",
+        "frontend/images/favicon-16.png",
+        "frontend/images/favicon.ico",
+        "frontend/static/favicon.ico",
+        "frontend/static/favicon.png",
+        "frontend/static/favicon.svg",
+        "frontend/public/favicon.png",
+        "frontend/public/favicon.ico",
+        "frontend/public/favicon.svg",
+        "frontend/app/public/favicon.png",
+        "frontend/app/public/favicon.ico",
+        "frontend/app/public/favicon.svg",
+        "frontend/src/lib/assets/favicon.svg",
+        "public/favicon.ico",
+        "public/favicon.png",
+        "public/favicon.svg",
+        "static/favicon.ico",
+        "static/favicon.png",
+        "static/favicon.svg",
+        "src/favicon.svg",
+    ] {
+        candidates.push(dir.join(p));
+    }
+    for c in &candidates {
+        if c.is_file() {
+            if let Ok(bytes) = std::fs::read(c) {
+                return Some((bytes, favicon_content_type(c)));
+            }
+        }
+    }
+    // Bounded walk fallback: any favicon.* under the estate (depth ≤ 6),
+    // skipping node_modules/build/target/.svelte-kit; png/ico preferred.
+    let mut found: Vec<(u8, PathBuf)> = Vec::new(); // priority, path
+    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+    while let Some((cur, depth)) = stack.pop() {
+        if depth > 6 {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&cur) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if name == "node_modules" || name == "build" || name == "target" || name == ".svelte-kit" || name == ".git" {
+                    continue;
+                }
+                if p.is_dir() {
+                    stack.push((p, depth + 1));
+                } else if name.starts_with("favicon.") {
+                    let prio = match p.extension().and_then(|e| e.to_str()) {
+                        Some("png") => 0,
+                        Some("ico") => 1,
+                        Some("svg") => 2,
+                        _ => 3,
+                    };
+                    found.push((prio, p));
+                }
+            }
+        }
+    }
+    found.sort_by_key(|(prio, _)| *prio);
+    for (_, p) in found {
+        if let Ok(bytes) = std::fs::read(&p) {
+            return Some((bytes, favicon_content_type(&p)));
+        }
+    }
+    None
 }
 
 /// Resolve a registry address for the dashboard: estate state wins, then the
@@ -904,6 +994,20 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap()),
                 );
                 continue;
+            }
+            ("GET", "/api/estate-favicon") => {
+                let dir = query.get("dir").cloned().unwrap_or_default();
+                match resolve_estate_dir(&root, &dir).and_then(|d| estate_favicon(&d).ok_or_else(|| "no favicon".to_string())) {
+                    Ok((bytes, ctype)) => {
+                        let _ = request.respond(
+                            Response::from_data(bytes)
+                                .with_status_code(200)
+                                .with_header(Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap()),
+                        );
+                        continue;
+                    }
+                    Err(_) => (404, "no favicon".to_string(), "text/plain"),
+                }
             }
             ("GET", "/api/estates") => {
                 let list: Vec<serde_json::Value> = estates
