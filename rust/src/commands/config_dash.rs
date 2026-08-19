@@ -235,8 +235,9 @@ const I18N = {
     saveEcompose:'Save ecompose.yml', envWarn:'The host agent never exposes secrets — prod-env returns only <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> keys (platform security design, stricter than Heroku’s reveal).',
     envLoading:'Loading…', envEmpty:'No public keys (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) in this service.', envNotAvail:'prod env not available',
     copyPath:'Copy path', copyEcompose:'Copy ecompose.yml path', reload:'Reload estate', copied:'Path copied',
-    startDev:'Start dev (eco up dev)', devStarting:'Starting dev…', devRunning:'Dev starting — polls for the local URL…', devDone:'Dev ready.',
+    startDev:'Start dev (eco up dev)', devStarting:'Starting dev…', devRunning:'Dev running.', devDone:'Dev ready.',
     devFail:'Dev failed (see log).', devAlready:'eco up dev already running.', devLog:'log', stopHint:'or stop it in a terminal', localDev:'Local dev',
+    pm2Pause:'Pause', pm2Stop:'Stop', pm2Delete:'Delete',
   },
   id: {
     subtitle:'konfigurasi estate (dev)', search:'Cari estate, service, key…',
@@ -252,8 +253,9 @@ const I18N = {
     saveEcompose:'Simpan ecompose.yml', envWarn:'Agent host tidak mengekspos secret — prod-env hanya mengembalikan key <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> (desain keamanan platform).',
     envLoading:'Memuat…', envEmpty:'Tidak ada key public (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) di service ini.', envNotAvail:'prod env tidak tersedia',
     copyPath:'Salin path', copyEcompose:'Salin path ecompose.yml', reload:'Muat ulang estate', copied:'Path tersalin',
-    startDev:'Jalankan dev (eco up dev)', devStarting:'Memulai dev…', devRunning:'Dev berjalan — menunggu URL lokal…', devDone:'Dev siap.',
+    startDev:'Jalankan dev (eco up dev)', devStarting:'Memulai dev…', devRunning:'Dev berjalan.', devDone:'Dev siap.',
     devFail:'Dev gagal (lihat log).', devAlready:'eco up dev sedang berjalan.', devLog:'log', stopHint:'atau hentikan di terminal', localDev:'Local dev',
+    pm2Pause:'Jeda', pm2Stop:'Hentikan', pm2Delete:'Hapus',
   }
 };
 let LANG = localStorage.getItem('ecoGenieLang') || 'en';
@@ -454,33 +456,52 @@ function renderGeneral() {
     const loc = $('#openLocal');
     if (url) { CURRENT.localUrl = url; loc.href = url; loc.hidden = false; }
   };
+  const mkBtn = (label, cls, fn) => { const b = document.createElement('button'); b.className = cls || 'save'; b.type = 'button'; b.textContent = label; b.onclick = fn; return b; };
+  async function pm2(action) {
+    const r = await fetch('/api/dev-pm2' + q({ dir: CURRENT.path, action }), { method:'POST' });
+    const d = await r.json();
+    if (!r.ok) { devSt.className = 'status err'; devSt.textContent = d.error || action; }
+    pollDev();
+  }
+  function renderDevButtons(d) {
+    dacts.innerHTML = '';
+    const running = d.pm2 && d.pm2.running;
+    if (running) {
+      dacts.appendChild(mkBtn(t('pm2Pause'), 'ghost', () => pm2('pause')));
+      dacts.appendChild(mkBtn(t('pm2Stop'), 'ghost', () => pm2('stop')));
+      dacts.appendChild(mkBtn(t('pm2Delete'), 'ghost', () => pm2('delete')));
+      devSt.className = 'status ok'; devSt.textContent = t('devRunning');
+      const apps = (d.pm2.apps || []).map(a => a.name + ' · ' + a.status).join(', ');
+      if (apps) devSt.textContent += ' — ' + apps;
+    } else if (d.running) {
+      const b = mkBtn(t('startDev'), 'save', () => {}); b.disabled = true; dacts.appendChild(b);
+      devSt.className = 'status'; devSt.textContent = t('devStarting');
+    } else {
+      dacts.appendChild(mkBtn(t('startDev'), 'save', startDev));
+      devSt.className = 'status'; devSt.textContent = '';
+    }
+  }
   async function pollDev() {
     const r = await fetch('/api/dev-status' + q({ dir: CURRENT.path }));
     if (!r.ok) return;
     const d = await r.json();
     refreshLocal(d.localUrl);
     appendLog(d.log);
+    renderDevButtons(d);
     if (d.running) {
-      devBtn.disabled = true; devSt.textContent = t('devRunning');
       if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(pollDev, 2000);
-    } else if (d.done) {
-      devBtn.disabled = false; devSt.textContent = d.ok ? t('devDone') : t('devFail');
+    } else {
       if (pollTimer) clearTimeout(pollTimer); pollTimer = null;
     }
   }
-  devBtn.onclick = async () => {
-    devBtn.disabled = true; devSt.className = 'status'; devSt.textContent = t('devStarting');
+  async function startDev() {
+    devSt.className = 'status'; devSt.textContent = t('devStarting');
     showLog(); appendLog([t('devStarting')]);
     const r = await fetch('/api/dev-up' + q({ dir: CURRENT.path }), { method:'POST' });
     const res = await r.text();
-    if (!r.ok) {
-      devBtn.disabled = false;
-      devSt.className = 'status err';
-      devSt.textContent = res.includes('already running') ? t('devAlready') : res;
-      return;
-    }
+    if (!r.ok) { devSt.className = 'status err'; devSt.textContent = res.includes('already running') ? t('devAlready') : res; }
     pollDev();
-  };
+  }
   pollDev();
 }
 function renderLXS() {
@@ -1085,8 +1106,144 @@ fn start_dev_session(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn dev_session_status(dir: &Path) -> serde_json::Value {
-    let mut running = false;
+/// Locate the pm2 binary (PATH fallbacks for non-interactive launches).
+fn pm2_bin() -> String {
+    if let Ok(v) = std::env::var("ECO_GENIE_PM2") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    for c in [
+        "/Users/eco/node/bin/pm2".to_string(),
+        "/opt/homebrew/bin/pm2".to_string(),
+        "/usr/local/bin/pm2".to_string(),
+        format!("{}/.local/bin/pm2", util::home_dir()),
+    ] {
+        if Path::new(&c).is_file() {
+            return c;
+        }
+    }
+    "pm2".to_string()
+}
+
+/// The estate's PM2 apps (name, status) — apps named `<project>-*`.
+fn pm2_estate_apps(project: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let output = match Command::new(pm2_bin()).arg("jlist").output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return out,
+    };
+    let text = match String::from_utf8(output) {
+        Ok(t) => t,
+        Err(_) => return out,
+    };
+    let arr: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+        Ok(a) => a,
+        Err(_) => return out,
+    };
+    let prefix = format!("{project}-");
+    for a in arr {
+        if let Some(name) = a["name"].as_str() {
+            if name.starts_with(&prefix) {
+                let status = a["pm2_env"]["status"].as_str().unwrap_or("unknown").to_string();
+                out.push((name.to_string(), status));
+            }
+        }
+    }
+    out
+}
+
+fn run_pm2_action(project: &str, action: &str) -> Result<Vec<String>, String> {
+    if !["pause", "stop", "delete", "restart"].contains(&action) {
+        return Err(format!("invalid pm2 action: {action}"));
+    }
+    let apps = pm2_estate_apps(project);
+    if apps.is_empty() {
+        return Err(format!("no PM2 apps running for project '{project}'"));
+    }
+    let names: Vec<&String> = apps.iter().map(|(n, _)| n).collect();
+    let status = Command::new(pm2_bin())
+        .arg(action)
+        .args(&names)
+        .status()
+        .map_err(|e| format!("pm2 {action} failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("pm2 {action} exited with {:?}", status.code()));
+    }
+    Ok(names.into_iter().cloned().collect())
+}
+
+/// Detect a running dev service by command-name needles (e.g. "auth-backend"),
+/// returning its base URL. An env override wins when set.
+fn detect_dev_url(env_key: &str, needles: &[&str]) -> Option<String> {
+    if let Ok(v) = std::env::var(env_key) {
+        if !v.trim().is_empty() {
+            return Some(v.trim_end_matches('/').to_string());
+        }
+    }
+    let live = live_listening_ports();
+    for (cmd, port) in &live {
+        let c = cmd.to_lowercase();
+        if needles.iter().any(|n| c.contains(n)) {
+            return Some(format!("http://localhost:{port}"));
+        }
+    }
+    None
+}
+
+fn auth_base_url() -> Option<String> {
+    detect_dev_url("ECO_GENIE_AUTH_URL", &["auth-backend", "auth_backend", "auth-back"])
+}
+fn profile_base_url() -> Option<String> {
+    detect_dev_url("ECO_GENIE_PROFILE_URL", &["profile-backend", "profile_backend"])
+}
+
+/// Forward a request to a detected dev LXS and return its raw response.
+fn forward(server: &str, path: &str, method: &str, bearer: Option<&str>, body: Option<&str>) -> Result<(u16, String), String> {
+    let url = format!("{server}{path}");
+    let mut req = ureq::request(method, &url);
+    if let Some(t) = bearer {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    if let Some(b) = body {
+        req = req.set("Content-Type", "application/json");
+    }
+    let resp = match req.send_string(body.unwrap_or("")) {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => return Ok((code as u16, r.into_string().unwrap_or_default())),
+        Err(e) => return Err(format!("auth upstream unreachable: {e}")),
+    };
+    let status = resp.status();
+    let text = resp.into_string().unwrap_or_default();
+    Ok((status as u16, text))
+}
+
+/// Authenticated identity + profile avatar for the dashboard header: auth LXS
+/// `/auth/session`, then profile LXS avatar URL when a profile instance is up.
+fn dashboard_me(bearer: Option<&str>) -> Result<(u16, String), String> {
+    let auth = auth_base_url().ok_or_else(|| "no dev auth running".to_string())?;
+    let (status, text) = forward(&auth, "/api/auth/session", "GET", bearer, None)?;
+    if !(200..300).contains(&status) {
+        return Ok((status, text));
+    }
+    let user: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("bad auth session: {e}"))?;
+    let user_id = user["id"].as_str().unwrap_or("");
+    let mut avatar_url = String::new();
+    if let Some(profile) = profile_base_url() {
+        if !user_id.is_empty() {
+            if let Ok((_, ptext)) = forward(&profile, &format!("/api/users/{user_id}"), "GET", bearer, None) {
+                if let Ok(pjson) = serde_json::from_str::<serde_json::Value>(&ptext) {
+                    if let Some(a) = pjson["avatarUrl"].as_str() {
+                        avatar_url = a.to_string();
+                    }
+                }
+            }
+        }
+    }
+    Ok((200, serde_json::json!({ "user": user, "avatarUrl": avatar_url }).to_string()))
+}
+
+fn dev_session_status(dir: &Path) -> serde_json::Value {    let mut running = false;
     let mut done = false;
     let mut exited_ok = false;
     let mut log_tail: Vec<String> = Vec::new();
@@ -1120,12 +1277,23 @@ fn dev_session_status(dir: &Path) -> serde_json::Value {
         let services = ecompose::parse_services(&content);
         local_dev_url(dir, &ecompose::parse_project_name(&content), &services)
     };
+    let (pm2_apps, pm2_running) = {
+        let content = std::fs::read_to_string(dir.join("ecompose.yml")).unwrap_or_default();
+        let project = ecompose::parse_project_name(&content);
+        let apps = pm2_estate_apps(&project);
+        let running = apps.iter().any(|(_, s)| s == "online");
+        (apps, running)
+    };
     serde_json::json!({
         "running": running,
         "done": done,
         "ok": if done { exited_ok } else { false },
         "log": log_tail,
         "localUrl": local_url,
+        "pm2": {
+            "running": pm2_running,
+            "apps": pm2_apps.iter().map(|(n, s)| serde_json::json!({ "name": n, "status": s })).collect::<Vec<_>>(),
+        },
     })
 }
 
@@ -1620,6 +1788,70 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 match resolve_estate_dir(&root, &dir) {
                     Ok(d) => (200, dev_session_status(&d).to_string(), "application/json"),
                     Err(e) => json_error(400, &e),
+                }
+            }
+            ("POST", "/api/dev-pm2") => {
+                let dir = query.get("dir").cloned().unwrap_or_default();
+                let action = query.get("action").cloned().unwrap_or_default();
+                match resolve_estate_dir(&root, &dir) {
+                    Ok(dir) => {
+                        let project = std::fs::read_to_string(dir.join("ecompose.yml"))
+                            .map(|c| ecompose::parse_project_name(&c))
+                            .unwrap_or_default();
+                        match run_pm2_action(&project, &action) {
+                            Ok(acted_on) => (200, serde_json::json!({ "ok": true, "actedOn": acted_on }).to_string(), "application/json"),
+                            Err(e) => json_error(400, &e),
+                        }
+                    }
+                    Err(e) => json_error(400, &e),
+                }
+            }
+            ("GET", "/api/auth-config") => {
+                (200, serde_json::json!({
+                    "authAvailable": auth_base_url().is_some(),
+                    "profileAvailable": profile_base_url().is_some(),
+                }).to_string(), "application/json")
+            }
+            ("POST", "/api/auth/login") => {
+                let mut buf = Vec::new();
+                let _ = request.as_reader().read_to_end(&mut buf);
+                match auth_base_url() {
+                    Some(auth) => match forward(&auth, "/api/auth/login", "POST", None, Some(&String::from_utf8_lossy(&buf))) {
+                        Ok((st, body)) => (st, body, "application/json"),
+                        Err(e) => json_error(502, &e),
+                    },
+                    None => json_error(503, "no dev auth running — start an estate with eco up dev (or set ECO_GENIE_AUTH_URL)"),
+                }
+            }
+            ("GET", "/api/auth/session") => {
+                let bearer = query.get("token").map(|s| s.as_str());
+                match auth_base_url() {
+                    Some(auth) => match forward(&auth, "/api/auth/session", "GET", bearer, None) {
+                        Ok((st, body)) => (st, body, "application/json"),
+                        Err(e) => json_error(502, &e),
+                    },
+                    None => json_error(503, "no dev auth running"),
+                }
+            }
+            ("POST", "/api/auth/logout") => {
+                let mut buf = Vec::new();
+                let _ = request.as_reader().read_to_end(&mut buf);
+                let body = String::from_utf8_lossy(&buf).to_string();
+                let bearer: Option<String> = serde_json::from_str(&body).ok()
+                    .and_then(|v: serde_json::Value| v["token"].as_str().map(|s| s.to_string()));
+                match auth_base_url() {
+                    Some(auth) => match forward(&auth, "/api/auth/logout", "POST", bearer.as_deref(), None) {
+                        Ok((st, body)) => (st, body, "application/json"),
+                        Err(e) => json_error(502, &e),
+                    },
+                    None => json_error(503, "no dev auth running"),
+                }
+            }
+            ("GET", "/api/me") => {
+                let bearer = query.get("token").map(|s| s.as_str());
+                match dashboard_me(bearer) {
+                    Ok((st, body)) => (st, body, "application/json"),
+                    Err(e) => json_error(502, &e),
                 }
             }
             ("GET", "/api/prod-env") => {
