@@ -28,9 +28,12 @@ use tiny_http::{Header, Response, Server};
 use crate::{ecompose, util};
 use crate::commands::lxs::{self, LxsField, LxsManifest};
 
-/// Ecosphere favicon (same as the getecosphere.com estate frontend), embedded
-/// so the dashboard is self-contained. Served at /favicon.svg.
-const FAVICON_SVG: &str = include_str!("../../../assets/favicon.svg");
+/// Ecosphere favicons (same as the getecosphere.com estate frontend), embedded
+/// so the dashboard is self-contained. PNG — the estate's favicon.svg is
+/// broken (it references a missing ../master/ecosphere-original-1254.png), so
+/// we use the actual rendered PNGs the estate serves.
+const FAVICON_16: &[u8] = include_bytes!("../../../assets/favicon-16.png");
+const FAVICON_32: &[u8] = include_bytes!("../../../assets/favicon-32.png");
 
 const HTML: &str = r#"<!doctype html>
 <html lang="id">
@@ -38,7 +41,8 @@ const HTML: &str = r#"<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ecosphere Genie</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png">
 <style>
   * { box-sizing:border-box; }
   :root { --bg:#f7f6f2; --card:#fff; --line:#ded9e1; --line2:#f0edf2; --text:#17141d; --muted:#665f6e;
@@ -885,7 +889,22 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 HTML.replace("{{ESTATE}}", ""),
                 "text/html; charset=utf-8",
             ),
-            ("GET", "/favicon.svg") => (200, FAVICON_SVG.to_string(), "image/svg+xml"),
+            ("GET", "/favicon-32.png") => {
+                let _ = request.respond(
+                    Response::from_data(FAVICON_32.to_vec())
+                        .with_status_code(200)
+                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap()),
+                );
+                continue;
+            }
+            ("GET", "/favicon-16.png") => {
+                let _ = request.respond(
+                    Response::from_data(FAVICON_16.to_vec())
+                        .with_status_code(200)
+                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap()),
+                );
+                continue;
+            }
             ("GET", "/api/estates") => {
                 let list: Vec<serde_json::Value> = estates
                     .iter()
