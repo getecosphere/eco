@@ -77,6 +77,11 @@ const HTML: &str = r#"<!doctype html>
     position:sticky; top:0; z-index:5; }
   header.main h2 { margin:0; font-size:1.15rem; letter-spacing:-.02em; }
   header.main .path { color:var(--muted); font-size:.8rem; font-family:"DM Mono",ui-monospace,monospace; }
+  .openlinks { display:flex; gap:.5rem; margin-top:.55rem; }
+  .openlink { display:inline-flex; align-items:center; gap:.3rem; padding:.38rem .8rem; border-radius:8px;
+    background:#fff; border:1px solid var(--line); color:var(--accent); font-weight:700; font-size:.8rem; text-decoration:none; }
+  .openlink:hover { background:var(--chipbg); }
+  .openlink[hidden] { display:none; }
   .tabs { display:flex; gap:.25rem; margin-top:.6rem; }
   .tab { padding:.4rem .9rem; border-radius:8px 8px 0 0; cursor:pointer; color:var(--muted); font-weight:600; font-size:.85rem; border:1px solid transparent; border-bottom:0; }
   .tab.active { background:var(--card); color:var(--accent); border-color:var(--line); }
@@ -143,6 +148,10 @@ const HTML: &str = r#"<!doctype html>
   <header class="main">
     <h2 id="estateTitle">Pilih estate di sidebar</h2>
     <div class="path" id="estatePath"></div>
+    <div class="openlinks">
+      <a id="openProd" class="openlink" target="_blank" rel="noopener">Buka di prod ↗</a>
+      <a id="openLocal" class="openlink" target="_blank" rel="noopener">Buka lokal ↗</a>
+    </div>
     <nav class="tabs" id="tabs">
       <div class="tab active" data-tab="lxs">LXS Config</div>
       <div class="tab" data-tab="raw">ecompose.yml</div>
@@ -214,6 +223,9 @@ async function selectEstate(e, wrapNode) {
   CURRENT.path = e.path;
   $('#estateTitle').textContent = CURRENT.project;
   $('#estatePath').textContent = e.path;
+  const prod = $('#openProd'), loc = $('#openLocal');
+  if (CURRENT.prodUrl) { prod.href = CURRENT.prodUrl; prod.hidden = false; } else prod.hidden = true;
+  if (CURRENT.localUrl) { loc.href = CURRENT.localUrl; loc.hidden = false; } else loc.hidden = true;
   renderGeneral(); renderLXS();
   history.replaceState(null, '', '/?dir=' + encodeURIComponent(e.path));
 }
@@ -617,10 +629,11 @@ fn fields_for(manifest: &LxsManifest) -> Vec<(String, LxsField)> {
 fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Value, String> {
     let services = ecompose::parse_services(content);
     let project = ecompose::parse_project_name(content);
+    let hostname = ecompose::parse_estates(content).first().map(|e| e.hostname.clone()).unwrap_or_default();
     let registry = registry_address(estate_root);
 
     let mut svc_values = Vec::new();
-    for svc in services {
+    for svc in &services {
         let mut entry = serde_json::Map::new();
         entry.insert("name".into(), serde_json::Value::String(svc.name.clone()));
         entry.insert("lxs".into(), serde_json::Value::String(svc.lxs.clone()));
@@ -669,9 +682,38 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
     Ok(serde_json::json!({
         "project": project,
         "main": ecompose::parse_main(&content),
-        "hostname": ecompose::parse_estates(&content).first().map(|e| e.hostname.clone()).unwrap_or_default(),
+        "hostname": hostname,
+        "prodUrl": if hostname.is_empty() { String::new() } else { format!("https://{}", hostname) },
+        "localUrl": local_dev_url(estate_root, &project, &services),
         "services": svc_values,
     }))
+}
+
+/// Best-effort local dev URL for an estate: the `-frontend`/-app PM2 app port
+/// from ecosystem.config.js, else the frontend service's declared ecompose dev
+/// port, else the lowest ecosystem port, else "".
+fn local_dev_url(estate_root: &Path, project: &str, services: &[ecompose::Service]) -> String {
+    let ecosystem = estate_root.join("ecosystem.config.js");
+    let ports = crate::commands::show::read_ports_from_ecosystem(&ecosystem);
+    let frontend_app = format!("{project}-frontend");
+    let app_app = format!("{project}-app");
+    let port = ports
+        .get(&frontend_app)
+        .or_else(|| ports.get(&app_app))
+        .cloned()
+        .or_else(|| {
+            services
+                .iter()
+                .find(|s| s.port > 0 && (s.name.contains("frontend") || s.name.contains("-web") || s.name.contains("-app") || s.name == project))
+                .map(|s| s.port.to_string())
+        })
+        .or_else(|| ports.values().min().cloned())
+        .unwrap_or_default();
+    if port.is_empty() {
+        String::new()
+    } else {
+        format!("http://localhost:{}", port)
+    }
 }
 
 fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<String, String>) -> Result<String, String> {
@@ -997,17 +1039,18 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
             }
             ("GET", "/api/estate-favicon") => {
                 let dir = query.get("dir").cloned().unwrap_or_default();
-                match resolve_estate_dir(&root, &dir).and_then(|d| estate_favicon(&d).ok_or_else(|| "no favicon".to_string())) {
-                    Ok((bytes, ctype)) => {
-                        let _ = request.respond(
-                            Response::from_data(bytes)
-                                .with_status_code(200)
-                                .with_header(Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap()),
-                        );
-                        continue;
-                    }
-                    Err(_) => (404, "no favicon".to_string(), "text/plain"),
-                }
+                // Estate favicon, falling back to the Ecosphere mark so estates
+                // without one (e.g. chatme) never render an empty icon.
+                let (bytes, ctype) = match resolve_estate_dir(&root, &dir).ok().and_then(|d| estate_favicon(&d)) {
+                    Some((b, c)) => (b, c),
+                    None => (FAVICON_32.to_vec(), "image/png"),
+                };
+                let _ = request.respond(
+                    Response::from_data(bytes)
+                        .with_status_code(200)
+                        .with_header(Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap()),
+                );
+                continue;
             }
             ("GET", "/api/estates") => {
                 let list: Vec<serde_json::Value> = estates
