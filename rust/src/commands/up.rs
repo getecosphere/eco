@@ -1683,13 +1683,43 @@ fn host_builder_path() -> String {
     path.join(":")
 }
 
-// Where node builds land: the VM (/home/ubuntu/build or /home/eco.guest/build)
-// or the host cache.
+// Resolve the builder VM's home directory. Lima names it after the host user
+// (e.g. /home/eco.guest, /home/anggaadiwibowo.linux), so it is queried live
+// rather than hardcoded — a freshly provisioned VM on any host user resolves
+// correctly. Falls back to the reference builder home when the query fails.
+fn builder_home() -> String {
+    if builder_is_host() {
+        return util::home_dir();
+    }
+    if builder_driver_is_lima() {
+        // `limactl shell <name> -- bash -c 'echo $HOME'`: limactl execs args
+        // directly (no login shell), so $HOME must expand inside `bash -c`.
+        let args = vec![
+            "shell".to_string(),
+            builder_name(),
+            "--".to_string(),
+            "bash".to_string(),
+            "-c".to_string(),
+            "echo $HOME".to_string(),
+        ];
+        if let Ok(c) = run_capture("limactl", &args, &util::current_dir()) {
+            let home = c.stdout.trim().to_string();
+            if !home.is_empty() && home.starts_with('/') {
+                return home;
+            }
+        }
+        return "/home/eco.guest".to_string();
+    }
+    // Multipass builder: reference user home.
+    "/home/ubuntu".to_string()
+}
+
+// Where node builds land: the VM (queried home) or the host cache.
 fn builder_build_root() -> String {
     if builder_is_host() {
         format!("{}/.cache/eco/build", util::home_dir())
     } else if builder_driver_is_lima() {
-        "/home/eco.guest/build".to_string()
+        format!("{}/build", builder_home())
     } else {
         "/home/ubuntu/build".to_string()
     }
@@ -1776,6 +1806,225 @@ fn builder_available() -> bool {
     }
     let args = vec!["info".to_string(), builder_name()];
     run_capture("multipass", &args, &util::current_dir()).map(|c| c.code == 0).unwrap_or(false)
+}
+
+// ── Builder auto-provision ──────────────────────────────────────────────────
+// `eco up --remote` used to fail with "provision it with Lima" instructions
+// when no builder VM was reachable. Now it provisions itself: installs Lima
+// (Homebrew when present, otherwise a sudo-less limactl binary download),
+// starts the eco-builder VM from the bundled template, and bootstraps the
+// pinned toolchain inside it. Idempotent — no-ops when everything is up.
+
+// Make dev-tool dirs resolvable for the rest of this eco run: Homebrew on
+// Apple Silicon/Intel and ~/.local/bin (where a sudo-less limactl may land).
+// Mirrors provision.sh's ensure_brew() exporting PATH to the shell.
+fn prepend_tool_paths() {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut candidates = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        format!("{}/.local/bin", util::home_dir()),
+    ];
+    candidates.retain(|d| Path::new(d).is_dir());
+    let mut new_path: Vec<String> = Vec::new();
+    for d in candidates {
+        if !path.split(':').any(|p| p == d) {
+            new_path.push(d);
+        }
+    }
+    if !new_path.is_empty() {
+        let mut joined = new_path.join(":");
+        if !path.is_empty() {
+            joined.push(':');
+            joined.push_str(&path);
+        }
+        std::env::set_var("PATH", joined);
+    }
+}
+
+// Ensure a local Linux builder is reachable, provisioning it when missing.
+fn ensure_builder() -> Result<(), String> {
+    if builder_is_host() {
+        return Ok(()); // explicit ECO_BUILDER=host (dev-only) — nothing to provision
+    }
+    if !util::env_var_or("ECO_BUILDER_CMD", "").is_empty() {
+        return Ok(()); // custom builder exec — provisioning is the caller's job
+    }
+
+    prepend_tool_paths();
+
+    if !limactl_available() {
+        if multipass_available() {
+            // Multipass fallback: start an existing VM, but never create one.
+            if !builder_available() {
+                return Err(format!(
+                    "Multipass builder `{}` is not running. Start it (`multipass start {}`), or install Lima (`brew install lima`) so eco can provision it automatically.",
+                    builder_name(),
+                    builder_name()
+                ));
+            }
+            return Ok(());
+        }
+        print_step("No local Linux builder VM is reachable — provisioning Lima (one-time)");
+        ensure_lima_installed()?;
+    }
+
+    ensure_eco_builder_vm()
+}
+
+fn ensure_lima_installed() -> Result<(), String> {
+    if limactl_available() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if Path::new("/opt/homebrew/bin/brew").is_file() || util::command_on_path("brew") {
+            print_step("Installing Lima via Homebrew (brew install lima)…");
+            run_host_command("brew", &["install".to_string(), "lima".to_string()])?;
+        } else {
+            // No Homebrew (and maybe no sudo for one) — download the limactl
+            // binary directly into ~/.local/bin. Sudo-free.
+            print_step("Homebrew not found — downloading the limactl binary directly (no sudo needed)…");
+            install_limactl_binary()?;
+        }
+        if !limactl_available() {
+            return Err("limactl still not found after installing Lima. Open a new terminal and re-run `eco up --remote`.".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        print_step("Installing Lima via apt (apt-get install lima)…");
+        run_command("sudo", &["apt-get".to_string(), "install".to_string(), "-y".to_string(), "lima".to_string()], &util::current_dir())?;
+        if !limactl_available() {
+            return Err("Lima not available after apt install. Install it from https://github.com/lima-vm/lima/releases, or set ECO_BUILDER=host (dev only).".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("Lima is supported on macOS and Linux only. Install a builder VM manually or set ECO_BUILDER=host (dev only).".to_string())
+    }
+}
+
+// Run a host command with the usual dev-tool dirs (Homebrew, ~/.local/bin)
+// prepended to PATH, so brew/limactl resolve regardless of the caller's shell.
+fn run_host_command(command: &str, args: &[String]) -> Result<(), String> {
+    let mut env = std::env::vars().collect::<HashMap<String, String>>();
+    let path = env.get("PATH").cloned().unwrap_or_default();
+    let extra = ["/opt/homebrew/bin", "/usr/local/bin", &format!("{}/.local/bin", util::home_dir())]
+        .iter()
+        .filter(|d| Path::new(d).is_dir())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let mut new_path = extra;
+    if !path.is_empty() {
+        new_path.push(path);
+    }
+    env.insert("PATH".to_string(), new_path.join(":"));
+    util::run_command_env(command, args, &util::current_dir(), &env)
+}
+
+// Sudo-free fallback: download the pinned limactl binary from the GitHub
+// release into ~/.local/bin so eco can provision the builder VM even on a
+// machine with no Homebrew and no sudo.
+fn install_limactl_binary() -> Result<(), String> {
+    const LIMA_VERSION: &str = "2.2.0";
+    #[cfg(target_os = "macos")]
+    let os_arch = ("Darwin".to_string(), lima_arch());
+    #[cfg(target_os = "linux")]
+    let os_arch = ("Linux".to_string(), lima_arch());
+    let (os, arch) = os_arch;
+    let url = format!("https://github.com/lima-vm/lima/releases/download/v{LIMA_VERSION}/lima-{LIMA_VERSION}-{os}-{arch}.tar.gz");
+    let tarball = std::env::temp_dir().join(format!("lima-{LIMA_VERSION}-{os}-{arch}.tar.gz"));
+    let extract = std::env::temp_dir().join("lima-download");
+    let bin_dir = PathBuf::from(format!("{}/.local/bin", util::home_dir()));
+
+    print_step(&format!("Downloading limactl {LIMA_VERSION} ({os}/{arch})…"));
+    download_to(&url, &tarball)?;
+    std::fs::create_dir_all(&extract).map_err(|e| format!("create {}: {e}", extract.display()))?;
+    run_command("tar", &["xzf".to_string(), tarball.display().to_string(), "-C".to_string(), extract.display().to_string()], &util::current_dir())?;
+    let limactl = extract.join("lima").join("bin").join("limactl");
+    if !limactl.is_file() {
+        return Err(format!("limactl binary not found after extracting {}", tarball.display()));
+    }
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("create {}: {e}", bin_dir.display()))?;
+    std::fs::copy(&limactl, bin_dir.join("limactl")).map_err(|e| format!("copy limactl: {e}"))?;
+    std::fs::remove_dir_all(&extract).ok();
+    std::fs::remove_file(&tarball).ok();
+    print_step(&format!("limactl installed at {}", bin_dir.join("limactl").display()));
+    Ok(())
+}
+
+// Lima release assets name arch arm64/x86_64 (util::arch() is arm64/x64).
+fn lima_arch() -> String {
+    match util::arch().as_str() {
+        "x64" => "x86_64".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn download_to(url: &str, dest: &Path) -> Result<(), String> {
+    let args = vec!["-fsSL".to_string(), url.to_string(), "-o".to_string(), dest.display().to_string()];
+    run_command("curl", &args, &util::current_dir())
+}
+
+// Create + start the eco-builder VM from the bundled template, then bootstrap
+// the pinned toolchain inside it (limactl start on a running VM is a no-op;
+// the bootstrap script self-checks every tool, so both are re-runnable).
+fn ensure_eco_builder_vm() -> Result<(), String> {
+    if builder_available() {
+        return Ok(());
+    }
+    let yml = embedded::bundled_script_path("eco-builder.lima.yml")?;
+    print_step(&format!(
+        "Starting builder VM `{}` (first run downloads the Ubuntu image — a few minutes)…",
+        builder_name()
+    ));
+    run_command(
+        "limactl",
+        &[
+            "start".to_string(),
+            "--name".to_string(),
+            builder_name(),
+            "--tty=false".to_string(),
+            yml.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+    if !builder_available() {
+        return Err(format!("Builder VM `{}` is not Running after `limactl start`.", builder_name()));
+    }
+
+    // Bootstrap the pinned toolchain inside the VM (idempotent).
+    let bootstrap = embedded::bundled_script_path("eco-builder-bootstrap.sh")?;
+    run_command(
+        "limactl",
+        &[
+            "copy".to_string(),
+            bootstrap.display().to_string(),
+            format!("{}:/tmp/eco-builder-bootstrap.sh", builder_name()),
+        ],
+        &util::current_dir(),
+    )?;
+    print_step(&format!(
+        "Bootstrapping pinned toolchain in `{}` (rust, zig, node, bun — first run takes a while)…",
+        builder_name()
+    ));
+    run_command(
+        "limactl",
+        &[
+            "shell".to_string(),
+            builder_name(),
+            "--".to_string(),
+            "bash".to_string(),
+            "/tmp/eco-builder-bootstrap.sh".to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+
+    print_step(&format!("Builder VM `{}` ready (toolchain bootstrapped).", builder_name()));
+    Ok(())
 }
 
 fn skip_build_sync(name: &str) -> bool {
@@ -2542,6 +2791,14 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 }
             }
         }
+    }
+
+    // Provision the local Linux builder (Lima eco-builder VM) when a remote
+    // build needs one and none is present — installs Lima + starts the VM +
+    // bootstraps the toolchain. No-op when already up.
+    let needs_builder = !rust_targets.is_empty() || !frontend_targets.is_empty();
+    if needs_builder {
+        ensure_builder()?;
     }
 
     // Cross-compile each service and collect artifacts + source hashes.

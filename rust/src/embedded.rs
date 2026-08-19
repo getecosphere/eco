@@ -14,6 +14,8 @@ pub const INSTALL_REDIS_SH: &str = include_str!("../../install-redis.sh");
 pub const INSTALL_CLOUDFLARED_SH: &str = include_str!("../../install-cloudflared.sh");
 pub const ECOLOGY_MARK: &[u8] = include_bytes!("../../assets/ecology-mark.webp");
 pub const SVELTEKIT_BUN_RECIPE_MJS: &str = include_str!("../../sveltekit-bun-recipe.mjs");
+pub const ECO_BUILDER_LIMA_YML: &str = include_str!("../../scripts/eco-builder.lima.yml");
+pub const ECO_BUILDER_BOOTSTRAP_SH: &str = include_str!("../../scripts/eco-builder-bootstrap.sh");
 
 const BUNDLED: &[(&str, &str)] = &[
     ("configure.sh", CONFIGURE_SH),
@@ -24,6 +26,8 @@ const BUNDLED: &[(&str, &str)] = &[
     ("install-onnxruntime.sh", INSTALL_ONNXRUNTIME_SH),
     ("install-redis.sh", INSTALL_REDIS_SH),
     ("install-cloudflared.sh", INSTALL_CLOUDFLARED_SH),
+    ("eco-builder.lima.yml", ECO_BUILDER_LIMA_YML),
+    ("eco-builder-bootstrap.sh", ECO_BUILDER_BOOTSTRAP_SH),
 ];
 
 /// The directory where embedded assets are materialized for execution.
