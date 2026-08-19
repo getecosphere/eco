@@ -1016,6 +1016,21 @@ fn fetch_prod_env(estate_root: &Path, content: &str, service: &str) -> Result<se
     }))
 }
 
+/// Neutral default favicon for estates without one: a rounded tile with the
+/// project's initial — not the Ecosphere brand (that mark is reserved for
+/// first-party LXS, where it identifies the publisher).
+fn default_estate_favicon(project: &str) -> (Vec<u8>, &'static str) {
+    let letter = project
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "E".to_string());
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#e9e4f2"/><text x="16" y="22" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="700" fill="#5b3fd6">{letter}</text></svg>"##
+    );
+    (svg.into_bytes(), "image/svg+xml")
+}
+
 fn parse_query(url: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     if let Some(q) = url.split('?').nth(1) {
@@ -1130,11 +1145,18 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
             }
             ("GET", "/api/estate-favicon") => {
                 let dir = query.get("dir").cloned().unwrap_or_default();
-                // Estate favicon, falling back to the Ecosphere mark so estates
-                // without one (e.g. chatme) never render an empty icon.
+                // Estate favicon; estates without one get a neutral initial
+                // tile (not the Ecosphere brand).
                 let (bytes, ctype) = match resolve_estate_dir(&root, &dir).ok().and_then(|d| estate_favicon(&d)) {
                     Some((b, c)) => (b, c),
-                    None => (FAVICON_32.to_vec(), "image/png"),
+                    None => {
+                        let project = resolve_estate_dir(&root, &dir)
+                            .ok()
+                            .and_then(|d| std::fs::read_to_string(d.join("ecompose.yml")).ok())
+                            .map(|c| ecompose::parse_project_name(&c))
+                            .unwrap_or_default();
+                        default_estate_favicon(&project)
+                    }
                 };
                 let _ = request.respond(
                     Response::from_data(bytes)
