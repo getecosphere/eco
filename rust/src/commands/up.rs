@@ -3515,12 +3515,14 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
         return Ok(Vec::new());
     }
     let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir).map(|s| s.registry).filter(|r| !r.is_empty());
-    // Native arch for the dev machine (darwin/aarch64 on Apple Silicon,
-    // linux/amd64 on x86_64 Linux, linux/arm64 on aarch64 Linux).
+    // Native arch for the dev machine (darwin/arm64 on Apple Silicon,
+    // linux/amd64 on x86_64 Linux, linux/arm64 on aarch64 Linux). The registry
+    // canonical arch names are linux/amd64, linux/arm64, darwin/arm64,
+    // darwin/amd64, windows/amd64 — never the triples' aarch64/x86_64 forms.
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
     let local_arch = match (os, arch) {
-        ("macos", "aarch64") => "darwin/aarch64".to_string(),
-        ("macos", "x86_64") => "darwin/x86_64".to_string(),
+        ("macos", "aarch64") => "darwin/arm64".to_string(),
+        ("macos", "x86_64") => "darwin/amd64".to_string(),
         ("linux", "x86_64") => "linux/amd64".to_string(),
         ("linux", "aarch64") => "linux/arm64".to_string(),
         other => return Err(format!(
