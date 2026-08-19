@@ -462,6 +462,30 @@ fn find_crate_dir(source: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Find the Node/Astro app directory for a bun-compilable LXS UI: prefers
+/// `frontend/`, then the source root, when it has a package.json with an
+/// Astro (or generic node SSR) build.
+fn find_node_app_dir(source: &Path) -> Option<PathBuf> {
+    let mut found: Option<PathBuf> = None;
+    for candidate in [source.join("frontend"), source.to_path_buf()] {
+        let pkg = candidate.join("package.json");
+        if pkg.is_file() {
+            found = Some(candidate);
+            break;
+        }
+    }
+    let candidate = found?;
+    let pkg_text = std::fs::read_to_string(candidate.join("package.json")).ok()?;
+    // Astro is the supported bun-compile UI target today.
+    if pkg_text.contains("\"astro\"") && candidate.join("astro.config.mjs").is_file() {
+        return Some(candidate);
+    }
+    if pkg_text.contains("\"astro\"") || pkg_text.contains("\"@astrojs/") {
+        return Some(candidate);
+    }
+    None
+}
+
 fn build_crate_for_target(crate_dir: &Path, target: &str, zig_dir: &Option<PathBuf>) -> Result<(String, PathBuf), String> {
     let cargo_text = std::fs::read_to_string(crate_dir.join("Cargo.toml")).map_err(|e| e.to_string())?;
     let package = crate_package_name(&cargo_text).ok_or_else(|| format!("cannot determine package name from {}", crate_dir.display()))?;
@@ -571,7 +595,34 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
         }
     }
     let source = source.unwrap_or_else(util::current_dir);
-    let crate_dir = find_crate_dir(&source).ok_or_else(|| format!("no Cargo crate found under {}", source.display()))?;
+
+    // Node/Astro UI LXS: bun-compile a standalone Astro SSR app into a
+    // single self-contained linux-x64 binary (no node_modules on the host).
+    if find_crate_dir(&source).is_none() {
+        if let Some(node_dir) = find_node_app_dir(&source) {
+            println!("[eco lxs] Detected Astro/Node UI project at {}", node_dir.display());
+            let mut artifacts: HashMap<String, String> = HashMap::new();
+            for arch in &archs {
+                if arch != "linux/amd64" {
+                    return Err(format!(
+                        "unsupported LXS target: {arch} (Astro/Node UI LXS currently build to linux/amd64 via bun-compile)"
+                    ));
+                }
+                let binary = build_node_app_for_target(&node_dir)?;
+                artifacts.insert(arch.clone(), binary.display().to_string());
+            }
+            let artifacts_json = serde_json::json!({ "arch": archs, "binaries": artifacts }).to_string();
+            std::fs::write(source.join(ARTIFACTS_FILE), artifacts_json).map_err(|e| e.to_string())?;
+            println!("[eco lxs] Built {} artifact(s) for {}", artifacts.len(), source.display());
+            for (arch, binary) in &artifacts {
+                println!("  {arch}: {binary}");
+            }
+            println!("[eco lxs] Artifact map written to {}/{}", source.display(), ARTIFACTS_FILE);
+            return Ok(());
+        }
+    }
+
+    let crate_dir = find_crate_dir(&source).ok_or_else(|| format!("no Cargo crate or Astro/Node app found under {}", source.display()))?;
 
     let mut artifacts: HashMap<String, String> = HashMap::new();
     for arch in &archs {
@@ -589,6 +640,75 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
     }
     println!("[eco lxs] Artifact map written to {}/{}", source.display(), ARTIFACTS_FILE);
     Ok(())
+}
+
+/// Build a standalone Astro SSR app into a single self-contained linux-x64
+/// binary via bun-compile. Runs `npm ci && npm run build` (Astro adapter-node
+/// -> dist/server/entry.mjs + dist/client), then bun-compiles the server
+/// entry, embedding client assets alongside the binary.
+fn build_node_app_for_target(node_dir: &Path) -> Result<PathBuf, String> {
+    if !util::command_on_path("bun") {
+        return Err("bun is required to build an Astro/Node UI LXS but was not found on PATH. Install bun: `brew install oven-sh/bun/bun`.".to_string());
+    }
+    // Isolated build root so the source stays pristine (node_modules never
+    // lands in the repo); reuse a per-package cache for speed.
+    let pkg_name = node_package_name(&node_dir)?;
+    let build_root = Path::new(&util::home_dir()).join(".cache").join("eco").join("lxs-build").join(&pkg_name);
+    let member_dir = build_root.join("app");
+    let _ = std::fs::remove_dir_all(&member_dir);
+    std::fs::create_dir_all(&member_dir).map_err(|e| e.to_string())?;
+    copy_node_source(node_dir, &member_dir)?;
+
+    println!("[eco lxs] npm ci + astro build (bun) for {pkg_name}");
+    let npm_ci = run_command_in_dir("npm", &["ci"], &member_dir)?;
+    let _ = npm_ci;
+    let build = run_command_in_dir("npm", &["run", "build"], &member_dir)?;
+    let _ = build;
+
+    let server_entry = ["dist/server/entry.mjs", "dist/server/index.js", "dist/index.js"]
+        .iter()
+        .map(|p| member_dir.join(p))
+        .find(|p| p.is_file())
+        .ok_or_else(|| format!("Astro build produced no dist/server entry under {}", member_dir.display()))?;
+    let out = build_root.join(&pkg_name);
+    let _ = std::fs::remove_file(&out);
+    let rel = server_entry.strip_prefix(&member_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| server_entry.display().to_string());
+    run_command_in_dir("bun", &["build", "--compile", "--target=bun-linux-x64", &rel, "--outfile", &out.display().to_string()], &member_dir)?;
+    if !out.is_file() {
+        return Err(format!("bun-compiled binary not found: {}", out.display()));
+    }
+    println!("[eco lxs] Bun-compiled {pkg_name} -> {}", out.display());
+    Ok(out)
+}
+
+fn node_package_name(node_dir: &Path) -> Result<String, String> {
+    let pkg_text = std::fs::read_to_string(node_dir.join("package.json")).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&pkg_text).map_err(|e| format!("parse package.json: {e}"))?;
+    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("node-lxs");
+    Ok(name.trim_start_matches('@').replace('/', "-").to_string())
+}
+
+fn copy_node_source(src: &Path, dst: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if [".git", "target", "node_modules", "dist", ".astro", ".output"].contains(&name.as_str()) {
+            continue;
+        }
+        let source = entry.path();
+        let destination = dst.join(&name);
+        if source.is_dir() {
+            std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+            copy_node_source(&source, &destination)?;
+        } else if !source.is_symlink() {
+            std::fs::copy(&source, &destination).map_err(|e| format!("copy {}: {e}", source.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn run_command_in_dir(cmd: &str, args: &[&str], dir: &Path) -> Result<(), String> {
+    util::run_command_env(cmd, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), dir, &std::env::vars().collect())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
