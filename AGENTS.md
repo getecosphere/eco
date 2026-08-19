@@ -250,7 +250,7 @@ Registry repo layout:
   Required keys: `ts`, `level` (`trace|debug|info|warn|error`), `msg`. Optional:
   `service`, `request_id`, `status`, `latency_ms`, `user_id`, `error`. One JSON
   object per line; no multi-line values; stdout only (stderr = crash diagnostics).
-  This feeds the estate log pipeline (VictoriaLogs): compliant logs get
+  This feeds the estate log pipeline (Grafana + Loki): compliant logs get
   structured labels in Grafana; non-compliant logs still appear as raw text.
   Changing the log output format is a breaking change → bump `--major` +
   changelog entry. New LXS must comply from day one.
