@@ -22,6 +22,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 
 use tiny_http::{Header, Response, Server};
 
@@ -34,6 +36,15 @@ use crate::commands::lxs::{self, LxsField, LxsManifest};
 /// we use the actual rendered PNGs the estate serves.
 const FAVICON_16: &[u8] = include_bytes!("../../../assets/favicon-16.png");
 const FAVICON_32: &[u8] = include_bytes!("../../../assets/favicon-32.png");
+
+/// The running `eco up dev` session (one at a time), so the UI can start a
+/// dev environment and poll until a local URL appears.
+struct DevSession {
+    child: Child,
+    dir: String,
+    log_path: PathBuf,
+}
+static DEV_SESSION: Mutex<Option<DevSession>> = Mutex::new(None);
 
 const HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -107,6 +118,8 @@ const HTML: &str = r#"<!doctype html>
   /* ---------- general ---------- */
   .general { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1rem 1.2rem; margin-bottom:1rem; }
   .general h3 { margin:0 0 .6rem; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:#8d8493; }
+  .general .acts { display:flex; gap:.7rem; align-items:center; margin-top:1rem; }
+  .general .acts .status { margin:0; }
   .grow { display:grid; grid-template-columns:repeat(3,1fr); gap:.7rem; }
   .grow label { display:block; font-size:.78rem; color:var(--muted); margin-bottom:.2rem; }
   .grow input { width:100%; padding:.45rem .6rem; border:1px solid var(--line); border-radius:8px; font:inherit; }
@@ -214,6 +227,8 @@ const I18N = {
     saveEcompose:'Save ecompose.yml', envWarn:'The host agent never exposes secrets — prod-env returns only <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> keys (platform security design, stricter than Heroku’s reveal).',
     envLoading:'Loading…', envEmpty:'No public keys (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) in this service.', envNotAvail:'prod env not available',
     copyPath:'Copy path', copyEcompose:'Copy ecompose.yml path', reload:'Reload estate', copied:'Path copied',
+    startDev:'Start dev (eco up dev)', devStarting:'Starting dev…', devRunning:'Dev starting — polls for the local URL…', devDone:'Dev ready.',
+    devFail:'Dev failed (see log).', devAlready:'eco up dev already running.', devLog:'log', stopHint:'or stop it in a terminal', localDev:'Local dev',
   },
   id: {
     subtitle:'konfigurasi estate (dev)', search:'Cari estate, service, key…',
@@ -229,6 +244,8 @@ const I18N = {
     saveEcompose:'Simpan ecompose.yml', envWarn:'Agent host tidak mengekspos secret — prod-env hanya mengembalikan key <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> (desain keamanan platform).',
     envLoading:'Memuat…', envEmpty:'Tidak ada key public (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) di service ini.', envNotAvail:'prod env tidak tersedia',
     copyPath:'Salin path', copyEcompose:'Salin path ecompose.yml', reload:'Muat ulang estate', copied:'Path tersalin',
+    startDev:'Jalankan dev (eco up dev)', devStarting:'Memulai dev…', devRunning:'Dev berjalan — menunggu URL lokal…', devDone:'Dev siap.',
+    devFail:'Dev gagal (lihat log).', devAlready:'eco up dev sedang berjalan.', devLog:'log', stopHint:'atau hentikan di terminal', localDev:'Local dev',
   }
 };
 let LANG = localStorage.getItem('ecoGenieLang') || 'en';
@@ -377,7 +394,8 @@ function renderGeneral() {
   const ddesc = document.createElement('div'); ddesc.style.cssText = 'grid-column:1/-1';
   ddesc.innerHTML = `<label>${t('description')}</label><input id="gen-description" value="${esc(CURRENT.description||'')}" style="width:100%">`;
   grow.appendChild(ddesc);
-  g.appendChild(grow);
+  g.append(grow);
+  const acts = document.createElement('div'); acts.className = 'acts';
   const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = t('saveGeneral'); btn.type = 'button';
   const st = document.createElement('span'); st.className = 'status';
   btn.onclick = async () => {
@@ -389,7 +407,53 @@ function renderGeneral() {
     else { st.className = 'status err'; st.textContent = res; }
     btn.disabled = false;
   };
-  g.append(btn, st); sec.appendChild(g);
+  acts.append(btn, st); g.append(acts); sec.appendChild(g);
+
+  /* --- local dev: start `eco up dev`, poll until the local URL appears --- */
+  const dev = document.createElement('div'); dev.className = 'general';
+  const dh = document.createElement('h3'); dh.textContent = t('localDev'); dev.appendChild(dh);
+  const dacts = document.createElement('div'); dacts.className = 'acts';
+  const devBtn = document.createElement('button'); devBtn.className = 'save'; devBtn.textContent = t('startDev'); devBtn.type = 'button';
+  const devSt = document.createElement('span'); devSt.className = 'status';
+  dacts.append(devBtn, devSt); dev.appendChild(dacts);
+  const devLog = document.createElement('details'); devLog.style.display = 'none';
+  const devLogSum = document.createElement('summary'); devLogSum.textContent = t('devLog'); devLog.appendChild(devLogSum);
+  const devPre = document.createElement('pre'); devPre.style.cssText = 'font:11px/1.4 "DM Mono",ui-monospace,monospace; max-height:220px; overflow:auto; background:#faf9f7; border:1px solid var(--line); border-radius:8px; padding:.6rem; margin:.5rem 0 0;';
+  devLog.appendChild(devPre); dev.appendChild(devLog);
+  sec.appendChild(dev);
+
+  let pollTimer = null;
+  const refreshLocal = (url) => {
+    const loc = $('#openLocal');
+    if (url) { CURRENT.localUrl = url; loc.href = url; loc.hidden = false; }
+  };
+  async function pollDev() {
+    const r = await fetch('/api/dev-status' + q({ dir: CURRENT.path }));
+    if (!r.ok) return;
+    const d = await r.json();
+    refreshLocal(d.localUrl);
+    if (d.log && d.log.length) { devLog.style.display = 'block'; devPre.textContent = d.log.join('\n'); }
+    if (d.running) {
+      devBtn.disabled = true; devSt.textContent = t('devRunning');
+      if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(pollDev, 3000);
+    } else if (d.done) {
+      devBtn.disabled = false; devSt.textContent = d.ok ? t('devDone') : t('devFail');
+      if (pollTimer) clearTimeout(pollTimer); pollTimer = null;
+    }
+  }
+  devBtn.onclick = async () => {
+    devBtn.disabled = true; devSt.className = 'status'; devSt.textContent = t('devStarting');
+    const r = await fetch('/api/dev-up' + q({ dir: CURRENT.path }), { method:'POST' });
+    const res = await r.text();
+    if (!r.ok) {
+      devBtn.disabled = false;
+      devSt.className = 'status err';
+      devSt.textContent = res.includes('already running') ? t('devAlready') : res;
+      return;
+    }
+    pollDev();
+  };
+  pollDev();
 }
 function renderLXS() {
   const sec = $('#p-lxs');
@@ -949,6 +1013,94 @@ fn live_listening_ports() -> Vec<(String, u16)> {
     result
 }
 
+/// Start `eco up dev` for an estate in the background (one at a time).
+fn dev_session_running() -> bool {
+    let mut guard = DEV_SESSION.lock().unwrap();
+    match guard.as_mut() {
+        Some(s) => {
+            match s.child.try_wait() {
+                Ok(Some(_status)) => {
+                    guard.take();
+                    false
+                }
+                _ => true,
+            }
+        }
+        None => false,
+    }
+}
+
+fn start_dev_session(dir: &Path) -> Result<(), String> {
+    if dev_session_running() {
+        return Err("eco up dev already running — wait for it to finish (or stop it in a terminal)".to_string());
+    }
+    let project = std::fs::read_to_string(dir.join("ecompose.yml"))
+        .map(|c| ecompose::parse_project_name(&c))
+        .unwrap_or_default();
+    let log_path = std::env::temp_dir().join(format!("eco-genie-dev-{}.log", if project.is_empty() { "estate" } else { &project }));
+    let file = std::fs::File::create(&log_path).map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+    let child = Command::new(std::env::current_exe().map_err(|e| format!("current exe: {e}"))?)
+        .args(["up", "dev", "--no-lxs-check"])
+        .current_dir(dir)
+        .env("ECO_NON_INTERACTIVE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file.try_clone().map_err(|e| e.to_string())?))
+        .stderr(Stdio::from(file))
+        .spawn()
+        .map_err(|e| format!("cannot spawn eco up dev: {e}"))?;
+    let mut guard = DEV_SESSION.lock().unwrap();
+    *guard = Some(DevSession {
+        child,
+        dir: dir.display().to_string(),
+        log_path,
+    });
+    Ok(())
+}
+
+fn dev_session_status(dir: &Path) -> serde_json::Value {
+    let mut running = false;
+    let mut done = false;
+    let mut exited_ok = false;
+    let mut log_tail: Vec<String> = Vec::new();
+    let mut take = false;
+    {
+        let mut guard = DEV_SESSION.lock().unwrap();
+        if let Some(s) = guard.as_mut() {
+            if s.dir != dir.display().to_string() {
+                return serde_json::json!({ "running": false, "done": false, "log": [], "localUrl": "" });
+            }
+            match s.child.try_wait() {
+                Ok(Some(status)) => {
+                    done = true;
+                    exited_ok = status.success();
+                    take = true;
+                }
+                _ => running = true,
+            }
+            if let Ok(text) = std::fs::read_to_string(&s.log_path) {
+                let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+                log_tail = lines.into_iter().rev().take(24).collect();
+                log_tail.reverse();
+            }
+        }
+        if take {
+            guard.take();
+        }
+    }
+    let local_url = {
+        let content = std::fs::read_to_string(dir.join("ecompose.yml")).unwrap_or_default();
+        let services = ecompose::parse_services(&content);
+        local_dev_url(dir, &ecompose::parse_project_name(&content), &services)
+    };
+    serde_json::json!({
+        "running": running,
+        "done": done,
+        "ok": if done { exited_ok } else { false },
+        "log": log_tail,
+        "localUrl": local_url,
+    })
+}
+
 fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<String, String>) -> Result<String, String> {
     let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
     let mut in_services = false;
@@ -1426,6 +1578,20 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                         Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
                         Err(e) => json_error(400, &e),
                     }
+                }
+            }
+            ("POST", "/api/dev-up") => {
+                let dir = query.get("dir").cloned().unwrap_or_default();
+                match resolve_estate_dir(&root, &dir).and_then(|d| start_dev_session(&d)) {
+                    Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
+                    Err(e) => json_error(400, &e),
+                }
+            }
+            ("GET", "/api/dev-status") => {
+                let dir = query.get("dir").cloned().unwrap_or_default();
+                match resolve_estate_dir(&root, &dir) {
+                    Ok(d) => (200, dev_session_status(&d).to_string(), "application/json"),
+                    Err(e) => json_error(400, &e),
                 }
             }
             ("GET", "/api/prod-env") => {
