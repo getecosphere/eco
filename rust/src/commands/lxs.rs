@@ -1051,6 +1051,38 @@ fn match_indented_value_4(line: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Resolve just an LXS manifest (contract schema), without fetching any
+/// binary — used by `eco config` to render configuration forms.
+pub fn fetch_lxs_manifest(reference: &str, address: Option<&str>) -> Result<(LxsManifest, String), String> {
+    let (name, pinned_version) = parse_lxs_ref(reference)?;
+    let target = resolve_registry_target(address)?;
+    match &target {
+        RegistryTarget::Local(dir) => {
+            let versions = list_versions_local(&dir.join(&name));
+            let version = match &pinned_version {
+                Some(v) => v.clone(),
+                None => pick_latest(&versions)
+                    .ok_or_else(|| format!("no versions found for {name} under {}", dir.join(&name).display()))?,
+            };
+            let manifest = load_manifest(&dir.join(&name).join(&version).join("lxs.yml"))?;
+            Ok((manifest, version))
+        }
+        RegistryTarget::Github { owner, repo, token } => {
+            let version = match &pinned_version {
+                Some(v) => v.clone(),
+                None => {
+                    let versions = list_versions_github(owner, repo, token, &name)?;
+                    pick_latest(&versions)
+                        .ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
+                }
+            };
+            let text = http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
+            let manifest: LxsManifest = serde_yaml::from_str(&text).map_err(|e| format!("parse lxs.yml: {e}"))?;
+            Ok((manifest, version))
+        }
+    }
+}
+
 pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) -> Result<(LxsManifest, String, PathBuf), String> {
     let (name, pinned_version) = parse_lxs_ref(reference)?;
     let target = resolve_registry_target(address)?;

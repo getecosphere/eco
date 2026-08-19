@@ -9,6 +9,7 @@ Usage:
   eco install <tool>
   eco configure [args...]
   eco show
+  eco config [--port <n>]
   eco compose add [repo-name|path]
   eco compose refresh <repo-name|path>
   eco compose expose <service> <hostname>
@@ -37,6 +38,11 @@ Current command groups:
   configure   Run the bundled eco configure workflow
              Pass --non-interactive to accept defaults without prompts
   show        Show the current service URLs/ports from ecosystem.config.js
+  config      Local estate configuration dashboard (dev): web UI at
+              http://127.0.0.1:8765 rendering each composed LXS's schema
+              (contract v2 fields). Saves non-secrets into ecompose.yml
+              `config:` blocks and secrets into the service's local .env.
+              Use --port to change the listening port.
   compose     Add a repo to an existing ecompose.yml
              "eco compose add" with no args offers an arrow-key checklist of
              "eco compose add <name>" clones that one catalog repo into the
