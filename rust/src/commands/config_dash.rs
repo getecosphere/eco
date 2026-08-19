@@ -169,7 +169,16 @@ function renderTree() {
     const caret = document.createElement('span'); caret.className = 'caret'; caret.textContent = '▸';
     const name = document.createElement('span'); name.textContent = e.project;
     row.append(caret, name);
-    row.onclick = () => selectEstate(e, wrap);
+    // Click toggles expand/collapse; expanding also loads the estate.
+    row.onclick = () => {
+      const isOpen = children.style.display === 'block';
+      if (isOpen) {
+        children.style.display = 'none';
+        caret.textContent = '▸';
+      } else {
+        selectEstate(e, wrap);
+      }
+    };
     const children = document.createElement('div'); children.className = 'estate-children'; children.style.display = 'none';
     for (const s of e.services) {
       const svc = document.createElement('div'); svc.className = 'svc';
