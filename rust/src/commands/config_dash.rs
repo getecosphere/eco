@@ -866,31 +866,87 @@ fn top_level_value(content: &str, key: &str) -> String {
     String::new()
 }
 
-/// Best-effort local dev URL for an estate: the `-frontend`/-app PM2 app port
-/// from ecosystem.config.js, else the frontend service's declared ecompose dev
-/// port, else the lowest ecosystem port, else "".
+/// Best-effort local dev URL for an estate, in order of reliability:
+///
+///   1. the eco dev port registry (`~/.eco/registry.db` — authoritative for
+///      estates managed by `eco up dev`; the ecompose `port:` is a *requested*
+///      port, not the dev port, so it is deliberately ignored),
+///   2. PM2 `ecosystem.config.js` ports,
+///   3. live listening ports whose process command mentions the project
+///      (catches manually-run dev servers, e.g. `./target/release/…`),
+///   4. otherwise "" (the local link is hidden).
 fn local_dev_url(estate_root: &Path, project: &str, services: &[ecompose::Service]) -> String {
+    let registry_path = crate::registry::default_registry_path();
+    let scope = crate::registry::default_scope();
+    let mut preferred: Vec<&ecompose::Service> = services.iter().collect();
+    preferred.sort_by_key(|s| {
+        if s.name.contains("frontend") {
+            0
+        } else if s.name.contains("-web") || s.name.contains("-app") || s.name == project {
+            1
+        } else {
+            2
+        }
+    });
+
+    // 1. Eco dev port registry (real allocated dev ports).
+    for svc in &preferred {
+        if let Ok(Some(port)) = crate::registry::lookup_port(&registry_path, &scope, project, &svc.name, "service") {
+            return format!("http://localhost:{port}");
+        }
+    }
+
+    // 2. PM2 ecosystem.config.js.
     let ecosystem = estate_root.join("ecosystem.config.js");
     let ports = crate::commands::show::read_ports_from_ecosystem(&ecosystem);
     let frontend_app = format!("{project}-frontend");
     let app_app = format!("{project}-app");
-    let port = ports
-        .get(&frontend_app)
-        .or_else(|| ports.get(&app_app))
-        .cloned()
-        .or_else(|| {
-            services
-                .iter()
-                .find(|s| s.port > 0 && (s.name.contains("frontend") || s.name.contains("-web") || s.name.contains("-app") || s.name == project))
-                .map(|s| s.port.to_string())
-        })
-        .or_else(|| ports.values().min().cloned())
-        .unwrap_or_default();
-    if port.is_empty() {
-        String::new()
-    } else {
-        format!("http://localhost:{}", port)
+    if let Some(p) = ports.get(&frontend_app).or_else(|| ports.get(&app_app)) {
+        return format!("http://localhost:{p}");
     }
+
+    // 3. Live listening ports for this project (any running process whose
+    //    command mentions the project name), preferring frontend-ish ones.
+    let live = live_listening_ports();
+    let proj_l = project.to_lowercase();
+    let for_project: Vec<&(String, u16)> = live.iter().filter(|(cmd, _)| cmd.to_lowercase().contains(&proj_l)).collect();
+    for svc in &preferred {
+        let name_l = svc.name.to_lowercase();
+        if let Some((_, port)) = for_project.iter().find(|(cmd, _)| cmd.to_lowercase().contains(&name_l)) {
+            return format!("http://localhost:{port}");
+        }
+    }
+    if let Some((_, port)) = for_project.first() {
+        return format!("http://localhost:{port}");
+    }
+
+    // 4. Lowest PM2 port as a last resort.
+    if let Some(p) = ports.values().min() {
+        return format!("http://localhost:{p}");
+    }
+    String::new()
+}
+
+/// `lsof -nP -iTCP -sTCP:LISTEN -Fc -Fn` → (command, port) pairs.
+fn live_listening_ports() -> Vec<(String, u16)> {
+    let out = match std::process::Command::new("lsof").args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fc", "-Fn"]).output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    let mut cmd = String::new();
+    for line in String::from_utf8_lossy(&out).lines() {
+        if let Some(c) = line.strip_prefix('c') {
+            cmd = c.to_string();
+        } else if let Some(n) = line.strip_prefix('n') {
+            if let Some(port) = n.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+                if !cmd.is_empty() {
+                    result.push((cmd.clone(), port));
+                }
+            }
+        }
+    }
+    result
 }
 
 fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<String, String>) -> Result<String, String> {
