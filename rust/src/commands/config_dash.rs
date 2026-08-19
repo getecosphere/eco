@@ -36,7 +36,7 @@ const FAVICON_16: &[u8] = include_bytes!("../../../assets/favicon-16.png");
 const FAVICON_32: &[u8] = include_bytes!("../../../assets/favicon-32.png");
 
 const HTML: &str = r#"<!doctype html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -53,9 +53,14 @@ const HTML: &str = r#"<!doctype html>
   /* ---------- sidebar ---------- */
   aside { width:300px; min-width:300px; background:#fff; border-right:1px solid var(--line);
     display:flex; flex-direction:column; height:100vh; position:sticky; top:0; }
-  .brand { padding:1rem 1rem .6rem; border-bottom:1px solid var(--line); }
+  .brand { padding:1rem 1rem .5rem; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:.6rem; }
+  .brand img { width:26px; height:26px; border-radius:6px; }
   .brand h1 { margin:0; font-size:1.05rem; letter-spacing:-.02em; }
-  .brand small { color:var(--muted); }
+  .brand small { color:var(--muted); display:block; }
+  .langbtn { margin-left:auto; display:flex; gap:.15rem; }
+  .langbtn button { padding:.15rem .4rem; font-size:.72rem; font-weight:700; border:1px solid var(--line);
+    background:#fff; color:var(--muted); border-radius:6px; cursor:pointer; }
+  .langbtn button.on { background:var(--chipbg); color:var(--accent); border-color:var(--accent); }
   #searchwrap { padding:.7rem 1rem; }
   #search { width:100%; padding:.5rem .7rem; border:1px solid var(--line); border-radius:9px; font:inherit; }
   #tree { flex:1; overflow:auto; padding:.4rem .6rem 1rem; }
@@ -63,11 +68,13 @@ const HTML: &str = r#"<!doctype html>
   .estate > .row { display:flex; align-items:center; gap:.5rem; padding:.42rem .55rem; border-radius:8px; cursor:pointer; }
   .estate > .row:hover { background:#f1eef6; }
   .estate.active > .row { background:var(--chipbg); color:var(--accent); font-weight:700; }
-  .caret { width:14px; color:var(--muted); font-size:.7rem; display:inline-block; }
+  .caret { width:18px; flex:none; color:var(--muted); font-size:1rem; display:inline-block; text-align:center; transition:transform .12s; }
   .estate-children { margin-left:1.05rem; border-left:1px solid var(--line); padding-left:.35rem; }
-  .svc { padding:.3rem .5rem; border-radius:7px; color:var(--muted); font-size:.86rem; cursor:pointer; }
+  .svc { display:flex; align-items:center; gap:.4rem; padding:.32rem .5rem; border-radius:7px; color:var(--muted); font-size:.86rem; cursor:pointer; }
   .svc:hover { background:#f4f2f5; color:var(--text); }
   .svc .b { font-family:"DM Mono",ui-monospace,monospace; color:var(--text); }
+  .svcimg { width:15px; height:15px; border-radius:3px; object-fit:contain; flex:none; }
+  .svcdot { width:15px; flex:none; text-align:center; font-size:13px; color:#1a5fb4; }
   .favicon { width:16px; height:16px; border-radius:4px; object-fit:contain; flex:none; }
   .hint { padding:.6rem 1rem .8rem; color:var(--muted); font-size:.78rem; border-top:1px solid var(--line); }
   .hint code { background:var(--chipbg); padding:.02rem .3rem; border-radius:4px; }
@@ -93,15 +100,22 @@ const HTML: &str = r#"<!doctype html>
   .grow { display:grid; grid-template-columns:repeat(3,1fr); gap:.7rem; }
   .grow label { display:block; font-size:.78rem; color:var(--muted); margin-bottom:.2rem; }
   .grow input { width:100%; padding:.45rem .6rem; border:1px solid var(--line); border-radius:8px; font:inherit; }
-  /* ---------- services ---------- */
+  /* ---------- sections & services ---------- */
+  .sect { display:flex; align-items:center; gap:.5rem; margin:1.4rem 0 .3rem; font-size:.78rem; letter-spacing:.08em;
+    text-transform:uppercase; color:#8d8493; }
+  .sect::after { content:""; flex:1; height:1px; background:var(--line); }
+  .badge { font-size:.58rem; padding:.13rem .45rem; border-radius:999px; font-weight:800; letter-spacing:.06em; white-space:nowrap; }
+  .badge.core { background:#e5f0ff; color:#1a5fb4; }
+  .badge.lxs { background:var(--chipbg); color:var(--accent); }
   details.service { background:var(--card); border:1px solid var(--line); border-radius:12px; margin:1rem 0; }
-  details.service > summary { cursor:pointer; padding:.85rem 1.1rem; font-weight:700; font-size:.93rem;
-    list-style:none; display:flex; align-items:center; gap:.5rem; background:#f1eef6; border-radius:12px 12px 0 0; }
+  details.service > summary { cursor:pointer; padding:.8rem 1.1rem; font-weight:700; font-size:.93rem;
+    list-style:none; display:flex; align-items:center; gap:.55rem; background:#f1eef6; border-radius:12px 12px 0 0; }
   details.service > summary::-webkit-details-marker { display:none; }
-  details.service > summary .caret { transition:transform .12s; }
   details.service[open] > summary { border-bottom:1px solid var(--line); }
-  details.service[open] > summary .caret { transform:rotate(90deg); }
   details.service > summary .lxs { font-weight:400; color:var(--muted); font-size:.8rem; font-family:"DM Mono",ui-monospace,monospace; }
+  details.service > summary .pub { font-weight:500; color:#8d8493; font-size:.74rem; }
+  .svcicon { width:20px; height:20px; border-radius:5px; object-fit:contain; flex:none; }
+  .svcicon.core { display:inline-flex; align-items:center; justify-content:center; font-size:15px; color:#1a5fb4; background:#e5f0ff; }
   .group { padding:.2rem 1.1rem 0; }
   .group > h4 { margin:1rem 0 .2rem; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:#8d8493; }
   .field { display:grid; grid-template-columns:minmax(200px,1fr) minmax(240px,1.4fr); gap:.6rem 1rem;
@@ -131,35 +145,37 @@ const HTML: &str = r#"<!doctype html>
   table.env th, table.env td { text-align:left; padding:.5rem .8rem; border-bottom:1px solid var(--line2); font-size:.84rem; }
   table.env th { background:#f1eef6; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
   table.env td code { font-family:"DM Mono",ui-monospace,monospace; word-break:break-all; }
-  .mask { font-family:"DM Mono",ui-monospace,monospace; color:var(--muted); }
-  .reveal { font-size:.75rem; padding:.25rem .6rem; }
   .envinfo { color:var(--muted); font-size:.82rem; margin-bottom:.6rem; }
   .warn { background:#fff8e1; border:1px solid #f0d45a; color:#6b5800; border-radius:9px; padding:.7rem .9rem; font-size:.84rem; margin-bottom:.8rem; }
 </style>
 </head>
 <body>
 <aside>
-  <div class="brand"><h1>Ecosphere Genie</h1><small>konfigurasi estate (dev)</small></div>
-  <div id="searchwrap"><input id="search" type="search" placeholder="Cari key / service / estate…"></div>
-  <div id="tree"><p class="hint">Memuat estate…</p></div>
-  <div class="hint">Simpan → berlaku setelah <code>eco up</code>. Prod env read-only & tersembunyi default.</div>
+  <div class="brand">
+    <img src="/favicon-32.png" alt="">
+    <div><h1>Ecosphere Genie</h1><small data-i18n="subtitle">estate configuration (dev)</small></div>
+    <div class="langbtn"><button id="langEn" class="on">EN</button><button id="langId">ID</button></div>
+  </div>
+  <div id="searchwrap"><input id="search" type="search" data-i18n-ph="search" placeholder="Search estates, services, keys…"></div>
+  <div id="tree"><p class="hint" data-i18n="treeLoading">Loading estates…</p></div>
+  <div class="hint"><span data-i18n="sidebarHint">Save → applies after</span> <code>eco up</code><span data-i18n="sidebarHint2">. Prod env read-only &amp; hidden by default.</span></div>
 </aside>
 <main>
   <header class="main">
-    <h2 id="estateTitle">Pilih estate di sidebar</h2>
+    <h2 id="estateTitle" data-i18n="selectEstate">Select an estate on the left</h2>
     <div class="path" id="estatePath"></div>
     <div class="openlinks">
-      <a id="openProd" class="openlink" target="_blank" rel="noopener">Buka di prod ↗</a>
-      <a id="openLocal" class="openlink" target="_blank" rel="noopener">Buka lokal ↗</a>
+      <a id="openProd" class="openlink" target="_blank" rel="noopener" data-i18n="openProd">Open prod ↗</a>
+      <a id="openLocal" class="openlink" target="_blank" rel="noopener" data-i18n="openLocal">Open local ↗</a>
     </div>
     <nav class="tabs" id="tabs">
-      <div class="tab active" data-tab="lxs">LXS Config</div>
-      <div class="tab" data-tab="raw">ecompose.yml</div>
-      <div class="tab" data-tab="env">Prod env</div>
+      <div class="tab active" data-tab="lxs" data-i18n="tabLxs">LXS Config</div>
+      <div class="tab" data-tab="raw" data-i18n="tabRaw">ecompose.yml</div>
+      <div class="tab" data-tab="env" data-i18n="tabEnv">Prod env</div>
     </nav>
   </header>
   <div class="content">
-    <section class="panel active" id="p-lxs"><p class="empty">Pilih estate di sidebar untuk mulai.</p></section>
+    <section class="panel active" id="p-lxs"><p class="empty" data-i18n="selectEstate">Select an estate on the left to start.</p></section>
     <section class="panel" id="p-raw"><p class="empty">—</p></section>
     <section class="panel" id="p-env"><p class="empty">—</p></section>
   </div>
@@ -170,6 +186,49 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>'
 const q = params => '?' + new URLSearchParams(params).toString();
 const qs = new URLSearchParams(location.search);
 let ESTATES = [], CURRENT = null;
+
+/* ---------------- i18n ---------------- */
+const I18N = {
+  en: {
+    subtitle:'estate configuration (dev)', search:'Search estates, services, keys…',
+    treeLoading:'Loading estates…', sidebarHint:'Save → applies after', sidebarHint2:'. Prod env read-only &amp; hidden by default.',
+    selectEstate:'Select an estate on the left', openProd:'Open prod ↗', openLocal:'Open local ↗',
+    tabLxs:'LXS Config', tabRaw:'ecompose.yml', tabEnv:'Prod env',
+    general:'General', projectName:'Project name', mainEstate:'Main estate', hostname:'Hostname', saveGeneral:'Save General',
+    saving:'Saving…', saved:'Saved.', runUp:'Saved. Run `eco up` to apply.',
+    coreDomain:'Core domain (source)', reusableLxs:'Reusable LXS (registry)', badgeCore:'CORE', badgeLxs:'LXS',
+    lxsNoSchema:'This LXS has no config schema yet (contract v2 fields).',
+    sourceService:'Source (path:) service — configure via ecompose.yml.',
+    saveService:'Save', rawInfo:'Edit the whole ecompose.yml (project name, hostname, access routes…). Validated on save.',
+    saveEcompose:'Save ecompose.yml', envWarn:'The host agent never exposes secrets — prod-env returns only <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> keys (platform security design, stricter than Heroku’s reveal).',
+    envLoading:'Loading…', envEmpty:'No public keys (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) in this service.', envNotAvail:'prod env not available',
+  },
+  id: {
+    subtitle:'konfigurasi estate (dev)', search:'Cari estate, service, key…',
+    treeLoading:'Memuat estate…', sidebarHint:'Simpan → berlaku setelah', sidebarHint2:'. Prod env read-only &amp; tersembunyi default.',
+    selectEstate:'Pilih estate di sidebar', openProd:'Buka di prod ↗', openLocal:'Buka lokal ↗',
+    tabLxs:'LXS Config', tabRaw:'ecompose.yml', tabEnv:'Prod env',
+    general:'Umum', projectName:'Nama project', mainEstate:'Estate utama', hostname:'Hostname', saveGeneral:'Simpan Umum',
+    saving:'Menyimpan…', saved:'Tersimpan.', runUp:'Tersimpan. Jalankan `eco up` untuk menerapkan.',
+    coreDomain:'Core domain (sumber)', reusableLxs:'Reusable LXS (registry)', badgeCore:'CORE', badgeLxs:'LXS',
+    lxsNoSchema:'LXS ini belum menyatakan schema konfigurasi (contract v2 fields).',
+    sourceService:'Service sumber (path:) — konfigurasi lewat ecompose.yml.',
+    saveService:'Simpan', rawInfo:'Edit seluruh ecompose.yml (nama project, hostname, access routes…). Validasi saat simpan.',
+    saveEcompose:'Simpan ecompose.yml', envWarn:'Agent host tidak mengekspos secret — prod-env hanya mengembalikan key <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> (desain keamanan platform).',
+    envLoading:'Memuat…', envEmpty:'Tidak ada key public (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) di service ini.', envNotAvail:'prod env tidak tersedia',
+  }
+};
+let LANG = localStorage.getItem('ecoGenieLang') || 'en';
+const t = k => (I18N[LANG] && I18N[LANG][k]) || I18N.en[k] || k;
+function setLang(l) {
+  LANG = l; localStorage.setItem('ecoGenieLang', l);
+  $('#langEn').classList.toggle('on', l==='en'); $('#langId').classList.toggle('on', l==='id');
+  document.querySelectorAll('[data-i18n]').forEach(el => el.textContent = t(el.dataset.i18n));
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => el.placeholder = t(el.dataset.i18nPh));
+  renderTree(); if (CURRENT) { renderGeneral(); renderLXS(); }
+}
+$('#langEn').onclick = () => setLang('en');
+$('#langId').onclick = () => setLang('id');
 
 /* ---------------- tree ---------------- */
 async function loadEstates() {
@@ -192,20 +251,15 @@ function renderTree() {
     img.onerror = () => img.remove();
     const name = document.createElement('span'); name.textContent = e.project;
     row.append(caret, img, name);
-    // Click toggles expand/collapse; expanding also loads the estate.
     row.onclick = () => {
       const isOpen = children.style.display === 'block';
-      if (isOpen) {
-        children.style.display = 'none';
-        caret.textContent = '▸';
-      } else {
-        selectEstate(e, wrap);
-      }
+      if (isOpen) { children.style.display = 'none'; caret.textContent = '▸'; }
+      else selectEstate(e, wrap);
     };
     const children = document.createElement('div'); children.className = 'estate-children'; children.style.display = 'none';
     for (const s of e.services) {
       const svc = document.createElement('div'); svc.className = 'svc';
-      svc.innerHTML = `<span class="b">${esc(s)}</span>`;
+      svc.innerHTML = `<span class="svcimg"></span><span class="b">${esc(s)}</span>`;
       svc.onclick = (ev) => { ev.stopPropagation(); selectEstate(e, wrap).then(() => jumpToService(s)); };
       children.appendChild(svc);
     }
@@ -214,7 +268,7 @@ function renderTree() {
 }
 async function selectEstate(e, wrapNode) {
   document.querySelectorAll('.estate').forEach(n => n.classList.remove('active'));
-  document.querySelectorAll('.estate-children').forEach(n => n.style.display = 'none');
+  document.querySelectorAll('.estate-children').forEach(n => { n.style.display = 'none'; n.parentElement.querySelector('.caret').textContent = '▸'; });
   if (wrapNode) { wrapNode.classList.add('active'); wrapNode.querySelector('.estate-children').style.display = 'block';
     wrapNode.querySelector('.caret').textContent = '▾'; }
   const r = await fetch('/api/estate' + q({ dir: e.path }));
@@ -230,115 +284,128 @@ async function selectEstate(e, wrapNode) {
   history.replaceState(null, '', '/?dir=' + encodeURIComponent(e.path));
 }
 /* ---------------- tabs ---------------- */
-document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+document.querySelectorAll('.tab').forEach(tb => tb.onclick = () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-  t.classList.add('active');
-  $('#p-' + t.dataset.tab).classList.add('active');
-  if (t.dataset.tab === 'raw') renderRaw();
-  if (t.dataset.tab === 'env') renderEnv();
+  tb.classList.add('active');
+  $('#p-' + tb.dataset.tab).classList.add('active');
+  if (tb.dataset.tab === 'raw') renderRaw();
+  if (tb.dataset.tab === 'env') renderEnv();
 });
 /* ---------------- LXS config ---------------- */
 function renderGeneral() {
   const sec = $('#p-lxs'); sec.innerHTML = '';
   const g = document.createElement('div'); g.className = 'general';
-  const h = document.createElement('h3'); h.textContent = 'Umum'; g.appendChild(h);
+  const h = document.createElement('h3'); h.textContent = t('general'); g.appendChild(h);
   const grow = document.createElement('div'); grow.className = 'grow';
   const mk = (label, key, val) => {
     const d = document.createElement('div');
     d.innerHTML = `<label>${label}</label><input id="gen-${key}" value="${esc(val||'')}">`;
     grow.appendChild(d);
   };
-  mk('Project name', 'project', CURRENT.project);
-  mk('Main estate', 'main', CURRENT.main);
-  mk('Hostname', 'hostname', CURRENT.hostname);
+  mk(t('projectName'), 'project', CURRENT.project);
+  mk(t('mainEstate'), 'main', CURRENT.main);
+  mk(t('hostname'), 'hostname', CURRENT.hostname);
   g.appendChild(grow);
-  const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = 'Simpan Umum'; btn.type = 'button';
+  const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = t('saveGeneral'); btn.type = 'button';
   const st = document.createElement('span'); st.className = 'status';
   btn.onclick = async () => {
-    btn.disabled = true; st.className = 'status'; st.textContent = 'Menyimpan…';
+    btn.disabled = true; st.className = 'status'; st.textContent = t('saving');
     const r = await fetch('/api/general' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ project: $('#gen-project').value.trim(), main: $('#gen-main').value.trim(), hostname: $('#gen-hostname').value.trim() }) });
-    const t = await r.text();
-    if (r.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan.'; loadEstates(); }
-    else { st.className = 'status err'; st.textContent = t; }
+    const res = await r.text();
+    if (r.ok) { st.className = 'status ok'; st.textContent = t('saved'); loadEstates(); }
+    else { st.className = 'status err'; st.textContent = res; }
     btn.disabled = false;
   };
   g.append(btn, st); sec.appendChild(g);
 }
 function renderLXS() {
   const sec = $('#p-lxs');
-  for (const svc of CURRENT.services) {
-    const el = document.createElement('details'); el.className = 'service'; el.id = 'svc-' + cssId(svc.name);
-    const sum = document.createElement('summary');
-    sum.innerHTML = `<span class="caret">▸</span> <code>${esc(svc.name)}</code> <span class="lxs">${esc(svc.lxs)}</span>`;
-    el.appendChild(sum);
-    if (!svc.fields.length) {
-      const hint = document.createElement('div'); hint.className = 'empty';
-      hint.textContent = svc.lxs ? 'LXS ini belum menyatakan schema konfigurasi (contract v2 fields).' : 'Service sumber (path:) — konfigurasi lewat ecompose.yml.';
-      el.appendChild(hint);
-    } else {
-      const groups = {};
-      for (const f of svc.fields) (groups[f.group || 'umum'] = groups[f.group || 'umum'] || []).push(f);
-      for (const [gname, fields] of Object.entries(groups)) {
-        const g = document.createElement('div'); g.className = 'group';
-        const gh = document.createElement('h4'); gh.textContent = gname; g.appendChild(gh);
-        for (const f of fields) {
-          const val = svc.config[f.key] != null ? svc.config[f.key] : (f.default || '');
-          const row = document.createElement('div'); row.className = 'field'; row.dataset.key = f.key;
-          row.dataset.service = svc.name; row.dataset.grp = gname;
-          const meta = document.createElement('div'); meta.className = 'meta';
-          let tags = f.required ? ' <span class="req">*</span>' : '';
-          if (f.managed) tags += ' <span class="mgr">(eco)</span>';
-          if (f.secret) tags += ' <span class="sec">(secret)</span>';
-          meta.innerHTML = `<label>${esc(f.key)}${tags}</label>` + (f.description ? `<small>${esc(f.description)}</small>` : '');
-          row.appendChild(meta);
-          const ctl = document.createElement('div'); ctl.innerHTML = inputFor(f, val); row.appendChild(ctl);
-          g.appendChild(row);
-        }
-        el.appendChild(g);
+  const core = CURRENT.services.filter(s => s.kind === 'core');
+  const lxs = CURRENT.services.filter(s => s.kind !== 'core');
+  const renderGroup = (title, badgeCls, badgeLabel) => {
+    const hd = document.createElement('div'); hd.className = 'sect'; hd.textContent = title; sec.appendChild(hd);
+  };
+  renderGroup(t('coreDomain'));
+  for (const svc of core) sec.appendChild(serviceBlock(svc, 'core', t('badgeCore')));
+  renderGroup(t('reusableLxs'));
+  for (const svc of lxs) sec.appendChild(serviceBlock(svc, 'lxs', t('badgeLxs')));
+}
+function serviceBlock(svc, kind, badgeLabel) {
+  const el = document.createElement('details'); el.className = 'service'; el.id = 'svc-' + cssId(svc.name);
+  const sum = document.createElement('summary');
+  const icon = kind === 'lxs'
+    ? `<img class="svcicon" src="/favicon-32.png" alt="">`
+    : `<span class="svcicon core">◈</span>`;
+  const pub = svc.publisher ? ` <span class="pub">· ${esc(svc.publisher)}</span>` : '';
+  sum.innerHTML = `<span class="caret">▸</span>${icon}<code>${esc(svc.name)}</code> <span class="badge ${kind}">${esc(badgeLabel)}</span> <span class="lxs">${esc(svc.lxs || '')}</span>${pub}`;
+  el.appendChild(sum);
+  if (!svc.fields.length) {
+    const hint = document.createElement('div'); hint.className = 'empty';
+    hint.textContent = svc.lxs ? t('lxsNoSchema') : t('sourceService');
+    el.appendChild(hint);
+  } else {
+    const groups = {};
+    for (const f of svc.fields) (groups[f.group || 'umum'] = groups[f.group || 'umum'] || []).push(f);
+    for (const [gname, fields] of Object.entries(groups)) {
+      const g = document.createElement('div'); g.className = 'group';
+      const gh = document.createElement('h4'); gh.textContent = gname; g.appendChild(gh);
+      for (const f of fields) {
+        const val = svc.config[f.key] != null ? svc.config[f.key] : (f.default || '');
+        const row = document.createElement('div'); row.className = 'field'; row.dataset.key = f.key;
+        row.dataset.service = svc.name; row.dataset.grp = gname;
+        const meta = document.createElement('div'); meta.className = 'meta';
+        let tags = f.required ? ' <span class="req">*</span>' : '';
+        if (f.managed) tags += ' <span class="mgr">(eco)</span>';
+        if (f.secret) tags += ' <span class="sec">(secret)</span>';
+        meta.innerHTML = `<label>${esc(f.key)}${tags}</label>` + (f.description ? `<small>${esc(f.description)}</small>` : '');
+        row.appendChild(meta);
+        const ctl = document.createElement('div'); ctl.innerHTML = inputFor(f, val); row.appendChild(ctl);
+        g.appendChild(row);
       }
-      const act = document.createElement('div'); act.className = 'actions';
-      const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = 'Simpan ' + svc.name; btn.type = 'button';
-      const st = document.createElement('span'); st.className = 'status';
-      btn.onclick = async () => {
-        btn.disabled = true; st.className = 'status'; st.textContent = 'Menyimpan…';
-        const config = {}; const secrets = {};
-        for (const f of svc.fields) {
-          if (f.managed) continue;
-          const input = el.querySelector(`[name="${cssId(f.key)}"]`);
-          if (!input) continue;
-          const v = input.value;
-          if (f.secret) { if (v) secrets[f.key] = v; }
-          else { config[f.key] = v; }
-        }
-        const r = await fetch('/api/apply' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ service: svc.name, config, secrets }) });
-        const t = await r.text();
-        if (r.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan. Jalankan eco up untuk menerapkan.'; loadEstates(); }
-        else { st.className = 'status err'; st.textContent = t; }
-        btn.disabled = false;
-      };
-      act.append(btn, st); el.appendChild(act);
+      el.appendChild(g);
     }
-    sec.appendChild(el);
+    const act = document.createElement('div'); act.className = 'actions';
+    const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = t('saveService') + ' ' + svc.name; btn.type = 'button';
+    const st = document.createElement('span'); st.className = 'status';
+    btn.onclick = async () => {
+      btn.disabled = true; st.className = 'status'; st.textContent = t('saving');
+      const config = {}; const secrets = {};
+      for (const f of svc.fields) {
+        if (f.managed) continue;
+        const input = el.querySelector(`[name="${cssId(f.key)}"]`);
+        if (!input) continue;
+        const v = input.value;
+        if (f.secret) { if (v) secrets[f.key] = v; }
+        else { config[f.key] = v; }
+      }
+      const r = await fetch('/api/apply' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ service: svc.name, config, secrets }) });
+      const res = await r.text();
+      if (r.ok) { st.className = 'status ok'; st.textContent = t('runUp'); loadEstates(); }
+      else { st.className = 'status err'; st.textContent = res; }
+      btn.disabled = false;
+    };
+    act.append(btn, st); el.appendChild(act);
   }
+  return el;
 }
 function inputFor(f, val) {
   if (f.managed) return `<input type="text" value="" disabled placeholder="managed by eco — ${esc(f.managed)}">`;
   if (f.type === 'bool') {
     const on = val === 'true' || val === '1';
-    return `<div class="bool"><label><input type="radio" name="${cssId(f.key)}" value="true" ${on?'checked':''}> Ya</label>
-      <label><input type="radio" name="${cssId(f.key)}" value="false" ${!on?'checked':''}> Tidak</label></div>`;
+    return `<div class="bool"><label><input type="radio" name="${cssId(f.key)}" value="true" ${on?'checked':''}> Yes</label>
+      <label><input type="radio" name="${cssId(f.key)}" value="false" ${!on?'checked':''}> No</label></div>`;
   }
   if (f.type === 'enum') {
     const opts = f.choices.map(c => `<option value="${esc(c)}" ${c===val?'selected':''}>${esc(c)}</option>`).join('');
     return `<select name="${cssId(f.key)}">${opts}</select>`;
   }
   if (f.type === 'int' || f.type === 'float') return `<input type="number" step="${f.type==='float'?'any':'1'}" name="${cssId(f.key)}" value="${esc(val)}">`;
-  if (f.type === 'csv' || f.type === 'csv-url') return `<input type="text" name="${cssId(f.key)}" value="${esc(val)}" placeholder="koma-pisah: a,b,c">`;
+  if (f.type === 'csv' || f.type === 'csv-url') return `<input type="text" name="${cssId(f.key)}" value="${esc(val)}" placeholder="comma-separated: a,b,c">`;
   if (f.type === 'json') return `<textarea name="${cssId(f.key)}" rows="3">${esc(val)}</textarea>`;
-  return `<input type="${f.secret?'password':'text'}" name="${cssId(f.key)}" value="${f.secret?'':esc(val)}" placeholder="${f.secret?'tidak ditampilkan — kosongkan biarkan':''}">`;
+  return `<input type="${f.secret?'password':'text'}" name="${cssId(f.key)}" value="${f.secret?'':esc(val)}" placeholder="${f.secret?'hidden — leave blank to keep':''}">`;
 }
 function cssId(s) { return 'i_' + s.replace(/[^a-zA-Z0-9]/g, '_'); }
 function jumpToService(name) { const el = document.getElementById('svc-' + cssId(name)); if (el) { el.open = true; el.scrollIntoView({behavior:'smooth', block:'start'}); } }
@@ -350,18 +417,18 @@ async function renderRaw() {
   RAW = await r.text();
   sec.innerHTML = '';
   const info = document.createElement('div'); info.className = 'envinfo';
-  info.textContent = 'Edit seluruh ecompose.yml (nama project, hostname, access routes, dsb.). Validasi saat simpan.';
+  info.textContent = t('rawInfo');
   sec.appendChild(info);
   const ta = document.createElement('textarea'); ta.id = 'raw'; ta.value = RAW; sec.appendChild(ta);
   const bar = document.createElement('div'); bar.style.cssText = 'display:flex;gap:.7rem;align-items:center;margin-top:.7rem;';
-  const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = 'Simpan ecompose.yml'; btn.type = 'button';
+  const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = t('saveEcompose'); btn.type = 'button';
   const st = document.createElement('span'); st.className = 'status';
   btn.onclick = async () => {
-    btn.disabled = true; st.className = 'status'; st.textContent = 'Menyimpan…';
+    btn.disabled = true; st.className = 'status'; st.textContent = t('saving');
     const r2 = await fetch('/api/ecompose-save' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ content: ta.value }) });
-    const t = await r2.text();
-    if (r2.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan.'; loadEstates(); }
-    else { st.className = 'status err'; st.textContent = t; }
+    const res = await r2.text();
+    if (r2.ok) { st.className = 'status ok'; st.textContent = t('saved'); loadEstates(); }
+    else { st.className = 'status err'; st.textContent = res; }
     btn.disabled = false;
   };
   bar.append(btn, st); sec.appendChild(bar);
@@ -369,8 +436,7 @@ async function renderRaw() {
 /* ---------------- prod env ---------------- */
 async function renderEnv() {
   const sec = $('#p-env'); sec.innerHTML = '';
-  const warn = document.createElement('div'); warn.className = 'warn';
-  warn.innerHTML = 'Agent host <b>tidak mengekspos secret</b> — endpoint prod-env hanya mengembalikan key <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> (desain keamanan platform, lebih ketat daripada Heroku yang masih bisa reveal). Secret prod tidak pernah meninggalkan host.';
+  const warn = document.createElement('div'); warn.className = 'warn'; warn.innerHTML = t('envWarn');
   sec.appendChild(warn);
   const bar = document.createElement('div'); bar.className = 'envbar';
   const sel = document.createElement('select');
@@ -379,15 +445,15 @@ async function renderEnv() {
   const info = document.createElement('span'); info.className = 'envinfo'; bar.appendChild(info);
   sec.appendChild(bar);
   const table = document.createElement('table'); table.className = 'env';
-  table.innerHTML = '<thead><tr><th style="width:36%">Key</th><th>Nilai (prod, public-only)</th></tr></thead><tbody></tbody>';
+  table.innerHTML = '<thead><tr><th style="width:36%">Key</th><th>Value (prod, public-only)</th></tr></thead><tbody></tbody>';
   sec.appendChild(table);
   const tbody = table.querySelector('tbody');
   async function load() {
-    tbody.innerHTML = '<tr><td colspan="2">Memuat…</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="2">${t('envLoading')}</td></tr>`;
     info.textContent = '';
     const r = await fetch('/api/prod-env' + q({ dir: CURRENT.path, service: sel.value }));
     const d = await r.json();
-    if (!d.available) { tbody.innerHTML = `<tr><td colspan="2">${esc(d.error || 'prod env tidak tersedia')}</td></tr>`; return; }
+    if (!d.available) { tbody.innerHTML = `<tr><td colspan="2">${esc(d.error || t('envNotAvail'))}</td></tr>`; return; }
     info.textContent = d.source;
     tbody.innerHTML = '';
     for (const item of d.env) {
@@ -395,7 +461,7 @@ async function renderEnv() {
       tr.innerHTML = `<td><code>${esc(item.key)}</code></td><td><code>${esc(item.value)}</code></td>`;
       tbody.appendChild(tr);
     }
-    if (!d.env.length) tbody.innerHTML = '<tr><td colspan="2">Tidak ada key public (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) di service ini.</td></tr>';
+    if (!d.env.length) tbody.innerHTML = `<tr><td colspan="2">${t('envEmpty')}</td></tr>`;
   }
   sel.onchange = load;
   await load();
@@ -405,16 +471,17 @@ let lastQuery = '';
 $('#search').addEventListener('input', (e) => {
   const q0 = e.target.value.trim().toLowerCase(); lastQuery = q0;
   if (!CURRENT) return;
-  if (!q0) { document.querySelectorAll('#p-lxs .field').forEach(f => f.classList.remove('hl')); return; }
   document.querySelectorAll('#p-lxs .field').forEach(f => {
-    const hit = (f.dataset.key + ' ' + f.dataset.grp + ' ' + f.dataset.service).toLowerCase().includes(q0);
+    const hit = !q0 || (f.dataset.key + ' ' + f.dataset.grp + ' ' + f.dataset.service).toLowerCase().includes(q0);
     f.classList.toggle('hl', hit);
-    if (hit) f.scrollIntoView({ behavior:'smooth', block:'center' });
   });
-  const first = document.querySelector('#p-lxs .field.hl');
-  if (first && !document.querySelector('#p-lxs .field.hl').offsetParent) first.scrollIntoView({ behavior:'smooth', block:'center' });
+  if (q0) {
+    const first = document.querySelector('#p-lxs .field.hl');
+    if (first) first.scrollIntoView({ behavior:'smooth', block:'center' });
+  }
 });
 /* ---------------- boot ---------------- */
+setLang(LANG);
 loadEstates();
 </script>
 </body>
@@ -637,6 +704,8 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
         let mut entry = serde_json::Map::new();
         entry.insert("name".into(), serde_json::Value::String(svc.name.clone()));
         entry.insert("lxs".into(), serde_json::Value::String(svc.lxs.clone()));
+        // core domain (source path:) vs reusable LXS (registry binary).
+        entry.insert("kind".into(), serde_json::Value::String(if svc.lxs.is_empty() { "core".to_string() } else { "lxs".to_string() }));
         let mut config_map = serde_json::Map::new();
         for (k, v) in &svc.config {
             config_map.insert(k.clone(), serde_json::Value::String(v.clone()));
@@ -644,6 +713,7 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
         entry.insert("config".into(), serde_json::Value::Object(config_map));
         if svc.lxs.is_empty() {
             entry.insert("fields".into(), serde_json::Value::Array(vec![]));
+            entry.insert("publisher".into(), serde_json::Value::String(String::new()));
             svc_values.push(serde_json::Value::Object(entry));
             continue;
         }
@@ -651,16 +721,19 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
             Ok(Some(m)) => m,
             Ok(None) => {
                 entry.insert("fields".into(), serde_json::Value::Array(vec![]));
+                entry.insert("publisher".into(), serde_json::Value::String(String::new()));
                 svc_values.push(serde_json::Value::Object(entry));
                 continue;
             }
             Err(e) => {
                 eprintln!("[eco config] cannot load schema for {}: {e}", svc.name);
                 entry.insert("fields".into(), serde_json::Value::Array(vec![]));
+                entry.insert("publisher".into(), serde_json::Value::String(String::new()));
                 svc_values.push(serde_json::Value::Object(entry));
                 continue;
             }
         };
+        entry.insert("publisher".into(), serde_json::Value::String(manifest.publisher.clone()));
         let fields = fields_for(&manifest);
         let mut arr = Vec::new();
         for (key, f) in fields {
