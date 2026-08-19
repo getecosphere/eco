@@ -426,7 +426,7 @@ fn default_estates_root() -> PathBuf {
 }
 
 /// Discover estates: subdirectories of the estates root that carry ecompose.yml.
-fn discover_estates(root: &Path) -> Vec<(String, String, PathBuf)> {
+fn discover_estates(root: &Path) -> Vec<(String, String, Vec<String>)> {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
