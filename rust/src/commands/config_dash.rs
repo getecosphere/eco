@@ -575,6 +575,26 @@ fn favicon_content_type(path: &Path) -> &'static str {
     }
 }
 
+/// An SVG favicon that references an external image (`<image href="...">` with
+/// a path, not a `data:` URI) renders blank when served standalone — treat it
+/// as broken so the default icon is used instead (see eco_docs/favicon.svg).
+fn svg_renderable(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    if !text.contains("<image") {
+        return true;
+    }
+    text.contains("data:image")
+}
+
+/// Read a favicon candidate's bytes, skipping broken SVGs.
+fn read_favicon(path: &Path) -> Option<(Vec<u8>, &'static str)> {
+    let bytes = std::fs::read(path).ok()?;
+    if path.extension().and_then(|e| e.to_str()) == Some("svg") && !svg_renderable(&bytes) {
+        return None;
+    }
+    Some((bytes, favicon_content_type(path)))
+}
+
 /// Resolve an estate's favicon. Checks known frontend layouts in preference
 /// order (png > ico > svg — svg files sometimes reference a missing master
 /// png and render empty), then falls back to a bounded walk for favicon.* .
@@ -605,10 +625,8 @@ fn estate_favicon(dir: &Path) -> Option<(Vec<u8>, &'static str)> {
         candidates.push(dir.join(p));
     }
     for c in &candidates {
-        if c.is_file() {
-            if let Ok(bytes) = std::fs::read(c) {
-                return Some((bytes, favicon_content_type(c)));
-            }
+        if let Some(fav) = read_favicon(c) {
+            return Some(fav);
         }
     }
     // Bounded walk fallback: any favicon.* under the estate (depth ≤ 6),
@@ -642,8 +660,8 @@ fn estate_favicon(dir: &Path) -> Option<(Vec<u8>, &'static str)> {
     }
     found.sort_by_key(|(prio, _)| *prio);
     for (_, p) in found {
-        if let Ok(bytes) = std::fs::read(&p) {
-            return Some((bytes, favicon_content_type(&p)));
+        if let Some(fav) = read_favicon(&p) {
+            return Some(fav);
         }
     }
     None
