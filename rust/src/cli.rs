@@ -42,6 +42,7 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
         "setgithubstatus" => commands::github_status::run_setgithubstatus(rest),
         "serve" => commands::serve::run_serve(rest),
         "config" => commands::config_dash::run_config(rest),
+        "log" => commands::log::run_log(rest),
         // internal: registry CLI mirror used by bundled bash scripts
         "registry" => commands::registry_cmd::run_registry_cli(rest),
         // internal: materialize the embedded configure.sh to a target path

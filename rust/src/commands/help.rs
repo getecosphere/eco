@@ -27,6 +27,8 @@ Usage:
   eco dev flushdns
   eco git [args...]
   eco stress [--vus <n>] [--duration <s>] [--ramp-up <s>] [--hostname <url>] [--dry-run]
+  eco log dev [--demo]   Start the local Grafana + Loki log stack (localhost:3000)
+  eco log stop|status    Stop / inspect the local log stack
 
 Current command groups:
   init        Make the current (or given) directory an eco project: auto-detects
