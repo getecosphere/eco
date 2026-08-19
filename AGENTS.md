@@ -244,6 +244,16 @@ Registry repo layout:
   don't need to know or touch it.)
 - Keep LXS **single-domain**: one bounded capability per binary; never let one
   LXS own another domain's responsibilities.
+- **Log NDJSON to stdout** — every LXS logs newline-delimited JSON to stdout,
+  never free-form text. Contract:
+  `{"ts":"<ISO8601>","level":"info","msg":"...","service":"<name>","request_id":"...","status":200,"latency_ms":12}`.
+  Required keys: `ts`, `level` (`trace|debug|info|warn|error`), `msg`. Optional:
+  `service`, `request_id`, `status`, `latency_ms`, `user_id`, `error`. One JSON
+  object per line; no multi-line values; stdout only (stderr = crash diagnostics).
+  This feeds the estate log pipeline (VictoriaLogs): compliant logs get
+  structured labels in Grafana; non-compliant logs still appear as raw text.
+  Changing the log output format is a breaking change → bump `--major` +
+  changelog entry. New LXS must comply from day one.
 - Prefer **musl static binaries** (`x86_64-unknown-linux-musl`); a glibc build
   is not self-contained for the server.
 - When you change a capability, bump the LXS version (`--minor` features,
