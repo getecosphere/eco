@@ -168,7 +168,7 @@ fn start_loop(name: &str, cmd: &[String], stdout: Option<&Path>) -> Result<(), S
 fn loop_command(cmd: &[String], fifo: Option<String>) -> String {
     let joined = cmd.join(" ");
     match fifo {
-        Some(f) => format!("while true; do {joined} 1>{f} 2>>{} ; sleep 2; done", log_dir().join("generator.log").display()),
+        Some(f) => format!("while true; do {joined} 1>>{f} 2>>{} ; sleep 2; done", log_dir().join("generator.log").display()),
         None => format!("while true; do {joined} ; sleep 2; done"),
     }
 }
@@ -248,14 +248,16 @@ pub fn ensure_dev_log_stack() -> Result<(), String> {
     start_loop("server", &server_cmd, None)?;
 
     let fifo = fifo_path();
+    // Regular append file (not a FIFO): robust with PM2 `out_file` writers and
+    // the agent's `tail -f` reader. Create it if missing (do not truncate live data).
     if !fifo.exists() {
-        let _ = Command::new("mkfifo").arg(&fifo).status();
+        let _ = std::fs::write(&fifo, "");
     }
     let agent_cmd = vec![
         "env".to_string(),
         "MODE=agent".to_string(),
         format!("STREAM={}", util::env_var_or("ECO_LOG_STREAM", "assessment")),
-        format!("LOG_SOURCE=fifo:{}", fifo.display()),
+        format!("LOG_SOURCE=tail:{}", fifo.display()),
         format!("LOKI_URL=http://127.0.0.1:{LOKI_PORT}"),
         bin,
         "agent".to_string(),
