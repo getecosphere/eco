@@ -28,12 +28,17 @@ use tiny_http::{Header, Response, Server};
 use crate::{ecompose, util};
 use crate::commands::lxs::{self, LxsField, LxsManifest};
 
+/// Ecosphere favicon (same as the getecosphere.com estate frontend), embedded
+/// so the dashboard is self-contained. Served at /favicon.svg.
+const FAVICON_SVG: &str = include_str!("../../../assets/favicon.svg");
+
 const HTML: &str = r#"<!doctype html>
 <html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>eco config</title>
+<title>Ecosphere Genie</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   * { box-sizing:border-box; }
   :root { --bg:#f7f6f2; --card:#fff; --line:#ded9e1; --line2:#f0edf2; --text:#17141d; --muted:#665f6e;
@@ -124,7 +129,7 @@ const HTML: &str = r#"<!doctype html>
 </head>
 <body>
 <aside>
-  <div class="brand"><h1>eco config</h1><small>konfigurasi estate (dev)</small></div>
+  <div class="brand"><h1>Ecosphere Genie</h1><small>konfigurasi estate (dev)</small></div>
   <div id="searchwrap"><input id="search" type="search" placeholder="Cari key / service / estate…"></div>
   <div id="tree"><p class="hint">Memuat estate…</p></div>
   <div class="hint">Simpan → berlaku setelah <code>eco up</code>. Prod env read-only & tersembunyi default.</div>
@@ -880,6 +885,7 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 HTML.replace("{{ESTATE}}", ""),
                 "text/html; charset=utf-8",
             ),
+            ("GET", "/favicon.svg") => (200, FAVICON_SVG.to_string(), "image/svg+xml"),
             ("GET", "/api/estates") => {
                 let list: Vec<serde_json::Value> = estates
                     .iter()
