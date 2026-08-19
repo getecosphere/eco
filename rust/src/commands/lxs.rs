@@ -74,6 +74,41 @@ pub struct LxsField {
     pub example: String,
 }
 
+/// Publish-time lint for the contract v2 env schema. Runs only when `fields`
+/// is present (v2 contracts). See eco-server/docs/lxs-config-schema-v2.md.
+pub fn validate_env_fields(env: &LxsEnv) -> Result<(), String> {
+    if env.fields.is_empty() {
+        return Ok(());
+    }
+    const KNOWN_TYPES: &[&str] = &[
+        "string", "bool", "int", "float", "enum", "csv", "csv-url", "url", "uri", "email",
+        "secret", "json",
+    ];
+    for (key, field) in &env.fields {
+        let where_ = format!("lxs.yml contract.env.fields.{key}");
+        if field.description.trim().is_empty() {
+            return Err(format!("{where_}: missing description (required by the v2 schema lint)"));
+        }
+        let ty = field.r#type.as_str();
+        if !KNOWN_TYPES.contains(&ty) {
+            return Err(format!(
+                "{where_}: unknown type '{ty}' (known: {})",
+                KNOWN_TYPES.join(", ")
+            ));
+        }
+        if ty == "enum" && field.choices.is_empty() {
+            return Err(format!("{where_}: type enum requires non-empty choices"));
+        }
+        if ty != "enum" && !field.choices.is_empty() {
+            return Err(format!("{where_}: type '{ty}' must not declare choices"));
+        }
+        if field.min != 0.0 && field.max != 0.0 && field.min > field.max {
+            return Err(format!("{where_}: min ({}) > max ({})", field.min, field.max));
+        }
+    }
+    Ok(())
+}
+
 /// Build the `.env.example` text (env contract) for an LXS from its manifest
 /// contract plus the estate's per-service `config:` values.
 ///
@@ -660,6 +695,7 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     };
 
     let mut manifest = load_manifest(&source.join("lxs.yml"))?;
+    validate_env_fields(&manifest.contract.env).map_err(|e| format!("publish lint: {e}"))?;
     if !manifest.name.is_empty() && manifest.name != name {
         return Err(format!("lxs.yml name ({}) does not match reference ({name})", manifest.name));
     }
@@ -2384,6 +2420,29 @@ mod tests {
         config.insert("MONGODB_URI".to_string(), "mongodb://localhost/x".to_string());
         let err = build_lxs_env_example(&env, "auth-backend", &config).unwrap_err();
         assert!(err.contains("managed by eco (mongo-db)"));
+    }
+
+    #[test]
+    fn v2_publish_lint_rejects_missing_description_and_bad_enum() {
+        let mut fields = HashMap::new();
+        fields.insert("SERVER_PORT".to_string(), field("int", "", false, ""));
+        let no_desc = LxsEnv { fields, ..Default::default() };
+        let err = validate_env_fields(&no_desc).unwrap_err();
+        assert!(err.contains("missing description"));
+
+        let mut fields2 = HashMap::new();
+        let mut enum_field = field("enum", "", false, "");
+        enum_field.description = "login mode".to_string();
+        fields2.insert("LOGIN_MODE".to_string(), enum_field);
+        let bad_enum = LxsEnv { fields: fields2, ..Default::default() };
+        let err = validate_env_fields(&bad_enum).unwrap_err();
+        assert!(err.contains("enum requires non-empty choices"));
+
+        let mut ok_env = auth_env();
+        for v in ok_env.fields.values_mut() {
+            v.description = "d".to_string();
+        }
+        assert!(validate_env_fields(&ok_env).is_ok());
     }
 
     #[test]
