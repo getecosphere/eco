@@ -2086,6 +2086,21 @@ fn trim_dev_artifact(_dir: &Path, root: &Path) {
     }
 }
 
+// True for Next.js frontends (next.config present or package.json declares
+// "next"), so eco can force the standalone SSR build output.
+fn is_nextjs_frontend(dir: &Path) -> bool {
+    if ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    {
+        return true;
+    }
+    std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .map(|s| s.contains("\"next\""))
+        .unwrap_or(false)
+}
+
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
     // SvelteKit adapter-node that will be bun-compiled ships only the compiled
@@ -2110,6 +2125,21 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             included.push(sub.to_string());
         }
     }
+    // Next.js SSR (`output: standalone` — forced via NEXT_PRIVATE_STANDALONE in
+    // the build env). The standalone server is self-contained (bundled
+    // node_modules, no npm install on the CT) and runs under the CT's node as
+    // `node server.js`. We flatten it to the artifact root and ship the static
+    // assets + public/ next to it, mirroring the Next.js standalone layout.
+    let nextjs_standalone = {
+        let marker = format!("{build_dir}/.next/standalone/server.js");
+        if builder_is_host() {
+            Path::new(&marker).is_file()
+        } else {
+            builder_exec(&format!("test -f {} && echo yes || echo no", shell_single_quote(&marker)))
+                .map(|c| c.stdout.trim() == "yes")
+                .unwrap_or(false)
+        }
+    };
     if included.is_empty() {
         // Plain Node service (no framework build): Bun-compile the entry into
         // a single linux-x64 binary so the CT still gets an executable-only
@@ -2147,6 +2177,17 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         return Err(format!("builder produced no dist/build/.next/output under {build_dir}"));
     }
     if builder_is_host() {
+        if nextjs_standalone {
+            copy_tree_excluding(&Path::new(build_dir).join(".next").join("standalone"), artifact_dir, &(skip_none as fn(&str) -> bool))?;
+            copy_tree_excluding(&Path::new(build_dir).join(".next").join("static"), &artifact_dir.join(".next").join("static"), &(skip_none as fn(&str) -> bool))?;
+            let public_src = Path::new(build_dir).join("public");
+            if public_src.is_dir() {
+                copy_tree_excluding(&public_src, &artifact_dir.join("public"), &(skip_none as fn(&str) -> bool))?;
+            }
+            std::fs::write(artifact_dir.join(".eco-node-ssr"), service_name).map_err(|e| e.to_string())?;
+            print_step("Next.js standalone SSR artifact prepared -> ship (agent runs `node server.js`)");
+            return Ok(());
+        }
         for sub in &included {
             // SvelteKit bun builds ship the compiled binary + a static
             // `client/` dir; the raw build/ tree (with its own client copy)
@@ -2193,6 +2234,24 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             }
         }
     } else {
+        if nextjs_standalone {
+            // Assemble the standalone artifact inside the builder VM, then pull
+            // it to the local artifact dir.
+            let stage = format!("{build_dir}/.eco-nextjs-stage");
+            let remote_tar = format!("/tmp/eco-nextjs-{}.tar.gz", std::process::id());
+            builder_exec_ok(&format!(
+                "set -euo pipefail; rm -rf {stage}; mkdir -p {stage} {stage}/.next; cp -r {build_dir}/.next/standalone/. {stage}/; cp -r {build_dir}/.next/static {stage}/.next/static; if [ -d {build_dir}/public ]; then cp -r {build_dir}/public {stage}/public; fi; tar czf {remote_tar} -C {stage} .",
+                stage = shell_single_quote(&stage),
+                build_dir = shell_single_quote(build_dir),
+                remote_tar = remote_tar,
+            ))?;
+            builder_transfer_pull(&remote_tar, Path::new("/tmp/eco-nextjs-artifact.tar.gz"))?;
+            run_command("tar", &["xzf".to_string(), "/tmp/eco-nextjs-artifact.tar.gz".to_string(), "-C".to_string(), artifact_dir.display().to_string()], &util::current_dir())?;
+            builder_exec(&format!("rm -f {remote_tar}; rm -rf {stage}"))?;
+            std::fs::write(artifact_dir.join(".eco-node-ssr"), service_name).map_err(|e| e.to_string())?;
+            print_step("Next.js standalone SSR artifact prepared -> ship (agent runs `node server.js`)");
+            return Ok(());
+        }
         let remote_tar = format!("/tmp/eco-builder-artifact-{}.tar.gz", std::process::id());
         builder_exec_ok(&format!(
             "cd {} && tar czf {} {}",
@@ -2456,7 +2515,11 @@ fn compute_frontend_input_hash(service_dir: &Path, build_env: &[(String, String)
 fn compute_frontend_env_hash(build_env: &[(String, String)]) -> String {
     let mut combined = String::new();
     for (key, value) in build_env {
-        if key.starts_with("NEXT_PUBLIC_") || key.starts_with("VITE_") || key.starts_with("PUBLIC_") {
+        // NEXT_PUBLIC_*/VITE_*/PUBLIC_* are inlined by the compiler and must
+        // invalidate the cache. NEXT_PRIVATE_STANDALONE is an eco-forced build
+        // mode flag (Next.js SSR → standalone artifact) that must invalidate
+        // too, or the hash-skip would reuse a non-standalone build.
+        if key.starts_with("NEXT_PUBLIC_") || key.starts_with("VITE_") || key.starts_with("PUBLIC_") || key == "NEXT_PRIVATE_STANDALONE" {
             combined.push_str(&format!("{key}={value}\n"));
         }
     }
@@ -3036,12 +3099,23 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             ));
         }
         let hash = compute_frontend_input_hash(dir, &build_env)?;
-        let env_hash = compute_frontend_env_hash(&build_env);
         frontend_hash_lines.push(format!("{rel} {hash}"));
         let build_dir = format!("{}/{}", builder_build_root(), service.name);
         let build_loc = if builder_is_host() { "on this machine (host builder)".to_string() } else { format!("on local builder ({})", builder_name()) };
         let is_leptos = dir.join("index.html").is_file() && !dir.join("package.json").is_file();
         let is_static = service.runtimes.iter().any(|r| r == "static") || (dir.join("index.html").is_file() && !dir.join("package.json").is_file() && !is_leptos);
+        // Next.js SSR frontends must ship a self-contained standalone server
+        // (the agent refuses SSR artifacts that need npm install on the CT).
+        // Force `output: standalone` via env: it flows into the build exports
+        // AND the env-hash, so a switch to standalone invalidates the
+        // hash-skip and forces a rebuild. copy_frontend_artifact_from_builder
+        // assembles the flattened standalone layout from `.next/standalone/`.
+        if !is_leptos && !is_static && is_nextjs_frontend(dir)
+            && !build_env.iter().any(|(k, _)| k == "NEXT_PRIVATE_STANDALONE")
+        {
+            build_env.push(("NEXT_PRIVATE_STANDALONE".to_string(), "true".to_string()));
+        }
+        let env_hash = compute_frontend_env_hash(&build_env);
         print_step(&format!(
             "Building {} {}: {}",
             service.name,
@@ -3088,12 +3162,12 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         let env_wipe = "echo \"rebuilding frontend: clearing stale compiler output\"; rm -rf .next .vite .cache";
         let script = if is_leptos {
             format!(
-                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\n{env_wipe}\nif ! command -v trunk >/dev/null 2>&1; then cargo install trunk --locked; fi && rustup target add wasm32-unknown-unknown 2>/dev/null || true; trunk build --release && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
+                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ] && [ -f .eco-frontend-envhash ] && [ \"$(cat .eco-frontend-envhash)\" = \"{env_hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\n{env_wipe}\nif ! command -v trunk >/dev/null 2>&1; then cargo install trunk --locked; fi && rustup target add wasm32-unknown-unknown 2>/dev/null || true; trunk build --release && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
                 shell_single_quote(&build_dir)
             )
         } else {
             format!(
-                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\n{env_wipe}\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund --legacy-peer-deps; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
+                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ] && [ -f .eco-frontend-envhash ] && [ \"$(cat .eco-frontend-envhash)\" = \"{env_hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\n{env_wipe}\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund --legacy-peer-deps; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
                 shell_single_quote(&build_dir)
             )
         };
