@@ -3655,6 +3655,12 @@ VITESTART
       exec_mode: "fork",
       env: { ${svc_port_var[$i]}: ${port}$([[ "$type" == "rust" && "${svc_port_var[$i]}" != "PORT" ]] && printf ', PORT: %s' "$port")${runtime_env_extra} },
 EOF
+    # When eco log dev is running, stream this app's stdout into the log FIFO.
+    if [[ -n "${ECO_LOG_FIFO:-}" ]]; then
+      cat >> "$CONFIG_FILE" <<EOF
+      out_file: "${ECO_LOG_FIFO}",
+EOF
+    fi
     # Add interpreter for mvn (bash)
     if [[ -n "$interpreter" ]]; then
       cat >> "$CONFIG_FILE" <<EOF
@@ -3688,6 +3694,13 @@ EOF
       args: "${gateway_args_js}",
       exec_mode: "fork",
       env: { PORT: ${GATEWAY_PORT} },
+EOF
+      if [[ -n "${ECO_LOG_FIFO:-}" ]]; then
+        cat >> "$CONFIG_FILE" <<EOF
+      out_file: "${ECO_LOG_FIFO}",
+EOF
+      fi
+      cat >> "$CONFIG_FILE" <<'EOF'
     },
 EOF
     else

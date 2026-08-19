@@ -28,6 +28,11 @@ fn fifo_path() -> PathBuf {
     PathBuf::from(util::env_var_or("ECO_LOG_FIFO", "/tmp/eco-log.fifo"))
 }
 
+/// The FIFO path `eco up dev` should point PM2 `out_file` at.
+pub fn default_fifo() -> String {
+    fifo_path().display().to_string()
+}
+
 fn pidfile(name: &str) -> PathBuf {
     pid_dir().join(format!("{name}.pid"))
 }
@@ -200,10 +205,39 @@ fn wait_for_grafana() {
 }
 
 fn run_dev(args: &[String]) -> Result<(), String> {
-    let bin = resolve_logging_bin()?;
+    ensure_dev_log_stack()?;
+    if args.iter().any(|a| a == "--demo") {
+        let fifo = fifo_path();
+        let gen = "while true; do printf '{\"ts\":\"%s\",\"level\":\"%s\",\"msg\":\"%s\",\"service\":\"assessment\",\"request_id\":\"req-%d\",\"status\":%s,\"latency_ms\":%d}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$([ $((RANDOM%6)) -eq 0 ] && echo error || echo info)\" \"$([ $((RANDOM%2)) -eq 0 ] && echo 'assessment request ok' || echo 'db query slow')\" \"$RANDOM\" \"$([ $((RANDOM%5)) -eq 0 ] && echo 500 || echo 200)\" \"$((RANDOM%90))\"; sleep 1; done";
+        let gen_cmd = vec!["sh".to_string(), "-c".to_string(), gen.to_string()];
+        start_loop("generator", &gen_cmd, Some(&fifo))?;
+    }
+    println!("[eco log] Grafana: http://127.0.0.1:{GRAFANA_PORT}  (anonymous; Live Logs dashboard)");
+    println!("[eco log] Loki:    http://127.0.0.1:{LOKI_PORT}");
+    println!(
+        "[eco log] FIFO:    {}  — write dev logs here to enter the pipeline",
+        fifo_path().display()
+    );
+    wait_for_grafana();
+    Ok(())
+}
+
+/// Start the Loki + Grafana server and the FIFO agent (no demo generator).
+/// Used by `eco log dev` and automatically by `eco up dev`. Fail-soft: if the
+/// `logging` LXS binary is unavailable, returns Ok(()) so dev still boots.
+pub fn ensure_dev_log_stack() -> Result<(), String> {
+    if util::env_var_or("ECO_LOG", "1") == "0" {
+        return Ok(());
+    }
+    let bin = match resolve_logging_bin() {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!("[eco log] logging LXS not found — skipping local log stack");
+            return Ok(());
+        }
+    };
     ensure_dir(&log_dir())?;
 
-    // 1. server (Loki + Grafana)
     let server_cmd = vec![
         "env".to_string(),
         format!("LOG_DATA_DIR={}", log_dir().display()),
@@ -213,7 +247,6 @@ fn run_dev(args: &[String]) -> Result<(), String> {
     ];
     start_loop("server", &server_cmd, None)?;
 
-    // 2. FIFO + agent
     let fifo = fifo_path();
     if !fifo.exists() {
         let _ = Command::new("mkfifo").arg(&fifo).status();
@@ -228,21 +261,6 @@ fn run_dev(args: &[String]) -> Result<(), String> {
         "agent".to_string(),
     ];
     start_loop("agent", &agent_cmd, None)?;
-
-    // 3. optional demo generator
-    if args.iter().any(|a| a == "--demo") {
-        let gen = "while true; do printf '{\"ts\":\"%s\",\"level\":\"%s\",\"msg\":\"%s\",\"service\":\"assessment\",\"request_id\":\"req-%d\",\"status\":%s,\"latency_ms\":%d}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$([ $((RANDOM%6)) -eq 0 ] && echo error || echo info)\" \"$([ $((RANDOM%2)) -eq 0 ] && echo 'assessment request ok' || echo 'db query slow')\" \"$RANDOM\" \"$([ $((RANDOM%5)) -eq 0 ] && echo 500 || echo 200)\" \"$((RANDOM%90))\"; sleep 1; done";
-        let gen_cmd = vec!["sh".to_string(), "-c".to_string(), gen.to_string()];
-        start_loop("generator", &gen_cmd, Some(&fifo))?;
-    }
-
-    println!("[eco log] Grafana: http://127.0.0.1:{GRAFANA_PORT}  (anonymous; Live Logs dashboard)");
-    println!("[eco log] Loki:    http://127.0.0.1:{LOKI_PORT}");
-    println!(
-        "[eco log] FIFO:    {}  — write dev logs here to enter the pipeline",
-        fifo.display()
-    );
-    wait_for_grafana();
     Ok(())
 }
 

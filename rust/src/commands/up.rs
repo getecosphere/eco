@@ -657,6 +657,10 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     if !skipped_domains.is_empty() {
         configure_env.push(("ECO_DEV_SKIP_DOMAINS".to_string(), skipped_domains.iter().cloned().collect::<Vec<_>>().join(",")));
     }
+    // Stream dev service stdout into the eco log FIFO when logging is on.
+    configure_env.push(("ECO_LOG_FIFO".to_string(), crate::commands::log::default_fifo()));
+    // Start the local Grafana+Loki stack (fail-soft) so the FIFO has a reader.
+    crate::commands::log::ensure_dev_log_stack()?;
     embedded::run_bundled_script("configure.sh", &[], "estate", &configure_env)?;
 
     let refreshed_services = discover_local_services(&estate_root, Some(&dev_services), &deployment.project_dir, &deployment.project);
