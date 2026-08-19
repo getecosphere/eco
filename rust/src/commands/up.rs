@@ -2234,6 +2234,79 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             }
         }
     } else {
+        // Production builds normally run inside the Linux builder VM. Compile
+        // SvelteKit adapter-node there as well; pulling the raw `build/` tree
+        // would leave runtime npm dependencies for the CT, which the server
+        // correctly refuses to install.
+        let sveltekit_client = format!("{build_dir}/build/client");
+        let is_sveltekit = builder_exec(&format!(
+            "test -d {} && echo yes || echo no",
+            shell_single_quote(&sveltekit_client)
+        ))
+        .map(|c| c.stdout.trim() == "yes")
+        .unwrap_or(false);
+        if is_sveltekit {
+            print_step(&format!(
+                "SvelteKit adapter-node build ({}): preparing self-contained bun recipe in builder VM",
+                sveltekit_client
+            ));
+            let local_recipe = std::env::temp_dir().join(format!(
+                "eco-sveltekit-bun-recipe-{}.mjs",
+                std::process::id()
+            ));
+            std::fs::write(&local_recipe, crate::embedded::SVELTEKIT_BUN_RECIPE_MJS)
+                .map_err(|e| format!("write sveltekit recipe: {e}"))?;
+            let remote_recipe = format!(
+                "/tmp/eco-sveltekit-bun-recipe-{}.mjs",
+                std::process::id()
+            );
+            builder_transfer_push(&local_recipe, &remote_recipe)?;
+
+            let stage = format!("{build_dir}/.eco-sveltekit-stage");
+            let remote_tar = format!(
+                "/tmp/eco-sveltekit-artifact-{}.tar.gz",
+                std::process::id()
+            );
+            builder_exec_ok(&format!(
+                "set -euo pipefail; command -v bun >/dev/null; node {recipe} {build_dir}; rm -rf {stage}; mkdir -p {stage}/client; cd {build_dir}; bun build --compile --target=bun-linux-x64 build-eco/eco-entry.js --outfile {stage}/{service}; cp -r build/client/. {stage}/client/; printf %s {service_q} > {stage}/.eco-bun; tar czf {remote_tar} -C {stage} .",
+                recipe = shell_single_quote(&remote_recipe),
+                build_dir = shell_single_quote(build_dir),
+                stage = shell_single_quote(&stage),
+                service = shell_single_quote(service_name),
+                service_q = shell_single_quote(service_name),
+                remote_tar = shell_single_quote(&remote_tar),
+            ))?;
+
+            let local_tar = std::env::temp_dir().join(format!(
+                "eco-sveltekit-artifact-{}.tar.gz",
+                std::process::id()
+            ));
+            builder_transfer_pull(&remote_tar, &local_tar)?;
+            run_command(
+                "tar",
+                &[
+                    "xzf".to_string(),
+                    local_tar.display().to_string(),
+                    "-C".to_string(),
+                    artifact_dir.display().to_string(),
+                ],
+                &util::current_dir(),
+            )?;
+            let _ = builder_exec(&format!(
+                "rm -f {} {}; rm -rf {}",
+                shell_single_quote(&remote_recipe),
+                shell_single_quote(&remote_tar),
+                shell_single_quote(&stage)
+            ));
+            let _ = std::fs::remove_file(&local_recipe);
+            let _ = std::fs::remove_file(&local_tar);
+            print_step(&format!(
+                "Bun-compiled {} in builder VM -> self-contained Linux artifact",
+                service_name
+            ));
+            return Ok(());
+        }
+
         if nextjs_standalone {
             // Assemble the standalone artifact inside the builder VM, then pull
             // it to the local artifact dir.
