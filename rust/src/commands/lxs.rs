@@ -25,6 +25,110 @@ pub struct LxsEnv {
     pub optional: Vec<String>,
     #[serde(default)]
     pub defaults: HashMap<String, String>,
+    /// Contract v2: per-key schema metadata. When non-empty, this is the
+    /// authoritative env contract (required/optional/defaults are derived
+    /// views). See eco-server/docs/lxs-config-schema-v2.md.
+    #[serde(default)]
+    pub fields: HashMap<String, LxsField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsField {
+    /// Non-empty value must exist before the service starts.
+    #[serde(default)]
+    pub required: bool,
+    /// Value shape: string | bool | int | float | enum | csv | csv-url | url |
+    /// uri | email | secret | json.
+    #[serde(default)]
+    pub r#type: String,
+    /// Static default written to `.env` when nothing else sets the key.
+    #[serde(default)]
+    pub default: String,
+    /// Human label/detail for CLI + dashboard.
+    #[serde(default)]
+    pub description: String,
+    /// Dashboard section grouping.
+    #[serde(default)]
+    pub group: String,
+    /// Allowed values; only valid when `type: enum`.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// Numeric bounds (int/float) or string/secret length bounds.
+    #[serde(default)]
+    pub min: f64,
+    #[serde(default)]
+    pub max: f64,
+    /// Regex validation for string/secret/url.
+    #[serde(default)]
+    pub pattern: String,
+    /// Sensitive: never rendered, never stored in the manifest — the value
+    /// lives in `.env`/secret store, the key goes in `grants.secrets`.
+    #[serde(default)]
+    pub secret: bool,
+    /// Eco derives/fills this key (port, shared-jwt, mongo-db, ...). Managed
+    /// keys are not settable via `services.<name>.config`.
+    #[serde(default)]
+    pub managed: String,
+    /// Sample value (docs/CLI hint).
+    #[serde(default)]
+    pub example: String,
+}
+
+/// Build the `.env.example` text (env contract) for an LXS from its manifest
+/// contract plus the estate's per-service `config:` values.
+///
+/// - v2 (`fields` non-empty): fields drive the key set + defaults; every
+///   `config:` value is validated against the schema (unknown key / secret /
+///   managed key → error).
+/// - v1 (no fields): required + optional + defaults; `config:` values overlay,
+///   validated only against the declared key lists.
+pub fn build_lxs_env_example(env: &LxsEnv, service_name: &str, config: &HashMap<String, String>) -> Result<String, String> {
+    let mut lines: Vec<String> = Vec::new();
+    if !env.fields.is_empty() {
+        let mut keys: Vec<&String> = env.fields.keys().collect();
+        keys.sort();
+        for key in &keys {
+            let field = &env.fields[key.as_str()];
+            let value = config.get(key.as_str()).cloned().unwrap_or_else(|| field.default.clone());
+            lines.push(format!("{key}={value}"));
+        }
+        for (key, value) in config {
+            match env.fields.get(key) {
+                None => {
+                    let allowed = keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                    return Err(format!(
+                        "service {service_name}: config key {key} is not declared in the LXS env contract (allowed: {allowed})"
+                    ));
+                }
+                Some(f) if f.secret => {
+                    return Err(format!(
+                        "service {service_name}: {key} is a secret field — declare it in grants.secrets, never set it in config:"
+                    ));
+                }
+                Some(f) if !f.managed.is_empty() => {
+                    return Err(format!(
+                        "service {service_name}: {key} is managed by eco ({}) — it cannot be set in config:",
+                        f.managed
+                    ));
+                }
+                Some(_) => {
+                    let _ = value;
+                }
+            }
+        }
+    } else {
+        let known: std::collections::HashSet<&String> = env.required.iter().chain(env.optional.iter()).collect();
+        for key in config.keys() {
+            if !known.contains(key) {
+                return Err(format!("service {service_name}: config key {key} is not declared in the LXS env contract"));
+            }
+        }
+        for key in env.required.iter().chain(env.optional.iter()) {
+            let value = config.get(key).cloned().unwrap_or_else(|| env.defaults.get(key).cloned().unwrap_or_default());
+            lines.push(format!("{key}={value}"));
+        }
+    }
+    Ok(lines.join("\n") + "\n")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2206,4 +2310,103 @@ jobs:
     println!("  .github/    tag-triggered CI publish workflow");
     println!("\nNext:\n  cd {name}\n  $EDITOR lxs.yml            # declare the contract\n  eco lxs build              # cross-compile for linux/amd64\n  eco lxs publish {name}@0.1.0\n  git remote add origin <your-repo> && git push -u origin main\n  git tag v0.1.0 && git push --tags   # CI publishes to the LXS Registry");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(r#type: &str, default: &str, secret: bool, managed: &str) -> LxsField {
+        LxsField {
+            required: false,
+            r#type: r#type.to_string(),
+            default: default.to_string(),
+            description: "".to_string(),
+            group: "".to_string(),
+            choices: vec![],
+            min: 0.0,
+            max: 0.0,
+            pattern: "".to_string(),
+            secret,
+            managed: managed.to_string(),
+            example: "".to_string(),
+        }
+    }
+
+    fn auth_env() -> LxsEnv {
+        let mut fields = HashMap::new();
+        fields.insert("JWT_SECRET".to_string(), field("secret", "", true, "shared-jwt"));
+        fields.insert("MONGODB_URI".to_string(), field("uri", "", false, "mongo-db"));
+        fields.insert("SERVER_PORT".to_string(), field("int", "", false, "port"));
+        fields.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), field("bool", "false", false, ""));
+        fields.insert("BREVO_API_KEY".to_string(), field("secret", "", true, ""));
+        fields.insert("RATE_LIMIT_AUTH_BURST".to_string(), field("int", "5", false, ""));
+        LxsEnv { fields, ..Default::default() }
+    }
+
+    #[test]
+    fn v2_fields_render_defaults_with_config_overlay() {
+        let env = auth_env();
+        let mut config = HashMap::new();
+        config.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "true".to_string());
+        config.insert("RATE_LIMIT_AUTH_BURST".to_string(), "10".to_string());
+        let text = build_lxs_env_example(&env, "auth-backend", &config).unwrap();
+        assert!(text.contains("EMAIL_VERIFICATION_REQUIRED=true\n"));
+        assert!(text.contains("RATE_LIMIT_AUTH_BURST=10\n"));
+        assert!(text.contains("EMAIL_VERIFICATION_REQUIRED"));
+        // defaults land when config has nothing for the key
+        assert!(text.contains("SERVER_PORT=\n"));
+        assert!(text.contains("JWT_SECRET=\n"));
+    }
+
+    #[test]
+    fn v2_unknown_config_key_is_rejected() {
+        let env = auth_env();
+        let mut config = HashMap::new();
+        config.insert("NOT_A_FIELD".to_string(), "x".to_string());
+        let err = build_lxs_env_example(&env, "auth-backend", &config).unwrap_err();
+        assert!(err.contains("NOT_A_FIELD is not declared"));
+    }
+
+    #[test]
+    fn v2_secret_config_key_is_rejected() {
+        let env = auth_env();
+        let mut config = HashMap::new();
+        config.insert("BREVO_API_KEY".to_string(), "super-secret".to_string());
+        let err = build_lxs_env_example(&env, "auth-backend", &config).unwrap_err();
+        assert!(err.contains("secret field"));
+    }
+
+    #[test]
+    fn v2_managed_config_key_is_rejected() {
+        let env = auth_env();
+        let mut config = HashMap::new();
+        config.insert("MONGODB_URI".to_string(), "mongodb://localhost/x".to_string());
+        let err = build_lxs_env_example(&env, "auth-backend", &config).unwrap_err();
+        assert!(err.contains("managed by eco (mongo-db)"));
+    }
+
+    #[test]
+    fn v1_config_overlay_and_unknown_key_rejected() {
+        let env = LxsEnv {
+            required: vec!["JWT_SECRET".to_string(), "SERVER_PORT".to_string()],
+            optional: vec!["EMAIL_VERIFICATION_REQUIRED".to_string()],
+            defaults: {
+                let mut m = HashMap::new();
+                m.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "false".to_string());
+                m
+            },
+            ..Default::default()
+        };
+        let mut config = HashMap::new();
+        config.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "true".to_string());
+        let text = build_lxs_env_example(&env, "auth-backend", &config).unwrap();
+        assert!(text.contains("EMAIL_VERIFICATION_REQUIRED=true\n"));
+        assert!(text.contains("JWT_SECRET=\n"));
+
+        let mut bad = HashMap::new();
+        bad.insert("NOT_DECLARED".to_string(), "x".to_string());
+        let err = build_lxs_env_example(&env, "auth-backend", &bad).unwrap_err();
+        assert!(err.contains("NOT_DECLARED is not declared"));
+    }
 }

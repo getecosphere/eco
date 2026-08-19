@@ -3567,11 +3567,14 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
             let _ = std::fs::set_permissions(&service_dir.join("start.sh"), std::fs::Permissions::from_mode(0o755));
         }
         // .env.example from the contract so configgen can fill secrets.
-        let mut env_example = String::new();
-        for key in manifest.contract.env.required.iter().chain(manifest.contract.env.optional.iter()) {
-            let value = manifest.contract.env.defaults.get(key).cloned().unwrap_or_default();
-            env_example.push_str(&format!("{key}={value}\n"));
-        }
+        // v2 contracts render from `fields` metadata + the estate's
+        // `services.<name>.config` values (validated against the schema);
+        // v1 renders from required/optional/defaults with config overlaid.
+        let mut env_example = crate::commands::lxs::build_lxs_env_example(
+            &manifest.contract.env,
+            &service.name,
+            &service.config,
+        )?;
         // The LXS contract's db requirement owns a managed estate-local DB
         // URI; leave the key blank so configure.sh fills it (same convention
         // as a declared `mongodb@`/`postgresql@15`/`redis@7` runtime).

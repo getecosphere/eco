@@ -265,6 +265,10 @@ pub struct Service {
     /// Empty means the service declares nothing — the gateway denies its
     /// routes unless they are declared here (default-deny).
     pub access_routes: Vec<AccessRoute>,
+    /// Per-service config values (ecompose `config:`), keyed by the LXS env var
+    /// names. Validated against the LXS contract schema; secrets never belong
+    /// here (they live in `grants.secrets` + `.env`/secret store).
+    pub config: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -415,6 +419,7 @@ pub fn parse_services(content: &str) -> Vec<Service> {
     let mut in_runtimes = false;
     let mut in_access = false;
     let mut in_access_routes = false;
+    let mut in_config = false;
 
     for raw in content.split('\n') {
         let line = raw.trim_end_matches('\r').trim_end();
@@ -447,13 +452,27 @@ pub fn parse_services(content: &str) -> Vec<Service> {
                 grants_secrets: Vec::new(),
                 grants_network: Vec::new(),
                 access_routes: Vec::new(),
+                config: HashMap::new(),
             });
             in_runtimes = false;
             in_access = false;
             in_access_routes = false;
+            in_config = false;
             continue;
         }
         if let Some(c) = current.as_mut() {
+            if line.trim_start() == "config:" {
+                in_config = true;
+                in_runtimes = false;
+                continue;
+            }
+            if in_config {
+                if let Some((key, value)) = match_indented_key_value(line, 6) {
+                    c.config.insert(key, util::strip_quotes(value.trim()));
+                    continue;
+                }
+                in_config = false;
+            }
             if line.trim_start() == "access:" {
                 in_access = true;
                 in_runtimes = false;
@@ -1043,6 +1062,51 @@ services:
         assert_eq!(fe.access_routes.len(), 1);
         assert_eq!(fe.access_routes[0].path, "/");
         assert_eq!(fe.access_routes[0].level, "public");
+    }
+
+    #[test]
+    fn parses_service_config_block() {
+        let content = r#"
+project: getecosphere
+services:
+  auth-backend:
+    lxs: auth@1.3.0
+    grants:
+      secrets: [JWT_SECRET, MONGODB_URI]
+    config:
+      EMAIL_VERIFICATION_REQUIRED: "false"
+      RATE_LIMIT_AUTH_BURST: "5"
+      MAIL_FROM_NAME: "Stuff8"
+  frontend:
+    path: frontend
+"#;
+        let svcs = parse_services(content);
+        assert_eq!(svcs.len(), 2);
+        let auth = svcs.iter().find(|s| s.name == "auth-backend").unwrap();
+        assert_eq!(auth.config.get("EMAIL_VERIFICATION_REQUIRED").map(|s| s.as_str()), Some("false"));
+        assert_eq!(auth.config.get("RATE_LIMIT_AUTH_BURST").map(|s| s.as_str()), Some("5"));
+        assert_eq!(auth.config.get("MAIL_FROM_NAME").map(|s| s.as_str()), Some("Stuff8"));
+        assert_eq!(auth.config.len(), 3);
+        let fe = svcs.iter().find(|s| s.name == "frontend").unwrap();
+        assert!(fe.config.is_empty());
+    }
+
+    #[test]
+    fn config_block_stops_at_next_service_key() {
+        let content = r#"
+project: x
+services:
+  a:
+    lxs: auth@1.0.0
+    config:
+      EMAIL_VERIFICATION_REQUIRED: "true"
+    port: 4200
+"#;
+        let svcs = parse_services(content);
+        assert_eq!(svcs.len(), 1);
+        let a = &svcs[0];
+        assert_eq!(a.config.len(), 1);
+        assert_eq!(a.port, 4200);
     }
 
     #[test]
