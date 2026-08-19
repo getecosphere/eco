@@ -76,6 +76,15 @@ const HTML: &str = r#"<!doctype html>
   .svcimg { width:15px; height:15px; border-radius:3px; object-fit:contain; flex:none; }
   .svcdot { width:15px; flex:none; text-align:center; font-size:13px; color:#1a5fb4; }
   .favicon { width:16px; height:16px; border-radius:4px; object-fit:contain; flex:none; }
+  .ctxmenu { position:fixed; z-index:100; background:#fff; border:1px solid var(--line); border-radius:9px;
+    box-shadow:0 10px 28px rgba(0,0,0,.14); padding:.3rem; min-width:190px; }
+  .ctxmenu button { display:block; width:100%; text-align:left; padding:.5rem .75rem; border:0; background:none;
+    font:inherit; font-size:.84rem; border-radius:6px; cursor:pointer; color:var(--text); }
+  .ctxmenu button:hover { background:#f1eef6; }
+  .ctxmenu button.disabled { color:var(--muted); cursor:default; }
+  .ctxmenu button.disabled:hover { background:none; }
+  .ctxmenu .sep { height:1px; background:var(--line); margin:.3rem .4rem; }
+  .ctxmenu .head { font-size:.68rem; letter-spacing:.07em; text-transform:uppercase; color:#8d8493; padding:.3rem .75rem .2rem; }
   .hint { padding:.6rem 1rem .8rem; color:var(--muted); font-size:.78rem; border-top:1px solid var(--line); }
   .hint code { background:var(--chipbg); padding:.02rem .3rem; border-radius:4px; }
   /* ---------- main ---------- */
@@ -202,6 +211,7 @@ const I18N = {
     saveService:'Save', rawInfo:'Edit the whole ecompose.yml (project name, hostname, access routes…). Validated on save.',
     saveEcompose:'Save ecompose.yml', envWarn:'The host agent never exposes secrets — prod-env returns only <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> keys (platform security design, stricter than Heroku’s reveal).',
     envLoading:'Loading…', envEmpty:'No public keys (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) in this service.', envNotAvail:'prod env not available',
+    copyPath:'Copy path', copyEcompose:'Copy ecompose.yml path', reload:'Reload estate', copied:'Path copied',
   },
   id: {
     subtitle:'konfigurasi estate (dev)', search:'Cari estate, service, key…',
@@ -216,6 +226,7 @@ const I18N = {
     saveService:'Simpan', rawInfo:'Edit seluruh ecompose.yml (nama project, hostname, access routes…). Validasi saat simpan.',
     saveEcompose:'Simpan ecompose.yml', envWarn:'Agent host tidak mengekspos secret — prod-env hanya mengembalikan key <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> (desain keamanan platform).',
     envLoading:'Memuat…', envEmpty:'Tidak ada key public (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) di service ini.', envNotAvail:'prod env tidak tersedia',
+    copyPath:'Salin path', copyEcompose:'Salin path ecompose.yml', reload:'Muat ulang estate', copied:'Path tersalin',
   }
 };
 let LANG = localStorage.getItem('ecoGenieLang') || 'en';
@@ -230,6 +241,46 @@ function setLang(l) {
 $('#langEn').onclick = () => setLang('en');
 $('#langId').onclick = () => setLang('id');
 
+/* ---------------- context menu ---------------- */
+let ctx = null;
+function closeCtx() { if (ctx) { ctx.remove(); ctx = null; } }
+function showCtx(x, y, head, items) {
+  closeCtx();
+  ctx = document.createElement('div'); ctx.className = 'ctxmenu';
+  if (head) { const h = document.createElement('div'); h.className = 'head'; h.textContent = head; ctx.appendChild(h); }
+  for (const it of items) {
+    if (it === '-') { const s = document.createElement('div'); s.className = 'sep'; ctx.appendChild(s); continue; }
+    const b = document.createElement('button');
+    b.textContent = it.label;
+    if (it.disabled) b.classList.add('disabled');
+    else b.onclick = () => { closeCtx(); it.action(); };
+    ctx.appendChild(b);
+  }
+  document.body.appendChild(ctx);
+  const w = ctx.offsetWidth, h = ctx.offsetHeight;
+  ctx.style.left = Math.min(x, window.innerWidth - w - 10) + 'px';
+  ctx.style.top = Math.min(y, window.innerHeight - h - 10) + 'px';
+}
+document.addEventListener('click', closeCtx);
+document.addEventListener('scroll', closeCtx, true);
+document.addEventListener('resize', closeCtx);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCtx(); });
+function copyText(txt) {
+  const done = () => {};
+  (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject())
+    .then(() => { const s = $('#estatePath'); const old = s.textContent; s.textContent = t('copied'); setTimeout(() => s.textContent = old, 1200); })
+    .catch(() => {});
+}
+function estateCtxItems(e) {
+  return [
+    { label: t('openProd'), disabled: !e.prodUrl, action: () => window.open(e.prodUrl, '_blank') },
+    { label: t('openLocal'), disabled: !e.localUrl, action: () => window.open(e.localUrl, '_blank') },
+    '-',
+    { label: t('copyPath'), action: () => copyText(e.path) },
+    { label: t('copyEcompose'), action: () => copyText(e.path + '/ecompose.yml') },
+    { label: t('reload'), action: () => { const w = document.querySelector('.estate[data-path="' + cssId(e.path) + '"]'); selectEstate(e, w); } },
+  ];
+}
 /* ---------------- tree ---------------- */
 async function loadEstates() {
   const r = await fetch('/api/estates');
@@ -242,7 +293,7 @@ async function loadEstates() {
 function renderTree() {
   const tree = $('#tree'); tree.innerHTML = '';
   for (const e of ESTATES) {
-    const wrap = document.createElement('div'); wrap.className = 'estate';
+    const wrap = document.createElement('div'); wrap.className = 'estate'; wrap.dataset.path = cssId(e.path);
     const row = document.createElement('div'); row.className = 'row';
     const caret = document.createElement('span'); caret.className = 'caret'; caret.textContent = '▸';
     const img = document.createElement('img');
@@ -256,11 +307,24 @@ function renderTree() {
       if (isOpen) { children.style.display = 'none'; caret.textContent = '▸'; }
       else selectEstate(e, wrap);
     };
+    row.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      showCtx(ev.clientX, ev.clientY, e.project, estateCtxItems(e));
+    });
     const children = document.createElement('div'); children.className = 'estate-children'; children.style.display = 'none';
     for (const s of e.services) {
       const svc = document.createElement('div'); svc.className = 'svc';
       svc.innerHTML = `<span class="svcimg"></span><span class="b">${esc(s)}</span>`;
       svc.onclick = (ev) => { ev.stopPropagation(); selectEstate(e, wrap).then(() => jumpToService(s)); };
+      svc.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        showCtx(ev.clientX, ev.clientY, s, [
+          { label: t('openProd'), disabled: !e.prodUrl, action: () => window.open(e.prodUrl, '_blank') },
+          { label: t('openLocal'), disabled: !e.localUrl, action: () => window.open(e.localUrl, '_blank') },
+          '-',
+          { label: t('reload'), action: () => selectEstate(e, wrap) },
+        ]);
+      });
       children.appendChild(svc);
     }
     wrap.append(row, children); tree.appendChild(wrap);
@@ -1168,8 +1232,18 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
             ("GET", "/api/estates") => {
                 let list: Vec<serde_json::Value> = estates
                     .iter()
-                    .map(|(project, path, services)| {
-                        serde_json::json!({ "project": project, "path": path, "services": services })
+                    .map(|(project, path, _services)| {
+                        let dir = PathBuf::from(path);
+                        let content = std::fs::read_to_string(dir.join("ecompose.yml")).unwrap_or_default();
+                        let hostname = ecompose::parse_estates(&content).first().map(|e| e.hostname.clone()).unwrap_or_default();
+                        let services = ecompose::parse_services(&content);
+                        serde_json::json!({
+                            "project": project,
+                            "path": path,
+                            "services": services.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                            "prodUrl": if hostname.is_empty() { String::new() } else { format!("https://{}", hostname) },
+                            "localUrl": local_dev_url(&dir, project, &services),
+                        })
                     })
                     .collect();
                 (200, serde_json::json!(list).to_string(), "application/json")
