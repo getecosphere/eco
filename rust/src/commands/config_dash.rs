@@ -1,17 +1,24 @@
 //! `eco config` — local estate configuration dashboard (dev).
 //!
-//! Serves a web UI on http://127.0.0.1:8765 that lets a developer configure an
-//! estate without hand-editing YAML. It reads the composed LXS schemas
-//! (contract v2 `fields`) + the estate's current `services.<name>.config` and
-//! renders each service's fields as a form:
+//! Serves a web UI on http://127.0.0.1:8765 that lets a developer configure
+//! one or more estates without hand-editing YAML:
 //!
+//!   - left-side tree navigation: estates → services → groups → fields
+//!   - LXS configuration per service, rendered from the composed LXS schema
+//!     (contract v2 `fields`), sections collapsible + searchable
 //!   - `managed` fields are greyed out ("managed by eco — <generator>")
-//!   - non-secret values are written back to `ecompose.yml` (config block)
-//!   - secret values are written to the service's local `.env` (never the
-//!     manifest, per the secrets guardrail contract)
+//!   - non-secret values write back to `ecompose.yml` config blocks
+//!   - secret values write to the service's local `.env` (never the manifest)
+//!   - a raw `ecompose.yml` editor (validated) for the whole manifest, e.g.
+//!     project name, hostname, access routes
+//!   - read-only prod env per service, fetched from the host agent
+//!     (`GET /v1/estates/<project>/services/<service>/env`). The agent only
+//!     returns `PUBLIC_*/VITE_*/NEXT_PUBLIC_*` keys by design — prod secrets
+//!     never leave the host (stricter than Heroku's masked-but-revealable
+//!     config vars), so the dashboard cannot leak them even if it tried.
 //!
-//! The UI is read-only against the running estate; changes take effect on the
-//! next `eco up`. See eco-server/docs/lxs-config-schema-v2.md.
+//! The UI is read-only against the running estate; config changes take effect
+//! on the next `eco up`. See eco-server/docs/lxs-config-schema-v2.md.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,155 +29,363 @@ use crate::{ecompose, util};
 use crate::commands::lxs::{self, LxsField, LxsManifest};
 
 const HTML: &str = r#"<!doctype html>
-<html lang="en">
+<html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>eco config · {{ESTATE}}</title>
+<title>eco config</title>
 <style>
   * { box-sizing:border-box; }
-  body { margin:0; min-height:100vh; font:400 15px/1.55 "Manrope", ui-sans-serif, system-ui, sans-serif;
-    background:#f7f6f2; color:#17141d; -webkit-font-smoothing:antialiased; }
-  header { padding:1.6rem 2rem 1rem; border-bottom:1px solid #ded9e1; background:#fff; }
-  header h1 { margin:0; font-size:1.15rem; letter-spacing:-.02em; }
-  header p { margin:.3rem 0 0; color:#665f6e; font-size:.85rem; }
-  main { max-width:860px; margin:0 auto; padding:1.5rem 1rem 4rem; }
-  .service { background:#fff; border:1px solid #ded9e1; border-radius:12px; margin:1rem 0; overflow:hidden; }
-  .service > h2 { margin:0; padding:.9rem 1.1rem; font-size:.95rem; letter-spacing:-.01em;
-    background:#f1eef6; border-bottom:1px solid #ded9e1; }
-  .service > h2 code { font-weight:600; color:#5b3fd6; }
-  .group { padding:.6rem 1.1rem 0; }
-  .group > h3 { margin:.8rem 0 .2rem; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:#8d8493; }
-  .field { display:grid; grid-template-columns:minmax(180px,1fr) minmax(220px,1.4fr); gap:.6rem 1rem;
-    align-items:start; padding:.65rem 0; border-top:1px solid #f0edf2; }
-  .field .meta label { font-weight:700; font-size:.85rem; display:block; }
-  .field .meta small { color:#8d8493; font-size:.78rem; display:block; margin-top:.15rem; }
-  .field .meta .req { color:#c0392b; }
-  .field .meta .mgr { color:#b07f2a; }
+  :root { --bg:#f7f6f2; --card:#fff; --line:#ded9e1; --line2:#f0edf2; --text:#17141d; --muted:#665f6e;
+          --accent:#5b3fd6; --accent2:#482bbd; --chipbg:#e9e4f2; --err:#c0392b; --ok:#1e7f4f; }
+  html,body { height:100%; }
+  body { margin:0; font:400 14px/1.55 "Manrope", ui-sans-serif, system-ui, sans-serif;
+    background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased; display:flex; }
+  /* ---------- sidebar ---------- */
+  aside { width:300px; min-width:300px; background:#fff; border-right:1px solid var(--line);
+    display:flex; flex-direction:column; height:100vh; position:sticky; top:0; }
+  .brand { padding:1rem 1rem .6rem; border-bottom:1px solid var(--line); }
+  .brand h1 { margin:0; font-size:1.05rem; letter-spacing:-.02em; }
+  .brand small { color:var(--muted); }
+  #searchwrap { padding:.7rem 1rem; }
+  #search { width:100%; padding:.5rem .7rem; border:1px solid var(--line); border-radius:9px; font:inherit; }
+  #tree { flex:1; overflow:auto; padding:.4rem .6rem 1rem; }
+  .estate { margin:.15rem 0; }
+  .estate > .row { display:flex; align-items:center; gap:.5rem; padding:.42rem .55rem; border-radius:8px; cursor:pointer; }
+  .estate > .row:hover { background:#f1eef6; }
+  .estate.active > .row { background:var(--chipbg); color:var(--accent); font-weight:700; }
+  .caret { width:14px; color:var(--muted); font-size:.7rem; display:inline-block; }
+  .estate-children { margin-left:1.05rem; border-left:1px solid var(--line); padding-left:.35rem; }
+  .svc { padding:.3rem .5rem; border-radius:7px; color:var(--muted); font-size:.86rem; cursor:pointer; }
+  .svc:hover { background:#f4f2f5; color:var(--text); }
+  .svc .b { font-family:"DM Mono",ui-monospace,monospace; color:var(--text); }
+  .hint { padding:.6rem 1rem .8rem; color:var(--muted); font-size:.78rem; border-top:1px solid var(--line); }
+  .hint code { background:var(--chipbg); padding:.02rem .3rem; border-radius:4px; }
+  /* ---------- main ---------- */
+  main { flex:1; overflow:auto; height:100vh; }
+  header.main { padding:1.1rem 1.6rem .8rem; border-bottom:1px solid var(--line); background:#fff;
+    position:sticky; top:0; z-index:5; }
+  header.main h2 { margin:0; font-size:1.15rem; letter-spacing:-.02em; }
+  header.main .path { color:var(--muted); font-size:.8rem; font-family:"DM Mono",ui-monospace,monospace; }
+  .tabs { display:flex; gap:.25rem; margin-top:.6rem; }
+  .tab { padding:.4rem .9rem; border-radius:8px 8px 0 0; cursor:pointer; color:var(--muted); font-weight:600; font-size:.85rem; border:1px solid transparent; border-bottom:0; }
+  .tab.active { background:var(--card); color:var(--accent); border-color:var(--line); }
+  .content { max-width:1000px; margin:0 auto; padding:1.2rem 1.6rem 5rem; }
+  .panel { display:none; } .panel.active { display:block; }
+  /* ---------- general ---------- */
+  .general { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1rem 1.2rem; margin-bottom:1rem; }
+  .general h3 { margin:0 0 .6rem; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:#8d8493; }
+  .grow { display:grid; grid-template-columns:repeat(3,1fr); gap:.7rem; }
+  .grow label { display:block; font-size:.78rem; color:var(--muted); margin-bottom:.2rem; }
+  .grow input { width:100%; padding:.45rem .6rem; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  /* ---------- services ---------- */
+  details.service { background:var(--card); border:1px solid var(--line); border-radius:12px; margin:1rem 0; }
+  details.service > summary { cursor:pointer; padding:.85rem 1.1rem; font-weight:700; font-size:.93rem;
+    list-style:none; display:flex; align-items:center; gap:.5rem; background:#f1eef6; border-radius:12px 12px 0 0; }
+  details.service > summary::-webkit-details-marker { display:none; }
+  details.service > summary .caret { transition:transform .12s; }
+  details.service[open] > summary { border-bottom:1px solid var(--line); }
+  details.service[open] > summary .caret { transform:rotate(90deg); }
+  details.service > summary .lxs { font-weight:400; color:var(--muted); font-size:.8rem; font-family:"DM Mono",ui-monospace,monospace; }
+  .group { padding:.2rem 1.1rem 0; }
+  .group > h4 { margin:1rem 0 .2rem; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:#8d8493; }
+  .field { display:grid; grid-template-columns:minmax(200px,1fr) minmax(240px,1.4fr); gap:.6rem 1rem;
+    align-items:start; padding:.6rem 0; border-top:1px solid var(--line2); }
+  .field.hl { background:#fff8e1; border-radius:8px; box-shadow:0 0 0 2px #f0d45a; }
+  .field .meta label { font-weight:700; font-size:.85rem; display:block; word-break:break-all; }
+  .field .meta small { color:var(--muted); font-size:.78rem; display:block; margin-top:.15rem; }
+  .req { color:var(--err); } .mgr { color:#b07f2a; } .sec { color:var(--accent); }
   .field input[type=text], .field input[type=password], .field input[type=number], .field select, .field textarea {
     width:100%; padding:.45rem .6rem; border:1px solid #cfc9d5; border-radius:8px; font:inherit; background:#fff; }
-  .field input:disabled { background:#f4f2f5; color:#8d8493; }
-  .field .bool { display:flex; gap:.5rem; align-items:center; padding-top:.25rem; }
-  .field .chips { display:flex; flex-wrap:wrap; gap:.35rem; }
-  .field .chip { background:#e9e4f2; color:#5b3fd6; border-radius:999px; padding:.15rem .6rem; font-size:.78rem; }
-  .actions { padding:1rem 1.1rem 1.2rem; border-top:1px solid #f0edf2; display:flex; gap:.7rem; align-items:center; }
-  button { padding:.55rem 1.3rem; border:0; border-radius:9px; font-weight:700; cursor:pointer; font-size:.85rem; }
-  button.save { background:#5b3fd6; color:#fff; }
-  button.save:hover { background:#482bbd; }
+  .field input:disabled { background:#f4f2f5; color:var(--muted); }
+  .bool { display:flex; gap:.5rem; align-items:center; padding-top:.25rem; }
+  .actions { padding:1rem 1.1rem 1.2rem; border-top:1px solid var(--line2); display:flex; gap:.7rem; align-items:center; }
+  button { padding:.5rem 1.2rem; border:0; border-radius:9px; font-weight:700; cursor:pointer; font-size:.84rem; }
+  button.save { background:var(--accent); color:#fff; } button.save:hover { background:var(--accent2); }
   button.save:disabled { background:#b9b0c8; cursor:default; }
-  .status { font-size:.82rem; color:#665f6e; }
-  .status.ok { color:#1e7f4f; }
-  .status.err { color:#c0392b; }
-  .hint { padding:1rem 1.1rem; color:#8d8493; font-size:.8rem; }
-  .hint code { background:#f1eef6; padding:.05rem .35rem; border-radius:4px; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .status { font-size:.82rem; color:var(--muted); } .status.ok { color:var(--ok); } .status.err { color:var(--err); }
+  .empty { padding:1rem 1.1rem; color:var(--muted); font-size:.85rem; }
+  /* ---------- raw editor ---------- */
+  textarea#raw { width:100%; min-height:60vh; font:12.5px/1.5 "DM Mono",ui-monospace,monospace; padding:.9rem;
+    border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--text); white-space:pre; }
+  /* ---------- prod env ---------- */
+  .envbar { display:flex; gap:.7rem; align-items:center; margin-bottom:.8rem; }
+  .envbar select { padding:.45rem .6rem; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  table.env { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  table.env th, table.env td { text-align:left; padding:.5rem .8rem; border-bottom:1px solid var(--line2); font-size:.84rem; }
+  table.env th { background:#f1eef6; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  table.env td code { font-family:"DM Mono",ui-monospace,monospace; word-break:break-all; }
+  .mask { font-family:"DM Mono",ui-monospace,monospace; color:var(--muted); }
+  .reveal { font-size:.75rem; padding:.25rem .6rem; }
+  .envinfo { color:var(--muted); font-size:.82rem; margin-bottom:.6rem; }
+  .warn { background:#fff8e1; border:1px solid #f0d45a; color:#6b5800; border-radius:9px; padding:.7rem .9rem; font-size:.84rem; margin-bottom:.8rem; }
 </style>
 </head>
 <body>
-<header>
-  <h1>eco config · <span id="estate">…</span></h1>
-  <p>Konfigurasi LXS estate (dev). Managed fields diisi eco; nilai non-secret tersimpan di <code>ecompose.yml</code>, secret di <code>.env</code>. Berlaku setelah <code>eco up</code>.</p>
-</header>
-<main id="app"><p>Memuat…</p></main>
+<aside>
+  <div class="brand"><h1>eco config</h1><small>konfigurasi estate (dev)</small></div>
+  <div id="searchwrap"><input id="search" type="search" placeholder="Cari key / service / estate…"></div>
+  <div id="tree"><p class="hint">Memuat estate…</p></div>
+  <div class="hint">Simpan → berlaku setelah <code>eco up</code>. Prod env read-only & tersembunyi default.</div>
+</aside>
+<main>
+  <header class="main">
+    <h2 id="estateTitle">Pilih estate di sidebar</h2>
+    <div class="path" id="estatePath"></div>
+    <nav class="tabs" id="tabs">
+      <div class="tab active" data-tab="lxs">LXS Config</div>
+      <div class="tab" data-tab="raw">ecompose.yml</div>
+      <div class="tab" data-tab="env">Prod env</div>
+    </nav>
+  </header>
+  <div class="content">
+    <section class="panel active" id="p-lxs"><p class="empty">Pilih estate di sidebar untuk mulai.</p></section>
+    <section class="panel" id="p-raw"><p class="empty">—</p></section>
+    <section class="panel" id="p-env"><p class="empty">—</p></section>
+  </div>
+</main>
 <script>
 const $ = s => document.querySelector(s);
-async function load() {
-  const r = await fetch('/api/estate');
-  if (!r.ok) return renderError(await r.text());
-  const data = await r.json();
-  $('#estate').textContent = data.project;
-  render(data);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const q = params => '?' + new URLSearchParams(params).toString();
+const qs = new URLSearchParams(location.search);
+let ESTATES = [], CURRENT = null;
+
+/* ---------------- tree ---------------- */
+async function loadEstates() {
+  const r = await fetch('/api/estates');
+  ESTATES = await r.json();
+  renderTree();
+  const pref = qs.get('dir');
+  if (pref) { const e = ESTATES.find(x => x.path === pref); if (e) selectEstate(e); }
+  else if (ESTATES.length) selectEstate(ESTATES[0]);
 }
-function renderError(msg) {
-  $('#app').innerHTML = `<p style="color:#c0392b">${escapeHtml(msg)}</p>`;
+function renderTree() {
+  const tree = $('#tree'); tree.innerHTML = '';
+  for (const e of ESTATES) {
+    const wrap = document.createElement('div'); wrap.className = 'estate';
+    const row = document.createElement('div'); row.className = 'row';
+    const caret = document.createElement('span'); caret.className = 'caret'; caret.textContent = '▸';
+    const name = document.createElement('span'); name.textContent = e.project;
+    row.append(caret, name);
+    row.onclick = () => selectEstate(e, wrap);
+    const children = document.createElement('div'); children.className = 'estate-children'; children.style.display = 'none';
+    for (const s of e.services) {
+      const svc = document.createElement('div'); svc.className = 'svc';
+      svc.innerHTML = `<span class="b">${esc(s)}</span>`;
+      svc.onclick = (ev) => { ev.stopPropagation(); selectEstate(e, wrap).then(() => jumpToService(s)); };
+      children.appendChild(svc);
+    }
+    wrap.append(row, children); tree.appendChild(wrap);
+  }
 }
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function selectEstate(e, wrapNode) {
+  document.querySelectorAll('.estate').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.estate-children').forEach(n => n.style.display = 'none');
+  if (wrapNode) { wrapNode.classList.add('active'); wrapNode.querySelector('.estate-children').style.display = 'block';
+    wrapNode.querySelector('.caret').textContent = '▾'; }
+  const r = await fetch('/api/estate' + q({ dir: e.path }));
+  if (!r.ok) return setStatus(await r.text(), 'err');
+  CURRENT = await r.json();
+  CURRENT.path = e.path;
+  $('#estateTitle').textContent = CURRENT.project;
+  $('#estatePath').textContent = e.path;
+  renderGeneral(); renderLXS();
+  history.replaceState(null, '', '/?dir=' + encodeURIComponent(e.path));
 }
-function inputFor(f, val, dirty) {
-  if (f.managed) return `<input type="text" value="" disabled placeholder="managed by eco — ${escapeHtml(f.managed)}">`;
+/* ---------------- tabs ---------------- */
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  $('#p-' + t.dataset.tab).classList.add('active');
+  if (t.dataset.tab === 'raw') renderRaw();
+  if (t.dataset.tab === 'env') renderEnv();
+});
+/* ---------------- LXS config ---------------- */
+function renderGeneral() {
+  const sec = $('#p-lxs'); sec.innerHTML = '';
+  const g = document.createElement('div'); g.className = 'general';
+  const h = document.createElement('h3'); h.textContent = 'Umum'; g.appendChild(h);
+  const grow = document.createElement('div'); grow.className = 'grow';
+  const mk = (label, key, val) => {
+    const d = document.createElement('div');
+    d.innerHTML = `<label>${label}</label><input id="gen-${key}" value="${esc(val||'')}">`;
+    grow.appendChild(d);
+  };
+  mk('Project name', 'project', CURRENT.project);
+  mk('Main estate', 'main', CURRENT.main);
+  mk('Hostname', 'hostname', CURRENT.hostname);
+  g.appendChild(grow);
+  const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = 'Simpan Umum'; btn.type = 'button';
+  const st = document.createElement('span'); st.className = 'status';
+  btn.onclick = async () => {
+    btn.disabled = true; st.className = 'status'; st.textContent = 'Menyimpan…';
+    const r = await fetch('/api/general' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ project: $('#gen-project').value.trim(), main: $('#gen-main').value.trim(), hostname: $('#gen-hostname').value.trim() }) });
+    const t = await r.text();
+    if (r.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan.'; loadEstates(); }
+    else { st.className = 'status err'; st.textContent = t; }
+    btn.disabled = false;
+  };
+  g.append(btn, st); sec.appendChild(g);
+}
+function renderLXS() {
+  const sec = $('#p-lxs');
+  for (const svc of CURRENT.services) {
+    const el = document.createElement('details'); el.className = 'service'; el.id = 'svc-' + cssId(svc.name);
+    const sum = document.createElement('summary');
+    sum.innerHTML = `<span class="caret">▸</span> <code>${esc(svc.name)}</code> <span class="lxs">${esc(svc.lxs)}</span>`;
+    el.appendChild(sum);
+    if (!svc.fields.length) {
+      const hint = document.createElement('div'); hint.className = 'empty';
+      hint.textContent = svc.lxs ? 'LXS ini belum menyatakan schema konfigurasi (contract v2 fields).' : 'Service sumber (path:) — konfigurasi lewat ecompose.yml.';
+      el.appendChild(hint);
+    } else {
+      const groups = {};
+      for (const f of svc.fields) (groups[f.group || 'umum'] = groups[f.group || 'umum'] || []).push(f);
+      for (const [gname, fields] of Object.entries(groups)) {
+        const g = document.createElement('div'); g.className = 'group';
+        const gh = document.createElement('h4'); gh.textContent = gname; g.appendChild(gh);
+        for (const f of fields) {
+          const val = svc.config[f.key] != null ? svc.config[f.key] : (f.default || '');
+          const row = document.createElement('div'); row.className = 'field'; row.dataset.key = f.key;
+          row.dataset.service = svc.name; row.dataset.grp = gname;
+          const meta = document.createElement('div'); meta.className = 'meta';
+          let tags = f.required ? ' <span class="req">*</span>' : '';
+          if (f.managed) tags += ' <span class="mgr">(eco)</span>';
+          if (f.secret) tags += ' <span class="sec">(secret)</span>';
+          meta.innerHTML = `<label>${esc(f.key)}${tags}</label>` + (f.description ? `<small>${esc(f.description)}</small>` : '');
+          row.appendChild(meta);
+          const ctl = document.createElement('div'); ctl.innerHTML = inputFor(f, val); row.appendChild(ctl);
+          g.appendChild(row);
+        }
+        el.appendChild(g);
+      }
+      const act = document.createElement('div'); act.className = 'actions';
+      const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = 'Simpan ' + svc.name; btn.type = 'button';
+      const st = document.createElement('span'); st.className = 'status';
+      btn.onclick = async () => {
+        btn.disabled = true; st.className = 'status'; st.textContent = 'Menyimpan…';
+        const config = {}; const secrets = {};
+        for (const f of svc.fields) {
+          if (f.managed) continue;
+          const input = el.querySelector(`[name="${cssId(f.key)}"]`);
+          if (!input) continue;
+          const v = input.value;
+          if (f.secret) { if (v) secrets[f.key] = v; }
+          else { config[f.key] = v; }
+        }
+        const r = await fetch('/api/apply' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ service: svc.name, config, secrets }) });
+        const t = await r.text();
+        if (r.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan. Jalankan eco up untuk menerapkan.'; loadEstates(); }
+        else { st.className = 'status err'; st.textContent = t; }
+        btn.disabled = false;
+      };
+      act.append(btn, st); el.appendChild(act);
+    }
+    sec.appendChild(el);
+  }
+}
+function inputFor(f, val) {
+  if (f.managed) return `<input type="text" value="" disabled placeholder="managed by eco — ${esc(f.managed)}">`;
   if (f.type === 'bool') {
     const on = val === 'true' || val === '1';
-    return `<div class="bool"><label><input type="radio" name="${f.key}" value="true" ${on?'checked':''}> Ya</label>
-      <label><input type="radio" name="${f.key}" value="false" ${!on?'checked':''}> Tidak</label></div>`;
+    return `<div class="bool"><label><input type="radio" name="${cssId(f.key)}" value="true" ${on?'checked':''}> Ya</label>
+      <label><input type="radio" name="${cssId(f.key)}" value="false" ${!on?'checked':''}> Tidak</label></div>`;
   }
   if (f.type === 'enum') {
-    const opts = f.choices.map(c => `<option value="${escapeHtml(c)}" ${c===val?'selected':''}>${escapeHtml(c)}</option>`).join('');
-    return `<select name="${f.key}">${opts}</select>`;
+    const opts = f.choices.map(c => `<option value="${esc(c)}" ${c===val?'selected':''}>${esc(c)}</option>`).join('');
+    return `<select name="${cssId(f.key)}">${opts}</select>`;
   }
-  if (f.type === 'int' || f.type === 'float') {
-    return `<input type="number" step="${f.type==='float'?'any':'1'}" name="${f.key}" value="${escapeHtml(val)}">`;
-  }
-  if (f.type === 'csv' || f.type === 'csv-url') {
-    return `<input type="text" name="${f.key}" value="${escapeHtml(val)}" placeholder="koma-pisah: a,b,c">`;
-  }
-  if (f.type === 'json') {
-    return `<textarea name="${f.key}" rows="3">${escapeHtml(val)}</textarea>`;
-  }
-  return `<input type="${f.secret?'password':'text'}" name="${f.key}" value="${f.secret?'':escapeHtml(val)}" placeholder="${f.secret?'tidak ditampilkan — kosongkan biarkan':''}">`;
+  if (f.type === 'int' || f.type === 'float') return `<input type="number" step="${f.type==='float'?'any':'1'}" name="${cssId(f.key)}" value="${esc(val)}">`;
+  if (f.type === 'csv' || f.type === 'csv-url') return `<input type="text" name="${cssId(f.key)}" value="${esc(val)}" placeholder="koma-pisah: a,b,c">`;
+  if (f.type === 'json') return `<textarea name="${cssId(f.key)}" rows="3">${esc(val)}</textarea>`;
+  return `<input type="${f.secret?'password':'text'}" name="${cssId(f.key)}" value="${f.secret?'':esc(val)}" placeholder="${f.secret?'tidak ditampilkan — kosongkan biarkan':''}">`;
 }
-function render(data) {
-  const app = $('#app'); app.innerHTML = '';
-  const newValues = {};
-  for (const svc of data.services) {
-    const el = document.createElement('div'); el.className = 'service';
-    const h = document.createElement('h2');
-    h.innerHTML = `<code>${escapeHtml(svc.name)}</code> <span style="font-weight:400;color:#8d8493;font-size:.8rem">${escapeHtml(svc.lxs)}</span>`;
-    el.appendChild(h);
-    if (!svc.fields.length) {
-      const hint = document.createElement('div'); hint.className = 'hint';
-      hint.innerHTML = 'LXS ini belum menyatakan schema konfigurasi (contract v2 <code>fields</code>).';
-      el.appendChild(hint); app.appendChild(el); continue;
-    }
-    const groups = {};
-    for (const f of svc.fields) (groups[f.group || 'umum'] = groups[f.group || 'umum'] || []).push(f);
-    for (const [gname, fields] of Object.entries(groups)) {
-      const g = document.createElement('div'); g.className = 'group';
-      const gh = document.createElement('h3'); gh.textContent = gname; g.appendChild(gh);
-      for (const f of fields) {
-        const val = svc.config[f.key] != null ? svc.config[f.key] : (f.default || '');
-        const row = document.createElement('div'); row.className = 'field';
-        const meta = document.createElement('div'); meta.className = 'meta';
-        let label = `<label>${escapeHtml(f.key)}${f.required?' <span class="req">*</span>':''}${f.managed?' <span class="mgr">(eco)</span>':''}${f.secret?' <span class="mgr">(secret)</span>':''}</label>`;
-        meta.innerHTML = label + (f.description ? `<small>${escapeHtml(f.description)}</small>` : '');
-        row.appendChild(meta);
-        const ctl = document.createElement('div');
-        ctl.innerHTML = inputFor(f, val, false);
-        row.appendChild(ctl);
-        g.appendChild(row);
-      }
-      el.appendChild(g);
-    }
-    const actions = document.createElement('div'); actions.className = 'actions';
-    const btn = document.createElement('button'); btn.className = 'save'; btn.type = 'button'; btn.textContent = 'Simpan';
-    btn.addEventListener('click', async () => {
-      btn.disabled = true; const st = statusEl(); st.className = 'status'; st.textContent = 'Menyimpan…';
-      const config = {}; const secrets = {};
-      for (const f of svc.fields) {
-        if (f.managed) continue;
-        const input = el.querySelector(`[name="${CSS.escape(f.key)}"]`);
-        if (!input) continue;
-        const v = input.value;
-        if (f.secret) { if (v) secrets[f.key] = v; }
-        else { if (v) config[f.key] = v; }
-      }
-      const r = await fetch('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ service: svc.name, config, secrets }) });
-      const body = await r.text();
-      if (r.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan. Jalankan eco up untuk menerapkan.'; }
-      else { st.className = 'status err'; st.textContent = body; }
-      btn.disabled = false;
-    });
-    const statusEl = () => { const s = document.createElement('span'); actions.appendChild(s); return s; };
-    actions.appendChild(btn);
-    actions.appendChild(statusEl());
-    el.appendChild(actions);
-    app.appendChild(el);
-  }
+function cssId(s) { return 'i_' + s.replace(/[^a-zA-Z0-9]/g, '_'); }
+function jumpToService(name) { const el = document.getElementById('svc-' + cssId(name)); if (el) { el.open = true; el.scrollIntoView({behavior:'smooth', block:'start'}); } }
+/* ---------------- raw ecompose ---------------- */
+let RAW = '';
+async function renderRaw() {
+  const sec = $('#p-raw');
+  const r = await fetch('/api/ecompose' + q({ dir: CURRENT.path }));
+  RAW = await r.text();
+  sec.innerHTML = '';
+  const info = document.createElement('div'); info.className = 'envinfo';
+  info.textContent = 'Edit seluruh ecompose.yml (nama project, hostname, access routes, dsb.). Validasi saat simpan.';
+  sec.appendChild(info);
+  const ta = document.createElement('textarea'); ta.id = 'raw'; ta.value = RAW; sec.appendChild(ta);
+  const bar = document.createElement('div'); bar.style.cssText = 'display:flex;gap:.7rem;align-items:center;margin-top:.7rem;';
+  const btn = document.createElement('button'); btn.className = 'save'; btn.textContent = 'Simpan ecompose.yml'; btn.type = 'button';
+  const st = document.createElement('span'); st.className = 'status';
+  btn.onclick = async () => {
+    btn.disabled = true; st.className = 'status'; st.textContent = 'Menyimpan…';
+    const r2 = await fetch('/api/ecompose-save' + q({ dir: CURRENT.path }), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ content: ta.value }) });
+    const t = await r2.text();
+    if (r2.ok) { st.className = 'status ok'; st.textContent = 'Tersimpan.'; loadEstates(); }
+    else { st.className = 'status err'; st.textContent = t; }
+    btn.disabled = false;
+  };
+  bar.append(btn, st); sec.appendChild(bar);
 }
-load();
+/* ---------------- prod env ---------------- */
+async function renderEnv() {
+  const sec = $('#p-env'); sec.innerHTML = '';
+  const warn = document.createElement('div'); warn.className = 'warn';
+  warn.innerHTML = 'Agent host <b>tidak mengekspos secret</b> — endpoint prod-env hanya mengembalikan key <code>PUBLIC_*</code>/<code>VITE_*</code>/<code>NEXT_PUBLIC_*</code> (desain keamanan platform, lebih ketat daripada Heroku yang masih bisa reveal). Secret prod tidak pernah meninggalkan host.';
+  sec.appendChild(warn);
+  const bar = document.createElement('div'); bar.className = 'envbar';
+  const sel = document.createElement('select');
+  for (const s of CURRENT.services) { if (s.lxs) { const o = document.createElement('option'); o.value = s.name; o.textContent = s.name; sel.appendChild(o); } }
+  bar.appendChild(sel);
+  const info = document.createElement('span'); info.className = 'envinfo'; bar.appendChild(info);
+  sec.appendChild(bar);
+  const table = document.createElement('table'); table.className = 'env';
+  table.innerHTML = '<thead><tr><th style="width:36%">Key</th><th>Nilai (prod, public-only)</th></tr></thead><tbody></tbody>';
+  sec.appendChild(table);
+  const tbody = table.querySelector('tbody');
+  async function load() {
+    tbody.innerHTML = '<tr><td colspan="2">Memuat…</td></tr>';
+    info.textContent = '';
+    const r = await fetch('/api/prod-env' + q({ dir: CURRENT.path, service: sel.value }));
+    const d = await r.json();
+    if (!d.available) { tbody.innerHTML = `<tr><td colspan="2">${esc(d.error || 'prod env tidak tersedia')}</td></tr>`; return; }
+    info.textContent = d.source;
+    tbody.innerHTML = '';
+    for (const item of d.env) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><code>${esc(item.key)}</code></td><td><code>${esc(item.value)}</code></td>`;
+      tbody.appendChild(tr);
+    }
+    if (!d.env.length) tbody.innerHTML = '<tr><td colspan="2">Tidak ada key public (PUBLIC_*/VITE_*/NEXT_PUBLIC_*) di service ini.</td></tr>';
+  }
+  sel.onchange = load;
+  await load();
+}
+/* ---------------- search ---------------- */
+let lastQuery = '';
+$('#search').addEventListener('input', (e) => {
+  const q0 = e.target.value.trim().toLowerCase(); lastQuery = q0;
+  if (!CURRENT) return;
+  if (!q0) { document.querySelectorAll('#p-lxs .field').forEach(f => f.classList.remove('hl')); return; }
+  document.querySelectorAll('#p-lxs .field').forEach(f => {
+    const hit = (f.dataset.key + ' ' + f.dataset.grp + ' ' + f.dataset.service).toLowerCase().includes(q0);
+    f.classList.toggle('hl', hit);
+    if (hit) f.scrollIntoView({ behavior:'smooth', block:'center' });
+  });
+  const first = document.querySelector('#p-lxs .field.hl');
+  if (first && !document.querySelector('#p-lxs .field.hl').offsetParent) first.scrollIntoView({ behavior:'smooth', block:'center' });
+});
+/* ---------------- boot ---------------- */
+loadEstates();
 </script>
 </body>
 </html>"#;
+
+/* ================= Rust side ================= */
 
 fn find_ecompose_file(start_dir: &Path) -> Result<PathBuf, String> {
     let mut dir = std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
@@ -191,6 +406,64 @@ fn find_ecompose_file(start_dir: &Path) -> Result<PathBuf, String> {
     Err("No ecompose.yml found. Run `eco config` from inside an estate directory.".to_string())
 }
 
+fn default_estates_root() -> PathBuf {
+    if let Ok(p) = std::env::var("ECO_CONFIG_ESTATES") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    for candidate in [
+        format!("{}/ar-rahman/estates", util::home_dir()),
+        format!("{}/projects", util::home_dir()),
+        format!("{}/superapp", util::home_dir()),
+    ] {
+        let p = PathBuf::from(&candidate);
+        if p.is_dir() {
+            return p;
+        }
+    }
+    PathBuf::from(format!("{}/ar-rahman/estates", util::home_dir()))
+}
+
+/// Discover estates: subdirectories of the estates root that carry ecompose.yml.
+fn discover_estates(root: &Path) -> Vec<(String, String, PathBuf)> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let ecompose = dir.join("ecompose.yml");
+            if ecompose.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&ecompose) {
+                    let project = ecompose::parse_project_name(&content);
+                    let services = ecompose::parse_services(&content)
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    out.push((project, dir.display().to_string(), services));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Validate that a requested estate dir is one of the discovered estates.
+fn resolve_estate_dir(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let requested = PathBuf::from(raw);
+    for (_name, path, _services) in discover_estates(root) {
+        if PathBuf::from(&path) == requested {
+            return Ok(requested);
+        }
+    }
+    Err("unknown estate dir (not under the discovered estates root)".to_string())
+}
+
+/// Resolve a registry address for the dashboard: estate state wins, then the
+/// local mirror (ECO_LXS_REGISTRY or the default path), then the GitHub default.
 fn registry_address(estate_root: &Path) -> Option<String> {
     if let Some(reg) = lxs::read_estate_state(estate_root).map(|s| s.registry).filter(|r| !r.is_empty()) {
         return Some(reg);
@@ -203,14 +476,11 @@ fn registry_address(estate_root: &Path) -> Option<String> {
     None
 }
 
-/// Load the composed LXS manifest for a service from the estate's registry.
 fn load_lxs_manifest(service: &ecompose::Service, address: Option<&str>) -> Result<Option<LxsManifest>, String> {
     let (manifest, _version) = lxs::fetch_lxs_manifest(&service.lxs, address)?;
     Ok(Some(manifest))
 }
 
-/// Synthesize a v1 (no-fields) contract into schema fields so the UI still has
-/// something to render.
 fn fields_for(manifest: &LxsManifest) -> Vec<(String, LxsField)> {
     if !manifest.contract.env.fields.is_empty() {
         let mut keys: Vec<&String> = manifest.contract.env.fields.keys().collect();
@@ -290,11 +560,12 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
     }
     Ok(serde_json::json!({
         "project": project,
+        "main": ecompose::parse_main(&content),
+        "hostname": ecompose::parse_estates(&content).first().map(|e| e.hostname.clone()).unwrap_or_default(),
         "services": svc_values,
     }))
 }
 
-/// Remove any existing `config:` block under the service and insert a fresh one.
 fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<String, String>) -> Result<String, String> {
     let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
     let mut in_services = false;
@@ -330,7 +601,6 @@ fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<Strin
         return Err(format!("service '{service}' not found in ecompose.yml"));
     };
 
-    // Build the new block lines.
     let mut block: Vec<String> = Vec::new();
     if !config.is_empty() {
         block.push("    config:".to_string());
@@ -347,7 +617,6 @@ fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<Strin
         }
     }
 
-    // Determine the span to drop (existing config block, if any).
     let mut drop_start: Option<usize> = None;
     let mut drop_end = start + 1;
     for idx in start..svc_end {
@@ -366,8 +635,6 @@ fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<Strin
         }
     }
 
-    // Insertion point: before the first indent-4 block after the header (so
-    // scalar props like lxs:/port: stay at the top of the service block).
     let mut insert_at = start + 1;
     for idx in (start + 1)..svc_end {
         if drop_start.is_some() && idx >= drop_start.unwrap() && idx < drop_end {
@@ -391,16 +658,13 @@ fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<Strin
                 continue;
             }
         }
-        if !block.is_empty() && !drop_start.is_some() && idx == insert_at {
+        if !block.is_empty() && drop_start.is_none() && idx == insert_at {
             out.extend(block.iter().cloned());
         }
         out.push(line.clone());
     }
-    if !block.is_empty() && !drop_start.is_some() && insert_at >= lines.len() {
+    if !block.is_empty() && drop_start.is_none() && insert_at >= lines.len() {
         out.extend(block.iter().cloned());
-    }
-    if block.is_empty() && drop_start.is_some() {
-        // config block removed entirely; nothing else to do
     }
     Ok(out.join("\n") + "\n")
 }
@@ -425,8 +689,143 @@ fn apply_secret(estate_root: &Path, service: &str, key: &str, value: &str) -> Re
     std::fs::write(&env_path, lines.join("\n") + "\n").map_err(|e| format!("write {}: {e}", env_path.display()))
 }
 
+/// Replace top-level `key: value` lines (project, main) and the first
+/// `hostname:` under the estates block. Leaves everything else untouched.
+fn apply_general(content: &str, project: &str, main: &str, hostname: &str) -> Result<String, String> {
+    if project.trim().is_empty() {
+        return Err("project name cannot be empty".to_string());
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut in_estates = false;
+    let mut hostname_done = false;
+    let mut project_done = false;
+    let mut main_done = false;
+    for line in content.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed.starts_with("project:") && !line.starts_with(' ') {
+            out.push(format!("project: {}", project.trim()));
+            project_done = true;
+            continue;
+        }
+        if trimmed.starts_with("main:") && !line.starts_with(' ') {
+            out.push(format!("main: {}", main.trim()));
+            main_done = true;
+            continue;
+        }
+        if trimmed == "estates:" && !line.starts_with(' ') {
+            in_estates = true;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_estates {
+            if !line.starts_with(' ') {
+                in_estates = false;
+            } else if !hostname_done && line.trim_start().starts_with("hostname:") {
+                out.push(format!("    hostname: {}", hostname.trim()));
+                hostname_done = true;
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    if !project_done {
+        out.insert(0, format!("project: {}", project.trim()));
+    }
+    if !main_done && !main.trim().is_empty() {
+        out.insert(1, format!("main: {}", main.trim()));
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+/// Fetch a service's generated prod env from the host agent, masked.
+fn fetch_prod_env(estate_root: &Path, content: &str, service: &str) -> Result<serde_json::Value, String> {
+    let project = ecompose::parse_project_name(content);
+    let api_url = std::env::var("ECO_API_URL").unwrap_or_default();
+    let api_key = std::env::var("ECO_API_KEY").unwrap_or_default();
+    if api_url.is_empty() || api_key.is_empty() {
+        return Ok(serde_json::json!({ "available": false, "error": "ECO_API_URL / ECO_API_KEY belum di-set (sumber dari ~/.zshrc)" }));
+    }
+    let url = format!("{}/v1/estates/{}/services/{}/env", api_url.trim_end_matches('/'), project, service);
+    let response = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .call()
+        .map_err(|e| format!("agent request gagal: {e}"))?;
+    let status = response.status();
+    let text = response.into_string().map_err(|e| e.to_string())?;
+    if !(200..300).contains(&status) {
+        return Ok(serde_json::json!({ "available": false, "error": format!("agent {status}: {}", text.lines().next().unwrap_or("")) }));
+    }
+    let mut env = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            env.push(serde_json::json!({
+                "key": k.trim(),
+                "value": v.trim().trim_matches('"'),
+            }));
+        }
+    }
+    Ok(serde_json::json!({
+        "available": true,
+        "source": format!("host agent · /opt/eco/{project}/current/.env/{service}.env (hanya PUBLIC_*/VITE_*/NEXT_PUBLIC_* — secret tidak diekspos oleh agent)"),
+        "env": env,
+    }))
+}
+
+fn parse_query(url: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(q) = url.split('?').nth(1) {
+        for pair in q.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let decoded = urlencoding_decode(v);
+                out.insert(k.to_string(), decoded);
+            }
+        }
+    }
+    out
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn json_error(status: u16, msg: &str) -> (u16, String, &'static str) {
+    (status, format!("{{\"error\":\"{}\"}}", msg.replace('"', "\\\"")), "application/json")
+}
+
 pub fn run_config(args: &[String]) -> Result<(), String> {
     let mut port: u16 = 8765;
+    let mut estates_root: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -434,50 +833,146 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 port = args.get(i + 1).and_then(|p| p.parse().ok()).unwrap_or(8765);
                 i += 2;
             }
-            other => return Err(format!("Unknown eco config option: {other} (usage: eco config [--port <n>])")),
+            "--estates" => {
+                estates_root = Some(PathBuf::from(args.get(i + 1).cloned().unwrap_or_default()));
+                i += 2;
+            }
+            other => return Err(format!("Unknown eco config option: {other} (usage: eco config [--port <n>] [--estates <dir>])")),
         }
     }
 
+    let root = estates_root.unwrap_or_else(default_estates_root);
     let cwd = util::current_dir();
-    let file_path = find_ecompose_file(&cwd)?;
-    let estate_root = file_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let content = std::fs::read_to_string(&file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
+    let cwd_estate = find_ecompose_file(&cwd).ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
     let server = Server::http(format!("127.0.0.1:{port}")).map_err(|e| format!("cannot bind 127.0.0.1:{port}: {e}"))?;
     println!();
-    println!("  eco config — estate: {}", util::bold(&ecompose::parse_project_name(&content)));
+    println!("  eco config");
+    println!("  estates root: {}", util::bold(&root.display().to_string()));
     println!("  {}", util::cyan(&format!("  http://127.0.0.1:{port}")));
     println!("  {}", util::dim("Ctrl-C untuk berhenti. Perubahan berlaku setelah `eco up`."));
     println!();
+
+    let estates = discover_estates(&root);
+    if estates.is_empty() {
+        return Err(format!("no estates (ecompose.yml) found under {}", root.display()));
+    }
 
     for request in server.incoming_requests() {
         let mut request = request;
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or(&url).to_string();
+        let query = parse_query(&url);
         let method = request.method().to_string();
 
         let (status, body, ctype) = match (method.as_str(), path.as_str()) {
             ("GET", "/") => (
                 200,
-                HTML.replace("{{ESTATE}}", &ecompose::parse_project_name(&content)),
+                HTML.replace("{{ESTATE}}", ""),
                 "text/html; charset=utf-8",
             ),
+            ("GET", "/api/estates") => {
+                let list: Vec<serde_json::Value> = estates
+                    .iter()
+                    .map(|(project, path, services)| {
+                        serde_json::json!({ "project": project, "path": path, "services": services })
+                    })
+                    .collect();
+                (200, serde_json::json!(list).to_string(), "application/json")
+            }
             ("GET", "/api/estate") => {
-                let content = std::fs::read_to_string(&file_path).map_err(|e| format!("read {}: {e}", file_path.display()));
-                match content.and_then(|c| build_estate_json(&estate_root, &c)) {
+                let dir = match query.get("dir") {
+                    Some(d) => d.clone(),
+                    None => cwd_estate
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .ok_or_else(|| "no estate dir".to_string())?,
+                };
+                match resolve_estate_dir(&root, &dir).and_then(|d| {
+                    std::fs::read_to_string(d.join("ecompose.yml"))
+                        .map_err(|e| format!("read ecompose.yml: {e}"))
+                        .and_then(|c| build_estate_json(&d, &c))
+                }) {
                     Ok(json) => (200, json.to_string(), "application/json"),
-                    Err(e) => (500, format!("{{\"error\":\"{}\"}}", e.replace('"', "\\\"")), "application/json"),
+                    Err(e) => json_error(400, &e),
                 }
             }
             ("POST", "/api/apply") => {
                 let mut buf = Vec::new();
                 if let Err(e) = request.as_reader().read_to_end(&mut buf) {
-                    (500, format!("{{\"error\":\"{e}\"}}"), "application/json")
+                    json_error(500, &format!("read body: {e}"))
                 } else {
-                    match apply_request(&estate_root, &file_path, &String::from_utf8_lossy(&buf)) {
+                    let dir = query.get("dir").cloned().unwrap_or_default();
+                    match resolve_estate_dir(&root, &dir).and_then(|d| {
+                        apply_request(&d, &d.join("ecompose.yml"), &String::from_utf8_lossy(&buf))
+                    }) {
                         Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
-                        Err(e) => (500, format!("{{\"error\":\"{}\"}}", e.replace('"', "\\\"")), "application/json"),
+                        Err(e) => json_error(500, &e),
                     }
+                }
+            }
+            ("POST", "/api/general") => {
+                let mut buf = Vec::new();
+                if let Err(e) = request.as_reader().read_to_end(&mut buf) {
+                    json_error(500, &format!("read body: {e}"))
+                } else {
+                    let dir = query.get("dir").cloned().unwrap_or_default();
+                    match resolve_estate_dir(&root, &dir).and_then(|d| {
+                        let file = d.join("ecompose.yml");
+                        let content = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+                        let req: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&buf)).map_err(|e| format!("bad json: {e}"))?;
+                        let project = req["project"].as_str().unwrap_or("").to_string();
+                        let main = req["main"].as_str().unwrap_or("").to_string();
+                        let hostname = req["hostname"].as_str().unwrap_or("").to_string();
+                        let next = apply_general(&content, &project, &main, &hostname)?;
+                        std::fs::write(&file, next).map_err(|e| format!("write {}: {e}", file.display()))
+                    }) {
+                        Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
+                        Err(e) => json_error(500, &e),
+                    }
+                }
+            }
+            ("GET", "/api/ecompose") => {
+                let dir = query.get("dir").cloned().unwrap_or_default();
+                match resolve_estate_dir(&root, &dir).and_then(|d| {
+                    std::fs::read_to_string(d.join("ecompose.yml")).map_err(|e| format!("read ecompose.yml: {e}"))
+                }) {
+                    Ok(text) => (200, text, "text/plain"),
+                    Err(e) => json_error(400, &e),
+                }
+            }
+            ("POST", "/api/ecompose-save") => {
+                let mut buf = Vec::new();
+                if let Err(e) = request.as_reader().read_to_end(&mut buf) {
+                    json_error(500, &format!("read body: {e}"))
+                } else {
+                    let dir = query.get("dir").cloned().unwrap_or_default();
+                    match resolve_estate_dir(&root, &dir).and_then(|d| {
+                        let file = d.join("ecompose.yml");
+                        let req: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&buf)).map_err(|e| format!("bad json: {e}"))?;
+                        let content = req["content"].as_str().ok_or("missing content")?;
+                        if ecompose::parse_project_name(content).is_empty() {
+                            return Err("validasi gagal: `project:` tidak ditemukan atau kosong".to_string());
+                        }
+                        if ecompose::parse_services(content).is_empty() {
+                            return Err("validasi gagal: `services:` kosong — pastikan YAML tetap utuh".to_string());
+                        }
+                        std::fs::write(&file, content).map_err(|e| format!("write {}: {e}", file.display()))
+                    }) {
+                        Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
+                        Err(e) => json_error(400, &e),
+                    }
+                }
+            }
+            ("GET", "/api/prod-env") => {
+                let dir = query.get("dir").cloned().unwrap_or_default();
+                let service = query.get("service").cloned().unwrap_or_default();
+                match resolve_estate_dir(&root, &dir).and_then(|d| {
+                    let content = std::fs::read_to_string(d.join("ecompose.yml")).map_err(|e| e.to_string())?;
+                    fetch_prod_env(&d, &content, &service)
+                }) {
+                    Ok(json) => (200, json.to_string(), "application/json"),
+                    Err(e) => json_error(500, &e),
                 }
             }
             _ => (404, "not found".to_string(), "text/plain"),
@@ -486,7 +981,10 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
         let _ = request.respond(
             Response::from_string(body)
                 .with_status_code(status)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap_or_else(|_| Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap())),
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes())
+                        .unwrap_or_else(|_| Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap()),
+                ),
         );
     }
     Ok(())
@@ -530,7 +1028,6 @@ mod tests {
         assert!(out.contains("    lxs: auth@1.0.0"));
         assert!(out.contains("    port: 4200"));
         assert!(out.contains("    access:"), "access block must survive: {out}");
-        // Second apply replaces the block, not duplicates it.
         let mut cfg2 = HashMap::new();
         cfg2.insert("RATE_LIMIT_AUTH_BURST".to_string(), "10".to_string());
         let out2 = apply_config_to_manifest(&out, "a", &cfg2).unwrap();
@@ -555,5 +1052,14 @@ mod tests {
         cfg.insert("K".to_string(), "v".to_string());
         let out = apply_config_to_manifest(content, "b", &cfg).unwrap();
         assert!(out.contains("config:\n      K: \"v\"\n"));
+    }
+
+    #[test]
+    fn apply_general_updates_project_main_hostname() {
+        let content = "project: old\nmain: old\n\nestates:\n  old:\n    hostname: old.example.com\n    services: []\n\nservices:\n  a:\n    lxs: x@1.0.0\n";
+        let out = apply_general(content, "new", "new", "new.example.com").unwrap();
+        assert!(out.starts_with("project: new\nmain: new\n"));
+        assert!(out.contains("    hostname: new.example.com"));
+        assert!(out.contains("services:\n  a:\n    lxs: x@1.0.0"), "services must survive: {out}");
     }
 }
