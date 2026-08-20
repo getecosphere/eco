@@ -23,6 +23,7 @@ ZIG_VERSION="0.13.0"
 # matching; Windows uses GNU.
 HOST_TARGET="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
 LINUX_TARGET="x86_64-unknown-linux-musl"
+LINUX_ARM_TARGET="aarch64-unknown-linux-musl"
 WINDOWS_TARGET="x86_64-pc-windows-gnu"
 APPLE_OTHER_TARGET="$(if [[ "$HOST_TARGET" == aarch64-apple-darwin ]]; then printf 'x86_64-apple-darwin'; else printf 'aarch64-apple-darwin'; fi)"
 
@@ -30,7 +31,7 @@ log() { printf '\033[1;36m[build-release]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[build-release]\033[0m %s\n' "$*"; }
 
 ensure_rustup_targets() {
-  for t in "$HOST_TARGET" "$LINUX_TARGET" "$WINDOWS_TARGET" "$APPLE_OTHER_TARGET"; do
+  for t in "$HOST_TARGET" "$LINUX_TARGET" "$LINUX_ARM_TARGET" "$WINDOWS_TARGET" "$APPLE_OTHER_TARGET"; do
     if ! rustup target list --installed | grep -qx "$t"; then
       log "installing rustup target $t"
       rustup target add "$t"
@@ -106,6 +107,7 @@ main() {
   ensure_cargo_zigbuild
   build_host
   build_target "$LINUX_TARGET"
+  build_target "$LINUX_ARM_TARGET"
   build_target "$WINDOWS_TARGET"
   build_target "$APPLE_OTHER_TARGET"
   log "release $VERSION built:"
