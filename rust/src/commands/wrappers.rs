@@ -146,6 +146,7 @@ fn update_asset_for_platform() -> Result<String, String> {
         ("macos", "x86_64") => Ok("eco-x86_64-apple-darwin".to_string()),
         ("macos", "aarch64") => Ok("eco-aarch64-apple-darwin".to_string()),
         ("linux", "x86_64") => Ok("eco-x86_64-unknown-linux-musl".to_string()),
+        ("linux", "aarch64") => Ok("eco-aarch64-unknown-linux-musl".to_string()),
         ("windows", "x86_64") => Ok("eco-x86_64-pc-windows-gnu.exe".to_string()),
         _ => Err(format!("eco update has no prebuilt asset for {os}/{arch} yet")),
     }
