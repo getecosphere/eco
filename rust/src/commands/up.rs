@@ -1938,6 +1938,8 @@ fn install_limactl_binary() -> Result<(), String> {
     let os_arch = ("Darwin".to_string(), lima_arch());
     #[cfg(target_os = "linux")]
     let os_arch = ("Linux".to_string(), lima_arch());
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let os_arch = ("Linux".to_string(), "x86_64".to_string());
     let (os, arch) = os_arch;
     let url = format!("https://github.com/lima-vm/lima/releases/download/v{LIMA_VERSION}/lima-{LIMA_VERSION}-{os}-{arch}.tar.gz");
     let tarball = std::env::temp_dir().join(format!("lima-{LIMA_VERSION}-{os}-{arch}.tar.gz"));
