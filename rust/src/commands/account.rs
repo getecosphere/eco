@@ -106,6 +106,85 @@ fn do_signup(api_url: &str, email: &str, password: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn readline(prompt: &str) -> Result<String, String> {
+    use std::io::Write;
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(line.trim().to_string())
+}
+
+// Open the login URL in the platform's default browser. Returns false when no
+// browser opener is available (or it failed), so the caller can fall back to
+// printing the URL for the user to open manually.
+fn command_available(name: &str) -> bool {
+    let path = std::env::var("PATH").unwrap_or_default();
+    path.split(':').any(|dir| !dir.is_empty() && std::path::Path::new(dir).join(name).is_file())
+}
+
+fn open_browser(url: &str) -> bool {
+    let (program, args): (&str, Vec<String>) = if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
+    } else if cfg!(target_os = "linux") {
+        for candidate in ["xdg-open", "sensible-browser", "x-www-browser"] {
+            if command_available(candidate) {
+                return std::process::Command::new(candidate).arg(url).spawn().map(|_| true).unwrap_or(false);
+            }
+        }
+        return false;
+    } else if cfg!(target_os = "windows") {
+        ("rundll32", vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()])
+    } else {
+        return false;
+    };
+    std::process::Command::new(program).args(&args).spawn().map(|_| true).unwrap_or(false)
+}
+
+// Browser-based device login: create a pending session, open the sign-in page
+// (or print the URL when no browser is available), then poll until the user
+// signs in and the freshly issued API key is saved.
+fn do_device_login(api_url: &str) -> Result<(), String> {
+    let create_url = format!("{api_url}/v1/account/device-login");
+    let created = post_json(&create_url, &serde_json::json!({}))?;
+    let session_id = created.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let code = created.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if session_id.is_empty() || code.is_empty() {
+        return Err("could not start a login session — is the account service reachable?".to_string());
+    }
+
+    let login_url = format!("{api_url}/v1/account/device-login/{code}");
+    println!("\nOpening your browser to sign in to Ecosphere.");
+    println!("If the browser does not open, copy and paste this URL:\n");
+    println!("  {login_url}\n");
+    if !open_browser(&login_url) {
+        println!("(no browser detected on this machine — open the URL above manually)");
+    }
+
+    let status_url = format!("{api_url}/v1/account/device-login/status");
+    println!("Waiting for you to sign in… (this times out in 5 minutes)");
+    for _ in 0..150 {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        match post_json(&status_url, &serde_json::json!({"session_id": session_id})) {
+            Ok(status) => match status.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+                "success" => {
+                    let email = status.get("email").and_then(|e| e.as_str()).unwrap_or("").to_string();
+                    let api_key = status.get("api_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+                    write_stored_auth(&StoredAuth { api_url: api_url.to_string(), api_key, email: email.clone() })?;
+                    println!("\nLogged in as {email}. `eco up --remote` will now deploy.");
+                    return Ok(());
+                }
+                "expired" => {
+                    return Err("The login link expired. Run `eco login` to start a new one.".to_string());
+                }
+                _ => {}
+            },
+            Err(_) => {}
+        }
+    }
+    Err("Timed out waiting for sign-in. Run `eco login` to try again.".to_string())
+}
+
 fn do_login(api_url: &str, email: &str, password: &str) -> Result<(), String> {
     let url = format!("{api_url}/v1/account/login");
     let result = post_json(&url, &serde_json::json!({"email": email, "password": password}))?;
@@ -118,18 +197,13 @@ fn do_login(api_url: &str, email: &str, password: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn readline(prompt: &str) -> Result<String, String> {
-    use std::io::Write;
-    print!("{prompt}");
-    std::io::stdout().flush().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
-    Ok(line.trim().to_string())
-}
-
 pub fn run_account(args: &[String]) -> Result<(), String> {
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("help");
     let rest = &args[1..];
+    let api_url = {
+        let url = resolve_api_url();
+        if url.is_empty() { DEFAULT_API_URL.to_string() } else { url }
+    };
     match subcommand {
         "signup" => {
             let email = rest.first().cloned().unwrap_or_else(|| readline("Email: ").unwrap_or_default());
@@ -137,19 +211,15 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
                 return Err("usage: eco signup <email>".to_string());
             }
             let password = readline("Password (min 8 chars): ").unwrap_or_default();
-            let api_url = resolve_api_url();
-            let api_url = if api_url.is_empty() { DEFAULT_API_URL.to_string() } else { api_url };
             do_signup(&api_url, &email, &password)
         }
         "login" => {
-            let email = rest.first().cloned().unwrap_or_else(|| readline("Email: ").unwrap_or_default());
-            if email.is_empty() {
-                return Err("usage: eco login <email>".to_string());
+            if let Some(email) = rest.first() {
+                let password = readline("Password: ").unwrap_or_default();
+                do_login(&api_url, email, &password)
+            } else {
+                do_device_login(&api_url)
             }
-            let password = readline("Password: ").unwrap_or_default();
-            let api_url = resolve_api_url();
-            let api_url = if api_url.is_empty() { DEFAULT_API_URL.to_string() } else { api_url };
-            do_login(&api_url, &email, &password)
         }
         "logout" => {
             let path = auth_path();
@@ -172,7 +242,7 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
             }
         },
         _ => {
-            println!("eco account\n\nUsage:\n  eco signup <email>        create a free account + API key\n  eco login <email>         log in and save the API key\n  eco logout                remove the saved key\n  eco whoami                show the current account");
+            println!("eco account\n\nUsage:\n  eco signup <email>        create a free account + API key\n  eco login                 sign in via your browser\n  eco login <email>         sign in with email + password\n  eco logout                remove the saved key\n  eco whoami                show the current account");
             Ok(())
         }
     }
