@@ -2787,13 +2787,8 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // (defaulting the URL to the public api.getecosphere.com).
     let (api_url, api_key) = crate::commands::account::resolve_api_credentials()?;
     let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
-    if api_url.is_empty() {
-        return Err(
-            "eco up --remote requires ECO_API_URL pointing at the eco serve agent on the remote host (e.g. http://host:8790).".to_string(),
-        );
-    }
     if api_key.is_empty() {
-        return Err("eco up --remote requires an API key (run `eco login`, or set ECO_API_KEY).".to_string());
+        return Err("Not logged in. Run `eco login` to connect your account before `eco up --remote`.".to_string());
     }
     let base = api_url.trim_end_matches('/').to_string();
     let staging = options.get("staging").map(|v| v == "true").unwrap_or(false);

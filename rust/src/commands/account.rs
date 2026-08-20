@@ -67,9 +67,7 @@ pub fn resolve_api_credentials() -> Result<(String, String), String> {
             return Ok((url, key));
         }
     }
-    Err(
-        "not logged in. Run `eco login` (or set ECO_API_URL + ECO_API_KEY).".to_string(),
-    )
+    Err("Not logged in. Run `eco login` to connect your account.".to_string())
 }
 
 fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {

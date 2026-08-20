@@ -12,8 +12,9 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
     // root (the only directory eco scans — no `*_core` naming, no sibling
     // discovery). It auto-detects the services already in the folder and
     // scaffolds an ecompose.yml, then the gitignored .eco/state.json and a
-    // .gitignore, then git-inits the project. If an ecompose.yml already
-    // exists it is validated (never overwritten).
+    // .gitignore. If an ecompose.yml already exists it is validated (never
+    // overwritten). eco does not run `git init` — version control is the
+    // user's choice.
     let no_detect = args.iter().any(|a| a == "--no-detect");
     let dir_arg = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| ".".to_string());
     let dir = Path::new(&dir_arg);
@@ -80,33 +81,14 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
         std::fs::write(&gitignore, ".eco/\ntarget/\nnode_modules/\ndist/\n.next/\n.env\n").map_err(|e| format!("write .gitignore: {e}"))?;
     }
 
-    if !dir.join(".git").exists() {
-        crate::util::run_command("git", &["init".to_string(), "-b".to_string(), "main".to_string()], dir)?;
-        crate::util::run_command("git", &["add".to_string(), "-A".to_string()], dir)?;
-        crate::util::run_command(
-            "git",
-            &[
-                "-c".to_string(),
-                "user.name=Eko SW".to_string(),
-                "-c".to_string(),
-                "user.email=swdev.bali@gmail.com".to_string(),
-                "commit".to_string(),
-                "-m".to_string(),
-                "chore: eco init project".to_string(),
-            ],
-            dir,
-        )?;
-    }
-
     println!("Initialized project {project} in {}/", dir.display());
     println!("  ecompose.yml      the manifest (project root = the only scanned dir)");
     println!("  .eco/state.json   gitignored estate binding + registry");
     println!("\nNext:");
     println!("  cd {dir_arg}");
-    println!("  eco lxs add <name>    compose a registry LXS (binary)");
-    println!("  cd <your-domain> && eco lxs add .   register a source LXS");
-    println!("  eco up dev            run the estate locally");
-    println!("  eco up --remote       build locally + ship to the target");
+    println!("  eco login          connect your account (needed for eco up --remote)");
+    println!("  eco up dev         run the estate locally");
+    println!("  eco up --remote    build locally + ship to the target");
     Ok(())
 }
 
