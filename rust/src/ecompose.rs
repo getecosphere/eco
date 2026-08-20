@@ -117,8 +117,54 @@ pub struct EcomposeRead {
     pub content: String,
 }
 
+// Walk a few parent directories looking for a nearby ecompose.yml, so the
+// "manifest not found" error can point at where the user probably meant to run.
+fn nearby_manifest(start_dir: &Path) -> Option<PathBuf> {
+    let mut current = std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
+    for _ in 0..4 {
+        let parent = current.parent()?;
+        current = parent.to_path_buf();
+        let candidate = current.join("ecompose.yml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+// A missing manifest is the most common first-run mistake, so explain why eco
+// needs it and the three ways to fix it instead of a bare "failed to read".
+fn manifest_missing_help(path: &Path, start_dir: &Path) -> String {
+    let cwd = std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
+    let mut message = format!(
+        "No ecompose.yml found in {}\n\n\
+         `eco up` (and `eco up --remote`) build and deploy the estate declared by this manifest,\n\
+         so it must exist in the directory you run the command from.\n\n\
+         What you can do:\n\
+           - run `eco up` from the project root — the directory that holds ecompose.yml\n\
+           - point at the manifest explicitly:   eco up <path-to-ecompose.yml>\n\
+           - scaffold a manifest first:          eco init        (blank: `eco init --no-detect`)",
+        cwd.display()
+    );
+    if let Some(nearby) = nearby_manifest(start_dir) {
+        if let Some(dir) = nearby.parent() {
+            message.push_str(&format!(
+                "\n\n\
+                 A manifest was found in {} — run from there:\n\
+                 \x20 cd {} && eco up",
+                dir.display(),
+                dir.display()
+            ));
+        }
+    }
+    message
+}
+
 pub fn read_ecompose(input: &str, start_dir: &Path) -> Result<EcomposeRead, String> {
     let file_path = resolve_ecompose_file(input, start_dir)?;
+    if !file_path.is_file() {
+        return Err(manifest_missing_help(&file_path, start_dir));
+    }
     let content = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Failed to read {}: {e}", file_path.display()))?;
     Ok(EcomposeRead { file_path, content })
