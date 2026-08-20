@@ -20,7 +20,7 @@ fn parse_options(args: &[String]) -> (HashMap<String, String>, Vec<String>) {
             continue;
         }
         let key = arg[2..].to_string();
-        if key == "dry-run" || key == "staging" || key == "prod-only" {
+        if key == "dry-run" || key == "staging" || key == "prod-only" || key == "rebuild-frontends" || key == "force-frontend" {
             options.insert(key, "true".to_string());
             i += 1;
             continue;
@@ -2033,9 +2033,10 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
 
 fn skip_build_sync(name: &str) -> bool {
     // Build/dev artifacts must never be synced into the remote build dir: a
-    // stale local `.next`/`.vite` can carry dev-baked public URLs (localhost)
-    // into a production frontend build. Regenerable — the build recreates them.
-    ["node_modules", "target", ".git", ".env", ".env.local", ".next", ".vite", ".cache", ".eco"].contains(&name)
+    // stale local `.next`/`.vite`/`dist` can carry dev-baked public URLs or a
+    // stale framework config output (e.g. an old `trailingSlash`) into a
+    // production frontend build. Regenerable — the build recreates them.
+    ["node_modules", "target", ".git", ".env", ".env.local", ".next", ".vite", ".cache", ".eco", "dist", "build", ".output", "build-eco"].contains(&name)
 }
 
 // Syncs a local tree into the build location (VM or host cache).
@@ -2044,25 +2045,25 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
         std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
         return copy_tree_excluding(local_dir, Path::new(dest), &(skip_build_sync as fn(&str) -> bool));
     }
+    // Same exclusion set as the host path: build outputs and dev caches are
+    // never copied up, so a stale local build can't be mistaken for a fresh
+    // one when the hash-skip decides to reuse the builder's output.
+    let excludes = ["node_modules", "target", ".git", ".env", ".env.local", ".next", ".vite", ".cache", ".eco", "dist", "build", ".output", "build-eco"];
     let tar_path = std::env::temp_dir().join(format!("eco-builder-sync-{}.tar.gz", std::process::id()));
     let _ = std::fs::remove_file(&tar_path);
+    let mut tar_args: Vec<String> = Vec::new();
+    tar_args.push("czf".to_string());
+    tar_args.push(tar_path.display().to_string());
+    for name in excludes {
+        tar_args.push("--exclude".to_string());
+        tar_args.push(name.to_string());
+    }
+    tar_args.push("-C".to_string());
+    tar_args.push(local_dir.display().to_string());
+    tar_args.push(".".to_string());
     run_command(
         "tar",
-        &[
-            "czf".to_string(),
-            tar_path.display().to_string(),
-            "--exclude".to_string(),
-            "node_modules".to_string(),
-            "--exclude".to_string(),
-            "target".to_string(),
-            "--exclude".to_string(),
-            ".git".to_string(),
-            "--exclude".to_string(),
-            ".env".to_string(),
-            "-C".to_string(),
-            local_dir.display().to_string(),
-            ".".to_string(),
-        ],
+        &tar_args,
         &util::current_dir(),
     )?;
     let remote_tar = format!("/tmp/eco-builder-sync-{}.tar.gz", std::process::id());
@@ -2103,6 +2104,40 @@ fn is_nextjs_frontend(dir: &Path) -> bool {
         .ok()
         .map(|s| s.contains("\"next\""))
         .unwrap_or(false)
+}
+
+/// True for Astro adapter-node SSR frontends (dist/server/entry.mjs after
+/// build). Used to pick the right "build succeeded" marker for the frontend
+/// hash-skip, so a matching hash without real output forces a rebuild.
+fn is_astro_frontend(dir: &Path) -> bool {
+    dir.join("astro.config.mjs").is_file()
+        || dir.join("astro.config.mjs").exists()
+        || std::fs::read_to_string(dir.join("package.json"))
+            .ok()
+            .map(|s| s.contains("\"astro\""))
+            .unwrap_or(false)
+}
+
+/// True for SvelteKit adapter-node builds (build/index.js after build).
+fn is_sveltekit_dir(dir: &Path) -> bool {
+    ["svelte.config.js", "svelte.config.mjs", "svelte.config.cjs"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+        || std::fs::read_to_string(dir.join("package.json"))
+            .ok()
+            .map(|s| s.contains("@sveltejs/kit") || s.contains("svelte-kit"))
+            .unwrap_or(false)
+}
+
+/// True for plain Vite frontends (vite.config.* present).
+fn is_vite_dir(dir: &Path) -> bool {
+    ["vite.config.js", "vite.config.mjs", "vite.config.ts", "vite.config.cjs", "vite.config.mts", "vite.config.cts"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+        || std::fs::read_to_string(dir.join("package.json"))
+            .ok()
+            .map(|s| s.contains("\"vite\"") || s.contains("@vitejs"))
+            .unwrap_or(false)
 }
 
 fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
@@ -2670,7 +2705,7 @@ fn collect_frontend_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), Stri
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if path.is_dir() {
-            if ["target", "node_modules", ".git", ".next", "dist", "build", ".cache", ".eco"].contains(&name.as_str()) {
+            if ["target", "node_modules", ".git", ".next", "dist", "build", ".output", ".cache", ".eco", "build-eco"].contains(&name.as_str()) {
                 continue;
             }
             collect_frontend_inputs(&path, out)?;
@@ -3369,15 +3404,49 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // cache first: Next.js/Vite reuse cached chunks for unchanged modules,
         // so a rebuild after an env change could otherwise ship stale chunks
         // that still contain the old value (e.g. an old localhost API URL).
-        let env_wipe = "echo \"rebuilding frontend: clearing stale compiler output\"; rm -rf .next .vite .cache";
+        let env_wipe = "echo \"rebuilding frontend: clearing stale compiler output\"; rm -rf .next .vite .cache dist build .output build-eco";
+        // The hash-skip may only reuse a previous build when its actual output
+        // is present. A matching `.eco-frontend-hash` with no output (e.g. a
+        // build-dir name reused by a different project, or a wiped dist) would
+        // otherwise ship a stale or empty artifact — so verify the marker the
+        // framework produces before skipping.
+        let build_marker = if is_leptos {
+            "dist/index.html"
+        } else if is_static {
+            "index.html"
+        } else if is_nextjs_frontend(dir) {
+            ".next/standalone/server.js"
+        } else if is_astro_frontend(dir) {
+            "dist/server/entry.mjs"
+        } else if is_sveltekit_dir(dir) {
+            "build/index.js"
+        } else if is_vite_dir(dir) {
+            "dist/index.html"
+        } else {
+            "dist"
+        };
+        let skip_guard = format!(
+            "if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ] && [ -f .eco-frontend-envhash ] && [ \"$(cat .eco-frontend-envhash)\" = \"{env_hash}\" ] && [ -e {} ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi",
+            shell_single_quote(build_marker)
+        );
+        // --rebuild-frontends / --force-frontend: ignore the hash-skip and
+        // force a fresh build (and clear any stale hash markers so the next
+        // deploy isn't confused by them).
+        let force_rebuild = options.get("rebuild-frontends").map(|v| v == "true").unwrap_or(false)
+            || options.get("force-frontend").map(|v| v == "true").unwrap_or(false);
+        let force_prefix = if force_rebuild {
+            format!("echo \"forcing frontend rebuild (--rebuild-frontends)\"; rm -f .eco-frontend-hash .eco-frontend-envhash; {env_wipe}\n")
+        } else {
+            String::new()
+        };
         let script = if is_leptos {
             format!(
-                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ] && [ -f .eco-frontend-envhash ] && [ \"$(cat .eco-frontend-envhash)\" = \"{env_hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\n{env_wipe}\nif ! command -v trunk >/dev/null 2>&1; then cargo install trunk --locked; fi && rustup target add wasm32-unknown-unknown 2>/dev/null || true; trunk build --release && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
+                "cd {} && {exports}{force_prefix}{skip_guard}\n{env_wipe}\nif ! command -v trunk >/dev/null 2>&1; then cargo install trunk --locked; fi && rustup target add wasm32-unknown-unknown 2>/dev/null || true; trunk build --release && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
                 shell_single_quote(&build_dir)
             )
         } else {
             format!(
-                "cd {} && {exports}if [ -f .eco-frontend-hash ] && [ \"$(cat .eco-frontend-hash)\" = \"{hash}\" ] && [ -f .eco-frontend-envhash ] && [ \"$(cat .eco-frontend-envhash)\" = \"{env_hash}\" ]; then echo \"frontend unchanged, skipping rebuild\"; exit 0; fi\n{env_wipe}\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund --legacy-peer-deps; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
+                "cd {} && {exports}{force_prefix}{skip_guard}\n{env_wipe}\nif [ -f package-lock.json ]; then npm ci --no-audit --no-fund || npm install --no-audit --no-fund --legacy-peer-deps; elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; else npm install --no-audit --no-fund --legacy-peer-deps; fi && ECO_DEPLOY_MODE=prod npm run build --if-present && printf '{hash}' > .eco-frontend-hash && printf '{env_hash}' > .eco-frontend-envhash",
                 shell_single_quote(&build_dir)
             )
         };
