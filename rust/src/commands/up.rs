@@ -2000,6 +2000,32 @@ fn download_to(url: &str, dest: &Path) -> Result<(), String> {
     run_command("curl", &args, &util::current_dir())
 }
 
+// Run a command while showing an npm-style spinner, so long provisioning steps
+// (VM image download, first boot, toolchain bootstrap — minutes of silence
+// otherwise) never look frozen. The spinner line is cleared when done.
+fn run_capture_with_spinner(program: &str, args: &[String], label: &str) -> Result<util::Captured, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let done_spinner = done.clone();
+    let label = label.to_string();
+    let handle = std::thread::spawn(move || {
+        const CHARS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let mut i = 0usize;
+        while !done_spinner.load(Ordering::Relaxed) {
+            print!("\r\x1b[2K{label} {}", CHARS[i % CHARS.len()]);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            i += 1;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        print!("\r\x1b[2K");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    });
+    let result = run_capture(program, args, &util::current_dir());
+    done.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    result
+}
+
 // Create + start the eco-builder VM from the bundled template, then bootstrap
 // the pinned toolchain inside it (limactl start on a running VM is a no-op;
 // the bootstrap script self-checks every tool, so both are re-runnable).
@@ -2029,7 +2055,7 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
             yml.display().to_string(),
         ]
     };
-    let result = run_capture("limactl", &start_args, &util::current_dir())?;
+    let result = run_capture_with_spinner("limactl", &start_args, "Starting secure builder (Lima VM)")?;
     if result.code != 0 && !builder_available() {
         // A leftover instance — possibly created by an older tool with an arch
         // limactl cannot manage ("unsupported arch") — refuses to resume and
@@ -2042,7 +2068,7 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
             print_step(&format!("Removing stale builder instance at {}", instance_dir.display()));
             let _ = std::fs::remove_dir_all(&instance_dir);
         }
-        let recreate = run_capture(
+        let recreate = run_capture_with_spinner(
             "limactl",
             &[
                 "start".to_string(),
@@ -2051,7 +2077,7 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
                 "--tty=false".to_string(),
                 yml.display().to_string(),
             ],
-            &util::current_dir(),
+            "Creating secure builder (Lima VM)",
         )?;
         if recreate.code != 0 {
             let detail = recreate.stderr.lines().next().unwrap_or("").trim().to_string();
@@ -2087,7 +2113,7 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
         "Bootstrapping pinned toolchain in `{}` (rust, zig, node, bun — first run takes a while)…",
         builder_name()
     ));
-    run_command(
+    run_capture_with_spinner(
         "limactl",
         &[
             "shell".to_string(),
@@ -2096,7 +2122,7 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
             "bash".to_string(),
             "/tmp/eco-builder-bootstrap.sh".to_string(),
         ],
-        &util::current_dir(),
+        "Bootstrapping builder toolchain",
     )?;
 
     print_step(&format!("Builder VM `{}` ready (toolchain bootstrapped).", builder_name()));
