@@ -115,6 +115,28 @@ fn readline(prompt: &str) -> Result<String, String> {
     Ok(line.trim().to_string())
 }
 
+// Password prompt with terminal echo suppressed (like `read -s`). Falls back
+// to plain input on non-Unix (or when stdin is not a terminal — e.g. piped).
+fn read_secret(prompt: &str) -> Result<String, String> {
+    use std::io::Write;
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("sh").args(["-c", "stty -echo"]).status();
+        let read_result = std::io::stdin().read_line(&mut line);
+        let _ = std::process::Command::new("sh").args(["-c", "stty echo"]).status();
+        println!();
+        read_result.map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    }
+    Ok(line.trim().to_string())
+}
+
 // Open the login URL in the platform's default browser. Returns false when no
 // browser opener is available (or it failed), so the caller can fall back to
 // printing the URL for the user to open manually.
@@ -210,12 +232,12 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
             if email.is_empty() {
                 return Err("usage: eco signup <email>".to_string());
             }
-            let password = readline("Password (min 8 chars): ").unwrap_or_default();
+            let password = read_secret("Password (min 8 chars): ").unwrap_or_default();
             do_signup(&api_url, &email, &password)
         }
         "login" => {
             if let Some(email) = rest.first() {
-                let password = readline("Password: ").unwrap_or_default();
+                let password = read_secret("Password: ").unwrap_or_default();
                 do_login(&api_url, email, &password)
             } else {
                 do_device_login(&api_url)
