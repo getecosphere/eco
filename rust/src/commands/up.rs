@@ -3700,7 +3700,7 @@ pub fn run_up(args: &[String]) -> Result<(), String> {    if args.first().map(|s
 
     // Client-only build: direct on-host provisioning lives in the private
     // eco-agent binary. A plain `eco up` on a dev machine runs local dev mode.
-    util::println_stdout("Not on a Proxmox host \u{2014} running in dev mode.");
+    util::println_stdout("Running in local dev mode");
     run_up_dev(args)
 }
 /// Install `lxs:` services into the local dev workspace, mirroring the CT
