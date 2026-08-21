@@ -1871,7 +1871,7 @@ fn prepend_tool_paths() {
 // Ensure a local Linux builder is reachable, provisioning it when missing.
 fn ensure_builder() -> Result<(), String> {
     if builder_is_host() {
-        return Ok(()); // explicit ECO_BUILDER=host (dev-only) — nothing to provision
+        return Ok(()); // explicit ECO_BUILDER=host — nothing to provision
     }
     if !util::env_var_or("ECO_BUILDER_CMD", "").is_empty() {
         return Ok(()); // custom builder exec — provisioning is the caller's job
@@ -1879,23 +1879,31 @@ fn ensure_builder() -> Result<(), String> {
 
     prepend_tool_paths();
 
-    if !limactl_available() {
-        if multipass_available() {
-            // Multipass fallback: start an existing VM, but never create one.
-            if !builder_available() {
-                return Err(format!(
-                    "Multipass builder `{}` is not running. Start it (`multipass start {}`), or install Lima (`brew install lima`) so eco can provision it automatically.",
-                    builder_name(),
-                    builder_name()
-                ));
+    let provision = (|| -> Result<(), String> {
+        if !limactl_available() {
+            if multipass_available() {
+                // Multipass fallback: start an existing VM, but never create one.
+                if !builder_available() {
+                    return Err("the Multipass builder is not running".to_string());
+                }
+                return Ok(());
             }
-            return Ok(());
+            print_step("No local Linux builder VM is reachable — provisioning Lima (one-time)");
+            ensure_lima_installed()?;
         }
-        print_step("No local Linux builder VM is reachable — provisioning Lima (one-time)");
-        ensure_lima_installed()?;
+        ensure_eco_builder_vm()
+    })();
+    if let Err(e) = provision {
+        // The developer's own machine IS the build farm — a Linux builder VM
+        // is an isolation optimization, never a hard requirement. Fall back to
+        // building on this machine (cargo zigbuild cross-compiles linux-musl
+        // natively) instead of blocking the deploy.
+        print_step(&format!(
+            "Could not provision the Linux builder VM ({e}) — building on this machine instead (your machine is the build farm)."
+        ));
+        std::env::set_var("ECO_BUILDER", "host");
     }
-
-    ensure_eco_builder_vm()
+    Ok(())
 }
 
 fn ensure_lima_installed() -> Result<(), String> {
@@ -3203,6 +3211,15 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    // Provision the local Linux builder (Lima eco-builder VM) when a remote
+    // build needs one and none is present — installs Lima + starts the VM +
+    // bootstraps the toolchain. No-op when already up; on failure it falls back
+    // to building on this machine, so this must run BEFORE the toolchain
+    // decision below picks the zig/cargo-zigbuild host path.
+    if !rust_targets.is_empty() || !frontend_targets.is_empty() {
+        ensure_builder()?;
+    }
+
     let zig_dir: Option<PathBuf> = if builder_is_host() {
         ensure_cross_toolchain()?
     } else {
@@ -3296,14 +3313,6 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 }
             }
         }
-    }
-
-    // Provision the local Linux builder (Lima eco-builder VM) when a remote
-    // build needs one and none is present — installs Lima + starts the VM +
-    // bootstraps the toolchain. No-op when already up.
-    let needs_builder = !rust_targets.is_empty() || !frontend_targets.is_empty();
-    if needs_builder {
-        ensure_builder()?;
     }
 
     // Cross-compile each service and collect artifacts + source hashes.
