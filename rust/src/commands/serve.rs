@@ -22,29 +22,30 @@ use crate::util;
 fn serve_help() {
     let text = r#"eco serve
 
-Expose a locally-running dev app (started by `eco up dev`) through a temporary
-public URL, e.g. https://mychat.getecosphere.app.
+Run your app locally and publish it to a temporary public URL — e.g.
+https://mychat.getecosphere.app.
 
 Usage:
-  eco serve <subdomain> [--port <port>] [--release]
+  eco serve [<subdomain>] [--port <port>] [--release]
   eco serve stop <subdomain>
   eco serve list
 
-  <subdomain>   The name before .getecosphere.app (lowercase letters, digits,
-                hyphens). eco checks for conflicts before reserving it.
-  --port        Local port of the app to expose (default: read from ecompose.yml,
-                else 3000).
-  --release     Reserve nothing — only tear down an existing assignment.
-  stop <sub>    Release an active subdomain.
-  list          Show all active serve assignments on this host.
+  eco serve         asks for a subdomain, runs your app (eco up dev), and
+                    publishes it — ready for anyone with the URL.
+  <subdomain>       The name before .getecosphere.app (lowercase letters,
+                    digits, hyphens). eco checks for conflicts before reserving.
+  --port            Local port to expose (default: ecompose.yml, else 3000).
+  --release         Only tear down an existing assignment.
+  stop <sub>        Release an active subdomain.
+  list              Show all active serve assignments on this host.
 
 While the tunnel runs, eco shows live Ingress/Egress transfer in green bold
 plus your daily meter (free tier). Free sessions have no time limit; the daily
 transfer resets every day at midnight UTC.
 
 The chosen subdomain is recorded in ecompose.yml (serve.subdomain) so a later
-`eco up dev && eco serve` can reuse it. Press Ctrl+C to stop the tunnel and
-release the subdomain.
+`eco serve` can reuse it. Press Ctrl+C to stop the tunnel, release the
+subdomain, and stop the local app.
 
 The host-side agent (subdomain reservation, DNS, tunnel token, daily meter)
 runs as the private eco-agent binary on the server ("eco serve --port 8790");
@@ -252,7 +253,7 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
         }
     }
 
-    if first == "help" || first == "--help" || first == "-h" || (first.is_empty() && subdomain.is_empty() && !release_only) {
+    if first == "help" || first == "--help" || first == "-h" {
         serve_help();
         return Ok(());
     }
@@ -269,7 +270,16 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
         return run_list(&api_url, &api_key);
     }
     if subdomain.is_empty() && !release_only {
-        return Err("usage: eco serve <subdomain> [--port <port>]\nRun \"eco serve help\" for details.".to_string());
+        // `eco serve` with no subdomain asks for one interactively.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let sub = prompt_line("Pick a subdomain for your app (e.g. mychat): ")?;
+            if sub.is_empty() {
+                return Err("no subdomain given".to_string());
+            }
+            subdomain = sub;
+        } else {
+            return Err("usage: eco serve <subdomain> [--port <port>]\nRun \"eco serve help\" for details.".to_string());
+        }
     }
 
     let (api_url, api_key) = resolve_api_credentials()?;
@@ -313,6 +323,24 @@ fn run_tunnel(
         "3000".to_string()
     };
     let port_num: u16 = port.parse().map_err(|_| format!("invalid --port: {port}"))?;
+
+    // Run the app locally (this is serve's core job): stop any running dev
+    // instance for this project, start `eco up dev`, and wait for the target
+    // port to accept connections before reserving a public URL.
+    if !project.is_empty() {
+        util::println_stdout("Preparing your app for the world…");
+        util::println_stdout("Running your app locally…");
+        stop_dev_apps(project);
+        start_dev_app();
+        if !wait_for_port(port_num, 180) {
+            return Err(format!(
+                "Your app did not start listening on http://localhost:{port_num} within 3 minutes. Check the `eco up dev` output."
+            ));
+        }
+        util::println_stdout(&format!("App is up on http://localhost:{port_num}"));
+    } else {
+        util::println_stdout("Preparing your app for the world…");
+    }
 
     // Reserve through the host agent (conflict check + DNS + tunnel token +
     // metered daily quota).
@@ -435,11 +463,67 @@ fn run_tunnel(
     );
     let _ = api_delete_json(&format!("{api_url}/v1/serve/{subdomain}"), &api_key);
 
+    // Stop the local dev app we started.
+    if !project.is_empty() {
+        util::println_stdout("Stopping the local app…");
+        stop_dev_apps(project);
+    }
+
     if status.success() {
         Ok(())
     } else {
         Err(util::describe_status("cloudflared", &status))
     }
+}
+
+fn prompt_line(prompt: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| format!("read input: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
+// Stop every PM2 dev app for this project (named `<project>-<service>`), so a
+// re-run of `eco serve` starts a clean instance.
+fn stop_dev_apps(project: &str) {
+    let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir()) else {
+        return;
+    };
+    let Ok(list) = serde_json::from_str::<serde_json::Value>(&captured.stdout) else {
+        return;
+    };
+    if let Some(apps) = list.as_array() {
+        for app in apps {
+            if let Some(name) = app.get("name").and_then(|n| n.as_str()) {
+                if name.starts_with(&format!("{project}-")) {
+                    let _ = util::run_capture("pm2", &["delete".to_string(), name.to_string()], &util::current_dir());
+                }
+            }
+        }
+    }
+}
+
+// Start the local dev app by running `eco up dev` in the background (PM2 keeps
+// the services running after the command returns).
+fn start_dev_app() {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("eco"));
+    let _ = Command::new(exe).args(["up", "dev"]).spawn();
+}
+
+// Poll until the app's port accepts TCP connections (or the timeout passes).
+fn wait_for_port(port: u16, timeout_secs: u64) -> bool {
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
 }
 
 use std::io::{Read as _, Write as _};
