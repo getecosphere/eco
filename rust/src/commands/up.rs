@@ -2029,17 +2029,36 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
     // Capture limactl output so its INFO/FATA log noise stays hidden; surface
     // a concise, actionable error instead.
     let result = run_capture("limactl", &start_args, &util::current_dir())?;
-    if result.code != 0 {
-        let first_line = result.stderr.lines().next().unwrap_or("").trim().to_string();
-        return Err(format!(
-            "Could not start the builder VM `{}`.{} Fix: start it manually with `limactl start {}` and re-run.",
-            builder_name(),
-            if first_line.is_empty() { String::new() } else { format!(" ({first_line})") },
-            builder_name()
-        ));
+    if result.code != 0 && !builder_available() {
+        // A leftover instance (e.g. a partial create from an earlier failed
+        // run) can refuse to resume. Delete it and recreate from the template.
+        print_step(&format!("Builder VM `{}` is stuck — recreating it from the template…", builder_name()));
+        let _ = run_capture("limactl", &["delete".to_string(), "--force".to_string(), builder_name()], &util::current_dir());
+        let recreate = run_capture(
+            "limactl",
+            &[
+                "start".to_string(),
+                "--name".to_string(),
+                builder_name(),
+                "--tty=false".to_string(),
+                yml.display().to_string(),
+            ],
+            &util::current_dir(),
+        )?;
+        if recreate.code != 0 {
+            return Err(format!(
+                "Could not start the builder VM `{}`. Install Lima (`brew install lima`), run `limactl start {}`, and re-run — or set ECO_BUILDER=host to build on this machine (dev only).",
+                builder_name(),
+                builder_name()
+            ));
+        }
     }
     if !builder_available() {
-        return Err(format!("Builder VM `{}` is not Running after `limactl start`.", builder_name()));
+        return Err(format!(
+            "Builder VM `{}` did not become ready. Install Lima (`brew install lima`), run `limactl start {}`, and re-run.",
+            builder_name(),
+            builder_name()
+        ));
     }
 
     // Bootstrap the pinned toolchain inside the VM (idempotent).
