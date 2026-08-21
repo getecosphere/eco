@@ -23,14 +23,14 @@ fn serve_help() {
     let text = r#"eco serve
 
 Expose a locally-running dev app (started by `eco up dev`) through a temporary
-public URL, e.g. https://mychat.getecosphere.com.
+public URL, e.g. https://mychat.getecosphere.app.
 
 Usage:
   eco serve <subdomain> [--port <port>] [--release]
   eco serve stop <subdomain>
   eco serve list
 
-  <subdomain>   The name before .getecosphere.com (lowercase letters, digits,
+  <subdomain>   The name before .getecosphere.app (lowercase letters, digits,
                 hyphens). eco checks for conflicts before reserving it.
   --port        Local port of the app to expose (default: read from ecompose.yml,
                 else 3000).
@@ -38,13 +38,17 @@ Usage:
   stop <sub>    Release an active subdomain.
   list          Show all active serve assignments on this host.
 
+While the tunnel runs, eco shows live Ingress/Egress transfer in green bold
+plus your daily meter (free tier). Free sessions have no time limit; the daily
+transfer resets every day at midnight UTC.
+
 The chosen subdomain is recorded in ecompose.yml (serve.subdomain) so a later
 `eco up dev && eco serve` can reuse it. Press Ctrl+C to stop the tunnel and
 release the subdomain.
 
-The host-side agent (subdomain reservation, DNS, tunnel token) runs as the
-private eco-agent binary on the server ("eco serve --port 8790"); this build
-is client-only and talks to it over HTTP.
+The host-side agent (subdomain reservation, DNS, tunnel token, daily meter)
+runs as the private eco-agent binary on the server ("eco serve --port 8790");
+this build is client-only and talks to it over HTTP.
 "#;
     print!("{text}");
 }
@@ -310,9 +314,10 @@ fn run_tunnel(
     };
     let port_num: u16 = port.parse().map_err(|_| format!("invalid --port: {port}"))?;
 
-    // Reserve through the host agent (conflict check + DNS + tunnel token).
+    // Reserve through the host agent (conflict check + DNS + tunnel token +
+    // metered daily quota).
     let origin = format!("http://localhost:{port_num}");
-    util::println_stdout(&format!("Reserving {subdomain}.getecosphere.com -> {origin}..."));
+    util::println_stdout(&format!("Reserving {subdomain}.getecosphere.app -> {origin}..."));
     let body = serde_json::json!({
         "subdomain": subdomain,
         "origin": origin,
@@ -342,6 +347,8 @@ fn run_tunnel(
     if hostname.is_empty() || tunnel_token.is_empty() {
         return Err("agent did not return a hostname/tunnel token".to_string());
     }
+    let quota_mb = reserved.get("quota_mb").and_then(|q| q.as_u64()).unwrap_or(0);
+    let used_mb = reserved.get("used_mb").and_then(|q| q.as_u64()).unwrap_or(0);
 
     if !ecompose_path.as_os_str().is_empty() && !project.is_empty() {
         let _ = write_serve_block(ecompose_path, subdomain);
@@ -349,19 +356,66 @@ fn run_tunnel(
 
     ensure_cloudflared()?;
 
-    let url = format!("https://{hostname}");
-    util::println_stdout(&format!("\n  Public URL: {url}\n  Local app:  {origin}\n\n  Press Ctrl+C to stop the tunnel and release the subdomain.\n"));
+    // Count every byte the tunnel moves. cloudflared talks to a local counting
+    // proxy that pipes to the real app, so Ingress/Egress are exact regardless
+    // of protocol (HTTP, WebSocket, ...). Traffic never passes through the
+    // agent — the client reports the totals on stop for the daily meter.
+    let (proxy_port, meter) = start_counting_proxy(port_num)?;
 
+    let url = format!("https://{hostname}");
+    util::println_stdout(&format!("\n  Public URL: {url}\n  Local app:  {origin}\n"));
+    if quota_mb > 0 {
+        let (h, m) = minutes_until_utc_midnight();
+        let pct = (used_mb as f64 / quota_mb as f64 * 100.0).max(0.0);
+        if pct >= 90.0 {
+            util::println_stdout(&format!(
+                "  \x1b[1;33mDaily transfer: {used_mb} MB / {quota_mb} MB used \u{2014} resets in {h}h {m}m. Upgrade for unlimited.\x1b[0m"
+            ));
+        } else {
+            util::println_stdout(&format!(
+                "  Daily transfer: {used_mb} MB / {quota_mb} MB used today \u{00b7} resets in {h}h {m}m"
+            ));
+        }
+        util::println_stdout(&format!(
+            "  Free serve sessions have no time limit. When you want your estate always-on,\n  Starter is \x1b[1m$2/mo\x1b[0m \u{2014} hosted on our servers with 2 GB/mo transfer and no daily\n  resets. No pressure \u{2014} it will be here when you need it (getecosphere.com)."
+        ));
+    }
+    util::println_stdout("  \n  Press Ctrl+C to stop the tunnel and release the subdomain.\n");
+
+    let meter_handle = start_meter(&meter);
+
+    // Keep the terminal clean: cloudflared's own logging goes to a temp file;
+    // stdin stays inherited so Ctrl+C reaches it.
+    let log_path = std::env::temp_dir().join(format!("eco-serve-{}.log", subdomain));
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("open serve log {}: {e}", log_path.display()))?;
     let status = Command::new("cloudflared")
-        .args(["tunnel", "run", "--token", &tunnel_token, "--url", &origin])
+        .args(["tunnel", "run", "--token", &tunnel_token, "--url", &format!("http://127.0.0.1:{proxy_port}")])
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?))
+        .stderr(Stdio::from(log_file))
         .status()
         .map_err(|e| format!("cloudflared failed to start: {e} (is it installed?)"))?;
 
-    // cloudflared exited: release the subdomain regardless of exit code.
-    util::println_stdout("\nTunnel stopped. Releasing subdomain...");
+    meter.done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = meter_handle.join();
+    print!("\x1b[2A\r\x1b[2K\x1b[1;32mIngress:\x1b[0m {:.1} MB\n\x1b[2K\x1b[1;32mEgress:\x1b[0m {:.1} MB\n", bytes_to_mb(meter.ingress.load(Ordering::Relaxed)), bytes_to_mb(meter.egress.load(Ordering::Relaxed)));
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+
+    // Report measured usage to the agent, then release the subdomain.
+    util::println_stdout("\nTunnel stopped. Recording usage + releasing subdomain...");
+    let _ = api_post_json(
+        &format!("{api_url}/v1/serve/{subdomain}/usage"),
+        &api_key,
+        &serde_json::json!({
+            "ingress_bytes": meter.ingress.load(Ordering::Relaxed),
+            "egress_bytes": meter.egress.load(Ordering::Relaxed),
+        }),
+    );
     let _ = api_delete_json(&format!("{api_url}/v1/serve/{subdomain}"), &api_key);
 
     if status.success() {
@@ -369,4 +423,97 @@ fn run_tunnel(
     } else {
         Err(util::describe_status("cloudflared", &status))
     }
+}
+
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+struct TunnelMeter {
+    ingress: Arc<AtomicU64>,
+    egress: Arc<AtomicU64>,
+    done: Arc<AtomicBool>,
+}
+
+fn bytes_to_mb(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+// Time until the daily meter resets (midnight UTC) — a live countdown on the
+// quota line so free users know exactly when their allowance refreshes.
+fn minutes_until_utc_midnight() -> (u64, u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let remaining = 86400 - (now % 86400);
+    (remaining / 3600, (remaining % 3600) / 60)
+}
+
+// A protocol-agnostic counting proxy: cloudflared connects here, it pipes to
+// the app, and every byte is counted in its direction. Ingress = bytes coming
+// in from visitors (cloudflared → app), Egress = bytes the app sends back.
+fn start_counting_proxy(app_port: u16) -> Result<(u16, TunnelMeter), String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind counting proxy: {e}"))?;
+    let proxy_port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let ingress = Arc::new(AtomicU64::new(0));
+    let egress = Arc::new(AtomicU64::new(0));
+    let meter = TunnelMeter {
+        ingress: ingress.clone(),
+        egress: egress.clone(),
+        done: Arc::new(AtomicBool::new(false)),
+    };
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(visitor) = stream else { break };
+            let Ok(upstream) = TcpStream::connect(("127.0.0.1", app_port)) else { continue };
+            let _ = visitor.set_nodelay(true);
+            let _ = upstream.set_nodelay(true);
+            let Ok(visitor_w) = visitor.try_clone() else { continue };
+            let Ok(upstream_w) = upstream.try_clone() else { continue };
+            let ingress = ingress.clone();
+            let egress = egress.clone();
+            std::thread::spawn(move || { let _ = pipe(visitor, upstream_w, &ingress); });
+            std::thread::spawn(move || { let _ = pipe(upstream, visitor_w, &egress); });
+        }
+    });
+    Ok((proxy_port, meter))
+}
+
+fn pipe(mut src: TcpStream, mut dst: TcpStream, counter: &Arc<AtomicU64>) -> std::io::Result<()> {
+    let mut buf = [0u8; 16384];
+    loop {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n])?;
+        counter.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+// Live meter: two lines, updated in place every second, with the labels in
+// green bold. Cursor gymnastics keep the terminal free of scroll spam.
+fn start_meter(meter: &TunnelMeter) -> std::thread::JoinHandle<()> {
+    let ingress = meter.ingress.clone();
+    let egress = meter.egress.clone();
+    let done = meter.done.clone();
+    let mut first = true;
+    std::thread::spawn(move || loop {
+        if done.load(Ordering::Relaxed) {
+            break;
+        }
+        let i = bytes_to_mb(ingress.load(Ordering::Relaxed));
+        let e = bytes_to_mb(egress.load(Ordering::Relaxed));
+        if first {
+            print!("\x1b[1;32mIngress:\x1b[0m {i:.1} MB\n\x1b[1;32mEgress:\x1b[0m {e:.1} MB");
+            first = false;
+        } else {
+            print!("\x1b[2A\r\x1b[2K\x1b[1;32mIngress:\x1b[0m {i:.1} MB\n\x1b[2K\x1b[1;32mEgress:\x1b[0m {e:.1} MB");
+        }
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(Duration::from_millis(1000));
+    })
 }
