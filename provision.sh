@@ -28,6 +28,12 @@ else
   SUDO="sudo"
 fi
 
+# Non-interactive package management: never prompt (debconf/whiptail) for
+# confirmations or build-dependency questions during provisioning. Set for the
+# whole run, and passed explicitly through sudo via `sudo env ...` because
+# sudo's env_reset strips inline `VAR=value` assignments.
+export DEBIAN_FRONTEND=noninteractive
+
 log() {
   echo -e "${CYAN}$*${RESET}"
 }
@@ -503,14 +509,14 @@ linux_family() {
 apt_update_once() {
   if [[ "$APT_UPDATED" -eq 0 ]]; then
     log "Updating apt package index..."
-    $SUDO apt-get update
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
     APT_UPDATED=1
   fi
 }
 
 apt_install() {
   apt_update_once
-  DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y "$@"
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
 
 ensure_apt_repo_prereqs() {
@@ -925,7 +931,7 @@ OVERRIDE
       bash "$SCRIPT_DIR/install-onnxruntime.sh" --ensure
       ;;
     ffmpeg)
-      apt-get update -qq && apt-get install -y -qq ffmpeg
+      apt_install ffmpeg
       ;;
     leptos)
       # Leptos/Rust frontend — a static wasm site (trunk dist). No runtime to
