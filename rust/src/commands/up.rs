@@ -2905,7 +2905,8 @@ fn reserve_public_domain(
                 }
                 util::println_stdout(&format!("\n  Reserved \x1b[1m{hostname}\x1b[0m"));
                 util::println_stdout("  Free subdomains are temporary — yours while the estate runs.");
-                util::println_stdout("  Starter ($2/mo) makes it permanently yours.\n");
+                util::println_stdout("  Starter ($2/mo) makes it permanently yours — your estate runs in our");
+                util::println_stdout("  global compute engine 24/7.\n");
                 return Ok(if lease_key.is_empty() { None } else { Some(lease_key) });
             }
             Err(e) if e.contains("already") => {
