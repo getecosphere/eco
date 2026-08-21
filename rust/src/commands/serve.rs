@@ -384,6 +384,23 @@ fn run_tunnel(
 
     let meter_handle = start_meter(&meter);
 
+    // Keep the lease alive while the tunnel runs: the agent reclaims any lease
+    // that stops heartbeating (hard kill / power loss), so this ping is what
+    // makes the subdomain stay reserved.
+    {
+        let api_url = api_url.to_string();
+        let api_key = api_key.to_string();
+        let sub = subdomain.to_string();
+        let done = meter.done.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(60));
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+            let _ = api_post_json(&format!("{api_url}/v1/serve/{sub}/heartbeat"), &api_key, &serde_json::json!({}));
+        });
+    }
+
     // Keep the terminal clean: cloudflared's own logging goes to a temp file;
     // stdin stays inherited so Ctrl+C reaches it.
     let log_path = std::env::temp_dir().join(format!("eco-serve-{}.log", subdomain));
