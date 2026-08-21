@@ -3718,8 +3718,8 @@ The shipped artifacts exceed the limit; reduce what is being built/shipped."
         let ssh = util::env_var_or("ECO_SSH", "");
         if !ssh.is_empty() {
             print_step(&format!(
-                "remote payload is {} MB — shipping via scp to {ssh}",
-                bytes.len() / (1024 * 1024)
+                "ECO_SSH is set ({ssh}) — shipping the payload via scp (developer/admin path). \
+                 Remove ECO_SSH from your environment to deploy over the standard agent upload."
             ));
             let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
             let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
