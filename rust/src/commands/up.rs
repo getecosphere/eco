@@ -1871,7 +1871,7 @@ fn prepend_tool_paths() {
 // Ensure a local Linux builder is reachable, provisioning it when missing.
 fn ensure_builder() -> Result<(), String> {
     if builder_is_host() {
-        return Ok(()); // explicit ECO_BUILDER=host — nothing to provision
+        return Ok(()); // explicit ECO_BUILDER=host (dev-only opt-out)
     }
     if !util::env_var_or("ECO_BUILDER_CMD", "").is_empty() {
         return Ok(()); // custom builder exec — provisioning is the caller's job
@@ -1879,31 +1879,26 @@ fn ensure_builder() -> Result<(), String> {
 
     prepend_tool_paths();
 
-    let provision = (|| -> Result<(), String> {
-        if !limactl_available() {
-            if multipass_available() {
-                // Multipass fallback: start an existing VM, but never create one.
-                if !builder_available() {
-                    return Err("the Multipass builder is not running".to_string());
-                }
-                return Ok(());
+    // Production artifacts are ONLY built inside the isolated Linux builder VM
+    // — never on a client machine. This is the SOC2/ISO27001 compliance line,
+    // so --remote builds are mandatory through Lima; a failure to provision is
+    // a graceful exit, not a silent fallback to client-side compilation.
+    if !limactl_available() {
+        if multipass_available() {
+            if !builder_available() {
+                return Err(format!(
+                    "The Linux builder `{}` is not running. Start it (`multipass start {}`), or install Lima so eco can provision it automatically.",
+                    builder_name(),
+                    builder_name()
+                ));
             }
-            print_step("No local Linux builder VM is reachable — provisioning Lima (one-time)");
-            ensure_lima_installed()?;
+            return Ok(());
         }
-        ensure_eco_builder_vm()
-    })();
-    if let Err(e) = provision {
-        // The developer's own machine IS the build farm — a Linux builder VM
-        // is an isolation optimization, never a hard requirement. Fall back to
-        // building on this machine (cargo zigbuild cross-compiles linux-musl
-        // natively) instead of blocking the deploy.
-        print_step(&format!(
-            "Could not provision the Linux builder VM ({e}) — building on this machine instead (your machine is the build farm)."
-        ));
-        std::env::set_var("ECO_BUILDER", "host");
+        print_step("Starting secure builder with Lima VM (production binaries are built in an isolated Linux VM — never on a client machine)…");
+        ensure_lima_installed()?;
     }
-    Ok(())
+
+    ensure_eco_builder_vm()
 }
 
 fn ensure_lima_installed() -> Result<(), String> {
@@ -2013,6 +2008,10 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
         return Ok(());
     }
     let yml = embedded::bundled_script_path("eco-builder.lima.yml")?;
+    print_step(&format!(
+        "Starting secure builder with Lima VM (`{}`) — production artifacts are built in an isolated Linux VM, never on a client machine…",
+        builder_name()
+    ));
     // Resume an existing (stopped) instance by name; create it from the
     // template only when it does not exist yet — `limactl start <template>`
     // errors with "already exists" for an existing stopped instance.
@@ -2030,18 +2029,19 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
             yml.display().to_string(),
         ]
     };
-    print_step(&format!(
-        "Starting builder VM `{}` (first run downloads the Ubuntu image — a few minutes)…",
-        builder_name()
-    ));
-    // Capture limactl output so its INFO/FATA log noise stays hidden; surface
-    // a concise, actionable error instead.
     let result = run_capture("limactl", &start_args, &util::current_dir())?;
     if result.code != 0 && !builder_available() {
-        // A leftover instance (e.g. a partial create from an earlier failed
-        // run) can refuse to resume. Delete it and recreate from the template.
-        print_step(&format!("Builder VM `{}` is stuck — recreating it from the template…", builder_name()));
-        let _ = run_capture("limactl", &["delete".to_string(), "--force".to_string(), builder_name()], &util::current_dir());
+        // A leftover instance — possibly created by an older tool with an arch
+        // limactl cannot manage ("unsupported arch") — refuses to resume and
+        // even refuses `limactl delete`. Remove its directory directly and
+        // recreate from the bundled template.
+        print_step(&format!("Builder VM `{}` is unusable — recreating it from the template…", builder_name()));
+        let del = run_capture("limactl", &["delete".to_string(), "--force".to_string(), builder_name()], &util::current_dir());
+        let instance_dir = Path::new(&util::home_dir()).join(".lima").join(builder_name());
+        if del.as_ref().map(|d| d.code != 0).unwrap_or(true) || instance_dir.exists() {
+            print_step(&format!("Removing stale builder instance at {}", instance_dir.display()));
+            let _ = std::fs::remove_dir_all(&instance_dir);
+        }
         let recreate = run_capture(
             "limactl",
             &[
@@ -2054,17 +2054,20 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
             &util::current_dir(),
         )?;
         if recreate.code != 0 {
+            let detail = recreate.stderr.lines().next().unwrap_or("").trim().to_string();
             return Err(format!(
-                "Could not start the builder VM `{}`. Install Lima (`brew install lima`), run `limactl start {}`, and re-run — or set ECO_BUILDER=host to build on this machine (dev only).",
-                builder_name(),
-                builder_name()
+                "Can't complete Lima Provisioning. Reason: {}",
+                if detail.is_empty() {
+                    "limactl could not start the builder VM".to_string()
+                } else {
+                    detail
+                }
             ));
         }
     }
     if !builder_available() {
         return Err(format!(
-            "Builder VM `{}` did not become ready. Install Lima (`brew install lima`), run `limactl start {}`, and re-run.",
-            builder_name(),
+            "Can't complete Lima Provisioning. Reason: the `{}` builder VM did not become ready (check disk space and the Lima/QEMU backend).",
             builder_name()
         ));
     }
