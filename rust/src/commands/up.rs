@@ -2005,21 +2005,39 @@ fn ensure_eco_builder_vm() -> Result<(), String> {
         return Ok(());
     }
     let yml = embedded::bundled_script_path("eco-builder.lima.yml")?;
-    print_step(&format!(
-        "Starting builder VM `{}` (first run downloads the Ubuntu image — a few minutes)…",
-        builder_name()
-    ));
-    run_command(
-        "limactl",
-        &[
+    // Resume an existing (stopped) instance by name; create it from the
+    // template only when it does not exist yet — `limactl start <template>`
+    // errors with "already exists" for an existing stopped instance.
+    let exists = run_capture("limactl", &["list".to_string()], &util::current_dir())
+        .map(|c| c.code == 0 && c.stdout.contains(builder_name().as_str()))
+        .unwrap_or(false);
+    let start_args: Vec<String> = if exists {
+        vec!["start".to_string(), "--tty=false".to_string(), builder_name()]
+    } else {
+        vec![
             "start".to_string(),
             "--name".to_string(),
             builder_name(),
             "--tty=false".to_string(),
             yml.display().to_string(),
-        ],
-        &util::current_dir(),
-    )?;
+        ]
+    };
+    print_step(&format!(
+        "Starting builder VM `{}` (first run downloads the Ubuntu image — a few minutes)…",
+        builder_name()
+    ));
+    // Capture limactl output so its INFO/FATA log noise stays hidden; surface
+    // a concise, actionable error instead.
+    let result = run_capture("limactl", &start_args, &util::current_dir())?;
+    if result.code != 0 {
+        let first_line = result.stderr.lines().next().unwrap_or("").trim().to_string();
+        return Err(format!(
+            "Could not start the builder VM `{}`.{} Fix: start it manually with `limactl start {}` and re-run.",
+            builder_name(),
+            if first_line.is_empty() { String::new() } else { format!(" ({first_line})") },
+            builder_name()
+        ));
+    }
     if !builder_available() {
         return Err(format!("Builder VM `{}` is not Running after `limactl start`.", builder_name()));
     }
@@ -2923,7 +2941,6 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
-    print_lxs_update_notice(&deployment.content, &deployment.project_dir, lxs_check_disabled(&options));
     // API URL + key: explicit env wins, else the `eco login`-stored auth
     // (defaulting the URL to the public api.getecosphere.com).
     let (api_url, api_key) = crate::commands::account::resolve_api_credentials()?;
@@ -2933,6 +2950,26 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     }
     let base = api_url.trim_end_matches('/').to_string();
     let staging = options.get("staging").map(|v| v == "true").unwrap_or(false);
+
+    print_step("Preparing your app for the world...");
+
+    // No public domain declared? Offer to reserve an ephemeral one for this
+    // account. Free subdomains are temporary (auto-released when the estate
+    // stops heartbeating); Starter ($2/mo) makes them permanent. The chosen
+    // hostname is written into ecompose.yml; the lease key travels in the
+    // deploy payload so configgen can wire the estate's heartbeat. This runs
+    // before any slow registry/health checks so the prompt appears at once.
+    let mut manifest_content = deployment.content.clone();
+    let mut reserved_lease_key: Option<String> = None;
+    if deployment.expose.hostname().is_empty() {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            util::println_stdout("note: ecompose.yml has no expose.hostname and there is no interactive terminal — deploying without a public domain.");
+        } else {
+            reserved_lease_key = reserve_public_domain(&base, &api_key, &deployment, &mut manifest_content)?;
+        }
+    }
+
+    print_lxs_update_notice(&manifest_content, &deployment.project_dir, lxs_check_disabled(&options));
 
     // Fail fast on protocol mismatch BEFORE building the payload: ask the
     // agent its protocol, and require an exact match (a stale client could
@@ -2957,21 +2994,6 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             "--staging requested for {}, but ecompose.yml has no staging.ct declared. Add a staging: block (staging.ct: 1000).",
             deployment.project
         ));
-    }
-
-    // No public domain declared? Offer to reserve an ephemeral one for this
-    // account. Free subdomains are temporary (auto-released when the estate
-    // stops heartbeating); Starter ($2/mo) makes them permanent. The chosen
-    // hostname is written into ecompose.yml; the lease key travels in the
-    // deploy payload so configgen can wire the estate's heartbeat.
-    let mut manifest_content = deployment.content.clone();
-    let mut reserved_lease_key: Option<String> = None;
-    if deployment.expose.hostname().is_empty() {
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            util::println_stdout("note: ecompose.yml has no expose.hostname and there is no interactive terminal — deploying without a public domain.");
-        } else {
-            reserved_lease_key = reserve_public_domain(&base, &api_key, &deployment, &mut manifest_content)?;
-        }
     }
     let deploy_query = if staging { "?staging=1" } else { "" };
     let project_dir_str = deployment.project_dir.display().to_string();
@@ -3231,7 +3253,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             }
             print_step(&format!("Using CT .env for {} build environment", service.name));
         } else {
-            print_step(&format!("No CT .env for {} yet — building with SQLX_OFFLINE only", service.name));
+            print_step(&format!(
+                "No .env detected for {} yet — creating a default build env. This is fine: sqlx builds offline and the server generates the real .env on deploy.",
+                service.name
+            ));
         }
         // Frontends: also export every key the frontend declares in its own
         // .env.example, so $env/static/public always resolves the exports the
