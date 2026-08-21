@@ -524,24 +524,6 @@ ensure_apt_repo_prereqs() {
   apt_install ca-certificates curl gnupg lsb-release
 }
 
-ensure_nodesource_repo() {
-  local major="${1:-20}"
-  if [[ -f /etc/apt/sources.list.d/nodesource.list ]] && grep -q "node_${major}.x" /etc/apt/sources.list.d/nodesource.list; then
-    return
-  fi
-
-  ensure_apt_repo_prereqs
-  log "Adding NodeSource repository for Node.js ${major}..."
-  $SUDO mkdir -p /etc/apt/keyrings
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-    | $SUDO gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-  printf 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' "$major" \
-    | $SUDO tee /etc/apt/sources.list.d/nodesource.list >/dev/null
-  # A different major may have been requested than the repo currently points
-  # at — force a fresh apt index so the nodejs package follows the new major.
-  APT_UPDATED=0
-}
-
 ensure_mongodb_repo_debian() {
   if [[ -f /etc/apt/sources.list.d/mongodb-org-7.0.list ]]; then
     return
@@ -815,6 +797,49 @@ brew_install_formula() {
   brew install "$formula"
 }
 
+# Install Node.js <major> from the official prebuilt tarball (nodejs.org).
+# Avoids Homebrew source builds (Xcode/CLT dependence, disk-hungry v8
+# compiles — the common "No space left on device" failure) and, on Debian,
+# the NodeSource package's hard python3 dependency.
+install_node_tarball() {
+  local major="$1"
+  local arch os_platform
+  case "$(uname -s)" in
+    Darwin) os_platform="darwin" ;;
+    Linux)  os_platform="linux" ;;
+    *) warn "Node.js install unsupported on $(uname -s)"; return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64) arch="x64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *) warn "Node.js install unsupported arch $(uname -m)"; return 1 ;;
+  esac
+
+  local base="https://nodejs.org/dist/latest-v${major}.x"
+  local fname
+  fname="$(curl -fsSL "$base/SHASUMS256.txt" | awk '{print $2}' | grep -E "node-v${major}\.[0-9]+\.[0-9]+-${os_platform}-${arch}\.tar\.gz" | tail -n1)"
+  if [[ -z "$fname" ]]; then
+    warn "No prebuilt Node.js ${major} tarball for ${os_platform}/${arch} on nodejs.org."
+    return 1
+  fi
+
+  log "Installing Node.js ${major} from the official prebuilt tarball (${fname})..."
+  local tmpdir version install_dir
+  tmpdir="$(mktemp -d)"
+  curl -fsSL "$base/$fname" -o "$tmpdir/$fname"
+  tar xzf "$tmpdir/$fname" -C "$tmpdir"
+  version="${fname%.tar.gz}"
+  install_dir="/usr/local/lib/nodejs/nodejs-${major}"
+  $SUDO mkdir -p /usr/local/lib/nodejs
+  $SUDO rm -rf "$install_dir"
+  $SUDO cp -R "$tmpdir/$version" "$install_dir"
+  $SUDO ln -sf "$install_dir/bin/node" /usr/local/bin/node
+  $SUDO ln -sf "$install_dir/bin/npm" /usr/local/bin/npm
+  $SUDO ln -sf "$install_dir/bin/npx" /usr/local/bin/npx
+  rm -rf "$tmpdir"
+  ok "Node.js ${major} installed: $(node -v 2>/dev/null || echo unknown)"
+}
+
 install_token_debian() {
   local token="$1"
   case "$token" in
@@ -826,19 +851,16 @@ install_token_debian() {
     java@17) apt_install openjdk-17-jdk ;;
     maven) apt_install maven ;;
     node@*)
-      ensure_nodesource_repo "${token#node@}"
-      apt_install nodejs
+      install_node_tarball "${token#node@}"
       ;;
     npm)
       if ! need_cmd npm; then
-        ensure_nodesource_repo 20
-        apt_install nodejs
+        install_node_tarball 20
       fi
       ;;
     pm2)
       if ! need_cmd npm; then
-        ensure_nodesource_repo 20
-        apt_install nodejs
+        install_node_tarball 20
       fi
       if need_cmd pm2; then
         ok "PM2 already installed."
@@ -1056,20 +1078,16 @@ install_token_macos() {
     java@17) brew_install_formula openjdk@17 ;;
     maven) brew_install_formula maven ;;
     node@*)
-      local want_major="${token#node@}"
-      if ! brew_install_formula "node@${want_major}"; then
-        warn "Homebrew has no node@${want_major} formula — installing the current Node LTS instead. Install node@${want_major} manually if you need that exact major."
-        brew_install_formula node
-      fi
+      install_node_tarball "${token#node@}"
       ;;
     npm)
       if ! need_cmd npm; then
-        brew_install_formula node@20
+        install_node_tarball 20
       fi
       ;;
     pm2)
       if ! need_cmd npm; then
-        brew_install_formula node@20
+        install_node_tarball 20
       fi
       if need_cmd pm2; then
         ok "PM2 already installed."
