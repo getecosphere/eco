@@ -132,7 +132,7 @@ Behavior:
 Supported runtime tokens:
   java@17
   maven
-  node@20
+  node@<major>       e.g. node@18, node@20, node@22 — installed per the manifest
   npm
   pm2
   postgresql@15  (accepts PostgreSQL 15+ on dev machines)
@@ -223,11 +223,12 @@ is_token_satisfied() {
     maven)
       need_cmd mvn
       ;;
-    node@20)
+    node@*)
+      local want_major="${token#node@}"
       if need_cmd node; then
         version="$(node -v 2>/dev/null)"
         major="$(major_from_version "$version")"
-        [[ "$major" == "20" ]]
+        [[ "$major" == "$want_major" ]]
       else
         return 1
       fi
@@ -524,17 +525,20 @@ ensure_apt_repo_prereqs() {
 }
 
 ensure_nodesource_repo() {
-  if [[ -f /etc/apt/sources.list.d/nodesource.list ]]; then
+  local major="${1:-20}"
+  if [[ -f /etc/apt/sources.list.d/nodesource.list ]] && grep -q "node_${major}.x" /etc/apt/sources.list.d/nodesource.list; then
     return
   fi
 
   ensure_apt_repo_prereqs
-  log "Adding NodeSource repository for Node.js 20..."
+  log "Adding NodeSource repository for Node.js ${major}..."
   $SUDO mkdir -p /etc/apt/keyrings
   curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | $SUDO gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+  printf 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_%s.x nodistro main\n' "$major" \
     | $SUDO tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+  # A different major may have been requested than the repo currently points
+  # at — force a fresh apt index so the nodejs package follows the new major.
   APT_UPDATED=0
 }
 
@@ -821,17 +825,21 @@ install_token_debian() {
     ca-certificates) apt_install ca-certificates ;;
     java@17) apt_install openjdk-17-jdk ;;
     maven) apt_install maven ;;
-    node@20)
-      ensure_nodesource_repo
+    node@*)
+      ensure_nodesource_repo "${token#node@}"
       apt_install nodejs
       ;;
     npm)
-      ensure_nodesource_repo
-      apt_install nodejs
+      if ! need_cmd npm; then
+        ensure_nodesource_repo 20
+        apt_install nodejs
+      fi
       ;;
     pm2)
-      ensure_nodesource_repo
-      apt_install nodejs
+      if ! need_cmd npm; then
+        ensure_nodesource_repo 20
+        apt_install nodejs
+      fi
       if need_cmd pm2; then
         ok "PM2 already installed."
       else
@@ -1047,8 +1055,18 @@ install_token_macos() {
     ca-certificates) brew_install_formula ca-certificates ;;
     java@17) brew_install_formula openjdk@17 ;;
     maven) brew_install_formula maven ;;
-    node@20) brew_install_formula node@20 ;;
-    npm) brew_install_formula node@20 ;;
+    node@*)
+      local want_major="${token#node@}"
+      if ! brew_install_formula "node@${want_major}"; then
+        warn "Homebrew has no node@${want_major} formula — installing the current Node LTS instead. Install node@${want_major} manually if you need that exact major."
+        brew_install_formula node
+      fi
+      ;;
+    npm)
+      if ! need_cmd npm; then
+        brew_install_formula node@20
+      fi
+      ;;
     pm2)
       if ! need_cmd npm; then
         brew_install_formula node@20
