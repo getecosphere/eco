@@ -1502,6 +1502,28 @@ fn agent_client_get(url: &str, api_key: &str) -> Result<String, String> {
     }
 }
 
+fn agent_post_json(url: &str, api_key: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let response = match ureq::post(url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set(crate::util::PROTOCOL_HEADER, &crate::util::PROTOCOL_VERSION.to_string())
+        .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .send_string(&serde_json::to_string(body).unwrap_or_default())
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => return Err(format!("agent request failed: {e}")),
+    };
+    let status = response.status();
+    let text = response.into_string().unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    if (200..300).contains(&status) {
+        Ok(v)
+    } else {
+        Err(v.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string())
+    }
+}
+
 fn agent_client_post(url: &str, api_key: &str, body: &[u8]) -> Result<String, String> {
     // Retry the payload upload — large payloads over lossy links (tailnet,
     // flaky dev machines) can drop mid-stream. Up to 6 attempts with backoff.
@@ -2777,6 +2799,124 @@ fn compute_frontend_env_hash(build_env: &[(String, String)]) -> String {
     }
 }
 
+fn prompt_line(prompt: &str) -> Result<String, String> {
+    use std::io::Write;
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| format!("read input: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
+// Insert or replace `expose.hostname` (and enable expose) in ecompose content.
+// A missing expose block is appended with the platform defaults for a hosted
+// estate on the .app zone.
+fn upsert_expose_hostname(content: &str, hostname: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut in_expose = false;
+    let mut expose_seen = false;
+    let mut hostname_written = false;
+    let mut enabled_written = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if !in_expose {
+            if trimmed == "expose:" {
+                in_expose = true;
+                expose_seen = true;
+                out.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        if line.starts_with("  ") || line.trim().is_empty() {
+            if trimmed.starts_with("enabled:") {
+                enabled_written = true;
+                out.push("  enabled: true".to_string());
+            } else if trimmed.starts_with("hostname:") {
+                hostname_written = true;
+                out.push(format!("  hostname: {hostname}"));
+            } else {
+                out.push(line.to_string());
+            }
+            i += 1;
+            continue;
+        }
+        in_expose = false;
+        if !enabled_written {
+            out.push("  enabled: true".to_string());
+        }
+        if !hostname_written {
+            out.push(format!("  hostname: {hostname}"));
+        }
+        out.push(line.to_string());
+        i += 1;
+    }
+    if in_expose {
+        if !enabled_written {
+            out.push("  enabled: true".to_string());
+        }
+        if !hostname_written {
+            out.push(format!("  hostname: {hostname}"));
+        }
+    }
+    if !expose_seen {
+        out.push(String::new());
+        out.push("expose:".to_string());
+        out.push("  enabled: true".to_string());
+        out.push(format!("  hostname: {hostname}"));
+        out.push("  service: gateway".to_string());
+        out.push("  proxy_ct: 200".to_string());
+        out.push("  cloudflare_account: getecosphereapp".to_string());
+    }
+    format!("{}\n", out.join("\n"))
+}
+
+// Ask for a subdomain, check availability through the agent, write the chosen
+// hostname into ecompose.yml, and return the lease key for the deploy payload.
+// Returns None when the user skips (deploy without a public domain).
+fn reserve_public_domain(
+    base: &str,
+    api_key: &str,
+    deployment: &ProjectDeployment,
+    content: &mut String,
+) -> Result<Option<String>, String> {
+    loop {
+        let sub = prompt_line("No public domain set. Pick a subdomain for your estate (e.g. mychat): ")?;
+        if sub.is_empty() {
+            util::println_stdout("Skipping — deploying without a public domain. Add `expose.hostname` later to publish.");
+            return Ok(None);
+        }
+        match agent_post_json(&format!("{base}/v1/domains"), api_key, &serde_json::json!({"subdomain": sub})) {
+            Ok(v) => {
+                let hostname = v.get("hostname").and_then(|h| h.as_str()).unwrap_or("").to_string();
+                let lease_key = v.get("lease_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+                if hostname.is_empty() {
+                    return Err(format!("domain reservation failed: {v}"));
+                }
+                *content = upsert_expose_hostname(content, &hostname);
+                if !deployment.file_path.is_empty() {
+                    let _ = std::fs::write(&deployment.file_path, content.as_str());
+                }
+                util::println_stdout(&format!("\n  Reserved \x1b[1m{hostname}\x1b[0m"));
+                util::println_stdout("  Free subdomains are temporary — yours while the estate runs.");
+                util::println_stdout("  Starter ($2/mo) makes it permanently yours.\n");
+                return Ok(if lease_key.is_empty() { None } else { Some(lease_key) });
+            }
+            Err(e) if e.contains("already") => {
+                util::println_stdout(&format!("  \x1b[1;33m{sub}\x1b[0m is taken — try another."));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let (options, positionals) = parse_options(args);
     let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
@@ -2816,6 +2956,21 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             "--staging requested for {}, but ecompose.yml has no staging.ct declared. Add a staging: block (staging.ct: 1000).",
             deployment.project
         ));
+    }
+
+    // No public domain declared? Offer to reserve an ephemeral one for this
+    // account. Free subdomains are temporary (auto-released when the estate
+    // stops heartbeating); Starter ($2/mo) makes them permanent. The chosen
+    // hostname is written into ecompose.yml; the lease key travels in the
+    // deploy payload so configgen can wire the estate's heartbeat.
+    let mut manifest_content = deployment.content.clone();
+    let mut reserved_lease_key: Option<String> = None;
+    if deployment.expose.hostname().is_empty() {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            util::println_stdout("note: ecompose.yml has no expose.hostname and there is no interactive terminal — deploying without a public domain.");
+        } else {
+            reserved_lease_key = reserve_public_domain(&base, &api_key, &deployment, &mut manifest_content)?;
+        }
     }
     let deploy_query = if staging { "?staging=1" } else { "" };
     let project_dir_str = deployment.project_dir.display().to_string();
@@ -3512,9 +3667,22 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         }
         std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
         std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
-        std::fs::write(payload_dir.join("ecompose.yml"), &deployment.content).map_err(|e| e.to_string())?;
+        std::fs::write(payload_dir.join("ecompose.yml"), &manifest_content).map_err(|e| e.to_string())?;
+        if let Some(lease_key) = &reserved_lease_key {
+            std::fs::write(payload_dir.join("lease-key"), lease_key.as_bytes()).map_err(|e| e.to_string())?;
+        }
         write_payload_manifest(&payload_dir, &deployment.project)?;
         let tar_path = payload_dir.join("payload.tar.gz");
+        let mut tar_entries = vec![
+            "artifacts".to_string(),
+            "rust-hashes".to_string(),
+            "frontend-hashes".to_string(),
+            "ecompose.yml".to_string(),
+            "artifact-manifest.json".to_string(),
+        ];
+        if reserved_lease_key.is_some() {
+            tar_entries.push("lease-key".to_string());
+        }
         run_command_env(
             "tar",
             &[
@@ -3523,12 +3691,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 "--no-xattrs".to_string(),
                 "-C".to_string(),
                 payload_dir.display().to_string(),
-                "artifacts".to_string(),
-                "rust-hashes".to_string(),
-                "frontend-hashes".to_string(),
-                "ecompose.yml".to_string(),
-                "artifact-manifest.json".to_string(),
-            ],
+            ]
+            .into_iter()
+            .chain(tar_entries.iter().cloned())
+            .collect::<Vec<_>>(),
             &util::current_dir(),
             &[("COPYFILE_DISABLE".to_string(), "1".to_string())],
         )?;
@@ -3845,5 +4011,29 @@ mod tests {
         assert_eq!(entry["size"], 5);
         assert_eq!(entry["sha256"].as_str().unwrap().len(), 64);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod reserve_domain_tests {
+    use super::upsert_expose_hostname;
+
+    #[test]
+    fn upsert_appends_expose_block_when_missing() {
+        let out = upsert_expose_hostname("project: demo\n", "mychat.getecosphere.app");
+        assert!(out.contains("expose:"), "got: {out}");
+        assert!(out.contains("hostname: mychat.getecosphere.app"), "got: {out}");
+        assert!(out.contains("enabled: true"), "got: {out}");
+        assert!(out.contains("service: gateway"), "got: {out}");
+        assert!(out.contains("cloudflare_account: getecosphereapp"), "got: {out}");
+    }
+
+    #[test]
+    fn upsert_replaces_existing_hostname() {
+        let src = "project: demo\nexpose:\n  enabled: true\n  hostname: old.getecosphere.com\n";
+        let out = upsert_expose_hostname(src, "new.getecosphere.app");
+        assert!(out.contains("hostname: new.getecosphere.app"), "got: {out}");
+        assert!(!out.contains("old.getecosphere.com"), "got: {out}");
+        assert_eq!(out.matches("hostname:").count(), 1, "got: {out}");
     }
 }
