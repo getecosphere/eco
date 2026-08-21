@@ -33,6 +33,10 @@ fi
 # whole run, and passed explicitly through sudo via `sudo env ...` because
 # sudo's env_reset strips inline `VAR=value` assignments.
 export DEBIAN_FRONTEND=noninteractive
+# Node/npm installed from the official tarball land in ~/.local/bin (the same
+# dir the eco installer puts on PATH); make sure the checks in this run can see
+# them regardless of which rc file a given shell sources.
+export PATH="$HOME/.local/bin:$PATH"
 
 log() {
   echo -e "${CYAN}$*${RESET}"
@@ -824,18 +828,23 @@ install_node_tarball() {
   fi
 
   log "Installing Node.js ${major} from the official prebuilt tarball (${fname})..."
-  local tmpdir version install_dir
+  local tmpdir version install_dir bin_dir
   tmpdir="$(mktemp -d)"
   curl -fsSL "$base/$fname" -o "$tmpdir/$fname"
   tar xzf "$tmpdir/$fname" -C "$tmpdir"
   version="${fname%.tar.gz}"
-  install_dir="/usr/local/lib/nodejs/nodejs-${major}"
-  $SUDO mkdir -p /usr/local/lib/nodejs
-  $SUDO rm -rf "$install_dir"
-  $SUDO cp -R "$tmpdir/$version" "$install_dir"
-  $SUDO ln -sf "$install_dir/bin/node" /usr/local/bin/node
-  $SUDO ln -sf "$install_dir/bin/npm" /usr/local/bin/npm
-  $SUDO ln -sf "$install_dir/bin/npx" /usr/local/bin/npx
+  # Install into the user's home (no sudo needed) and symlink into ~/.local/bin
+  # — the directory the eco installer already puts on PATH. On Apple Silicon
+  # /usr/local/bin is not on PATH, so /usr/local would look "not installed"
+  # on every subsequent `eco up`.
+  install_dir="$HOME/.local/lib/nodejs/nodejs-${major}"
+  bin_dir="$HOME/.local/bin"
+  mkdir -p "$bin_dir" "$(dirname "$install_dir")"
+  rm -rf "$install_dir"
+  cp -R "$tmpdir/$version" "$install_dir"
+  ln -sf "$install_dir/bin/node" "$bin_dir/node"
+  ln -sf "$install_dir/bin/npm" "$bin_dir/npm"
+  ln -sf "$install_dir/bin/npx" "$bin_dir/npx"
   rm -rf "$tmpdir"
   ok "Node.js ${major} installed: $(node -v 2>/dev/null || echo unknown)"
 }
