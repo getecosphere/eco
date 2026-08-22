@@ -846,7 +846,17 @@ install_node_tarball() {
   ln -sf "$install_dir/bin/npm" "$bin_dir/npm"
   ln -sf "$install_dir/bin/npx" "$bin_dir/npx"
   rm -rf "$tmpdir"
+  ensure_npm_user_prefix
   ok "Node.js ${major} installed: $(node -v 2>/dev/null || echo unknown)"
+}
+
+# npm global packages (pm2, ...) must land in ~/.local/bin, which is on PATH.
+# The default prefix for a tarball node is its own nodejs-<major> dir — off
+# PATH — so `npm install -g` silently installs bins nothing can find.
+ensure_npm_user_prefix() {
+  if need_cmd npm; then
+    npm config set prefix "$HOME/.local" 2>/dev/null || true
+  fi
 }
 
 install_token_debian() {
@@ -875,6 +885,7 @@ install_token_debian() {
         ok "PM2 already installed."
       else
         log "Installing PM2 globally via npm..."
+        ensure_npm_user_prefix
         $SUDO npm install -g pm2
       fi
       ;;
@@ -1102,6 +1113,7 @@ install_token_macos() {
         ok "PM2 already installed."
       else
         log "Installing PM2 globally via npm..."
+        ensure_npm_user_prefix
         npm install -g pm2
       fi
       ;;

@@ -334,10 +334,11 @@ fn run_tunnel(
         start_dev_app();
         // When the port isn't explicit (no --port / expose.target_port), read
         // the port eco actually allocated for the app from PM2 (e.g. 20000 for
-        // a Next.js dev server) instead of assuming 3000.
+        // a Next.js dev server) instead of assuming 3000. eco up dev starts
+        // asynchronously, so poll until the app registers its PORT.
         let port_num = match explicit_port {
             Some(p) => p,
-            None => discover_app_port(project, 3000),
+            None => wait_for_app_port(project, 3000, 180),
         };
         if !wait_for_port(port_num, 180) {
             return Err(format!(
@@ -354,12 +355,12 @@ fn run_tunnel(
 }
 
 // Read the actual dev port eco allocated for a project's app from PM2.
-fn discover_app_port(project: &str, fallback: u16) -> u16 {
+fn discover_app_port(project: &str) -> Option<u16> {
     let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir()) else {
-        return fallback;
+        return None;
     };
     let Ok(list) = serde_json::from_str::<serde_json::Value>(&captured.stdout) else {
-        return fallback;
+        return None;
     };
     if let Some(apps) = list.as_array() {
         for app in apps {
@@ -370,14 +371,28 @@ fn discover_app_port(project: &str, fallback: u16) -> u16 {
                         .and_then(|p| p.as_str())
                         .and_then(|s| s.parse::<u16>().ok())
                     {
-                        return port;
+                        return Some(port);
                     }
                     if let Some(port) = app.pointer("/pm2_env/env/PORT").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok()) {
-                        return port;
+                        return Some(port);
                     }
                 }
             }
         }
+    }
+    None
+}
+
+// Poll PM2 until the project's app registers with a PORT (eco up dev starts
+// asynchronously), then return it.
+fn wait_for_app_port(project: &str, fallback: u16, timeout_secs: u64) -> u16 {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if let Some(port) = discover_app_port(project) {
+            return port;
+        }
+        std::thread::sleep(Duration::from_secs(2));
     }
     fallback
 }
