@@ -92,7 +92,9 @@ install_minio_binary() {
   url="https://dl.min.io/server/minio/release/${os}-${arch}/minio"
   tmpfile="$(mktemp)"
   log "Installing MinIO (${os}-${arch})..."
-  curl --proto '=https' --tlsv1.2 -sSfL "$url" -o "$tmpfile"
+  # A stalled release redirect must fail with a useful error instead of
+  # leaving `eco install minio` hanging forever on a developer workstation.
+  curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 -sSfL "$url" -o "$tmpfile"
   chmod +x "$tmpfile"
   if install -m 0755 "$tmpfile" /usr/local/bin/minio 2>/dev/null; then
     :
