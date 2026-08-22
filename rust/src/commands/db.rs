@@ -190,6 +190,121 @@ fn mark_source_services(content: &str, db_type: &str, uri_key: &str) -> String {
     format!("{}\n", out.join("\n"))
 }
 
+// eco storage — managed object storage for a project.
+pub fn run_storage(args: &[String]) -> Result<(), String> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("help");
+    match sub {
+        "help" | "--help" | "-h" | "" => {
+            println!("eco storage\n\nUsage:\n  eco storage add      allocate the project's managed storage bucket (MinIO)\n  eco storage list     list this account's storage buckets");
+            Ok(())
+        }
+        "list" => {
+            let (api_url, api_key) = resolve_api_credentials()?;
+            let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+            let base = api_url.trim_end_matches('/').to_string();
+            let v = api_get_json(&format!("{base}/v1/storage"), &api_key)?;
+            println!("Plan: {}", v.get("plan").and_then(|p| p.as_str()).unwrap_or("free"));
+            println!("  storage quota: {} GB", v.get("storage_quota_gb").and_then(|x| x.as_u64()).unwrap_or(0));
+            if let Some(buckets) = v.get("buckets").and_then(|b| b.as_array()) {
+                if buckets.is_empty() {
+                    println!("  (no buckets yet — `eco storage add`)");
+                }
+                for b in buckets {
+                    println!(
+                        "  {} -> {}",
+                        b.get("project").and_then(|p| p.as_str()).unwrap_or(""),
+                        b.get("bucket").and_then(|p| p.as_str()).unwrap_or("")
+                    );
+                }
+            }
+            Ok(())
+        }
+        "add" => {
+            let (ecompose_path, project, content) = find_ecompose()?;
+            let (api_url, api_key) = resolve_api_credentials()?;
+            let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+            let base = api_url.trim_end_matches('/').to_string();
+            let v = api_post_json(&format!("{base}/v1/storage"), &api_key, &serde_json::json!({"project": project}))?;
+            let bucket = v.get("bucket").and_then(|b| b.as_str()).unwrap_or("").to_string();
+            if bucket.is_empty() {
+                return Err("storage allocation did not return a bucket".to_string());
+            }
+            // Grant the S3_* env to every source service so the app can upload.
+            const S3_GRANTS: [&str; 5] = ["S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"];
+            let updated = grant_source_services(&content, &S3_GRANTS);
+            std::fs::write(&ecompose_path, updated).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+            util::println_stdout(&format!("Managed storage bucket `{bucket}` allocated for {project}"));
+            util::println_stdout(&format!("S3_* grants added to source services in {}", ecompose_path.display()));
+            util::println_stdout("Next: `eco up dev` (local) or `eco up --remote` — the bucket is provisioned on deploy.");
+            Ok(())
+        }
+        _ => Err("usage: eco storage add  |  eco storage list".to_string()),
+    }
+}
+
+// Add the given env-keys to every source service's grants.secrets.
+fn grant_source_services(content: &str, keys: &[&str]) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut in_services = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if trimmed == "services:" {
+            in_services = true;
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        if in_services && !line.starts_with(' ') && !line.trim().is_empty() {
+            in_services = false;
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        if in_services && trimmed.starts_with("path:") {
+            out.push(line.to_string());
+            i += 1;
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let mut has_grant = false;
+            let mut existing: Vec<String> = Vec::new();
+            while i < lines.len() && lines[i].starts_with(' ') {
+                let child = lines[i];
+                let ctrim = child.trim_start();
+                if ctrim.starts_with("grants:") {
+                    has_grant = true;
+                    out.push(child.to_string());
+                    i += 1;
+                    if i < lines.len() && lines[i].trim_start().starts_with("secrets:") {
+                        let body = lines[i].trim_start().trim_start_matches("secrets:");
+                        if let Some(list) = body.trim().trim_start_matches('[').strip_suffix(']') {
+                            existing = list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        }
+                        i += 1;
+                    }
+                } else {
+                    out.push(child.to_string());
+                    i += 1;
+                }
+            }
+            if !has_grant {
+                out.push(format!("{indent}grants:"));
+            }
+            for key in keys {
+                if !existing.iter().any(|e| e == key) {
+                    existing.push(key.to_string());
+                }
+            }
+            out.push(format!("{indent}  secrets: [{}]", existing.join(", ")));
+            continue;
+        }
+        out.push(line.to_string());
+        i += 1;
+    }
+    format!("{}\n", out.join("\n"))
+}
+
 pub fn run_db(args: &[String]) -> Result<(), String> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("help");
     match sub {
