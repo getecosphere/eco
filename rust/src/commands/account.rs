@@ -251,6 +251,24 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
             println!("Logged out.");
             Ok(())
         }
+        "plan" => {
+            // Admin op: eco plan set <email> <plan> (free|starter|scale|growth|pro).
+            // Uses the caller's API key; only an agent/admin key is accepted by
+            // the server.
+            if rest.first().map(|s| s.as_str()) == Some("set") && rest.len() == 3 {
+                let email = rest[1].clone();
+                let plan = rest[2].clone();
+                let result = post_json(
+                    &format!("{api_url}/v1/account/plan"),
+                    &serde_json::json!({ "email": email.clone(), "plan": plan.clone() }),
+                )?;
+                let _ = result;
+                println!("Plan for {email} set to {plan}.");
+                Ok(())
+            } else {
+                Err("usage: eco plan set <email> <plan>  (free | starter | scale | growth | pro)".to_string())
+            }
+        }
         "whoami" => match read_stored_auth() {
             Some(auth) => {
                 println!("email: {}", auth.email);
