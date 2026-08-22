@@ -87,7 +87,9 @@ pub fn validate_env_fields(env: &LxsEnv) -> Result<(), String> {
     for (key, field) in &env.fields {
         let where_ = format!("lxs.yml contract.env.fields.{key}");
         if field.description.trim().is_empty() {
-            return Err(format!("{where_}: missing description (required by the v2 schema lint)"));
+            return Err(format!(
+                "{where_}: missing description (required by the v2 schema lint)"
+            ));
         }
         let ty = field.r#type.as_str();
         if !KNOWN_TYPES.contains(&ty) {
@@ -103,7 +105,10 @@ pub fn validate_env_fields(env: &LxsEnv) -> Result<(), String> {
             return Err(format!("{where_}: type '{ty}' must not declare choices"));
         }
         if field.min != 0.0 && field.max != 0.0 && field.min > field.max {
-            return Err(format!("{where_}: min ({}) > max ({})", field.min, field.max));
+            return Err(format!(
+                "{where_}: min ({}) > max ({})",
+                field.min, field.max
+            ));
         }
     }
     Ok(())
@@ -117,20 +122,31 @@ pub fn validate_env_fields(env: &LxsEnv) -> Result<(), String> {
 ///   managed key → error).
 /// - v1 (no fields): required + optional + defaults; `config:` values overlay,
 ///   validated only against the declared key lists.
-pub fn build_lxs_env_example(env: &LxsEnv, service_name: &str, config: &HashMap<String, String>) -> Result<String, String> {
+pub fn build_lxs_env_example(
+    env: &LxsEnv,
+    service_name: &str,
+    config: &HashMap<String, String>,
+) -> Result<String, String> {
     let mut lines: Vec<String> = Vec::new();
     if !env.fields.is_empty() {
         let mut keys: Vec<&String> = env.fields.keys().collect();
         keys.sort();
         for key in &keys {
             let field = &env.fields[key.as_str()];
-            let value = config.get(key.as_str()).cloned().unwrap_or_else(|| field.default.clone());
+            let value = config
+                .get(key.as_str())
+                .cloned()
+                .unwrap_or_else(|| field.default.clone());
             lines.push(format!("{key}={value}"));
         }
         for (key, value) in config {
             match env.fields.get(key) {
                 None => {
-                    let allowed = keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                    let allowed = keys
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     return Err(format!(
                         "service {service_name}: config key {key} is not declared in the LXS env contract (allowed: {allowed})"
                     ));
@@ -152,14 +168,18 @@ pub fn build_lxs_env_example(env: &LxsEnv, service_name: &str, config: &HashMap<
             }
         }
     } else {
-        let known: std::collections::HashSet<&String> = env.required.iter().chain(env.optional.iter()).collect();
+        let known: std::collections::HashSet<&String> =
+            env.required.iter().chain(env.optional.iter()).collect();
         for key in config.keys() {
             if !known.contains(key) {
                 return Err(format!("service {service_name}: config key {key} is not declared in the LXS env contract"));
             }
         }
         for key in env.required.iter().chain(env.optional.iter()) {
-            let value = config.get(key).cloned().unwrap_or_else(|| env.defaults.get(key).cloned().unwrap_or_default());
+            let value = config
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| env.defaults.get(key).cloned().unwrap_or_default());
             lines.push(format!("{key}={value}"));
         }
     }
@@ -282,24 +302,42 @@ pub(crate) fn ensure_registry_synced() -> Result<(), String> {
     let _ = std::fs::create_dir_all(registry.parent().unwrap_or(Path::new(".")));
     if !registry.join(".git").exists() {
         // Avoid cloning into a non-empty partial dir (e.g. interrupted clone).
-        if registry.exists() && std::fs::read_dir(&registry).map(|mut d| d.next().is_some()).unwrap_or(false) {
+        if registry.exists()
+            && std::fs::read_dir(&registry)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
+        {
             let _ = std::fs::remove_dir_all(&registry);
         }
         if let Err(e) = run_command(
             "git",
-            &["clone".to_string(), "--quiet".to_string(), "--depth".to_string(), "1".to_string(), LXS_REGISTRY_REMOTE.to_string(), registry.display().to_string()],
+            &[
+                "clone".to_string(),
+                "--quiet".to_string(),
+                "--depth".to_string(),
+                "1".to_string(),
+                LXS_REGISTRY_REMOTE.to_string(),
+                registry.display().to_string(),
+            ],
             &util::current_dir(),
         ) {
             println!("[eco lxs] WARNING: could not clone the LXS registry from {LXS_REGISTRY_REMOTE}: {e}");
         }
     } else {
-        if let Err(e) = git(&["pull".to_string(), "--ff-only".to_string(), "origin".to_string(), "main".to_string()], &registry) {
+        if let Err(e) = git(
+            &[
+                "pull".to_string(),
+                "--ff-only".to_string(),
+                "origin".to_string(),
+                "main".to_string(),
+            ],
+            &registry,
+        ) {
             println!("[eco lxs] WARNING: could not refresh LXS registry from remote ({e}); using the local clone as-is");
         }
     }
     Ok(())
 }
-
 
 fn arch_to_triple(arch: &str) -> Result<&'static str, String> {
     match arch {
@@ -342,15 +380,27 @@ fn run_capture(command: &str, args: &[String], cwd: &Path) -> Result<util::Captu
 fn git(args: &[String], cwd: &Path) -> Result<String, String> {
     let result = run_capture("git", args, cwd)?;
     if result.code != 0 {
-        return Err(format!("git {} failed: {}", args.join(" "), result.stderr.trim()));
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            result.stderr.trim()
+        ));
     }
     Ok(result.stdout.trim().to_string())
 }
 
 fn git_repo_origin(cwd: &Path) -> String {
-    run_capture("git", &["config".to_string(), "--get".to_string(), "remote.origin.url".to_string()], cwd)
-        .map(|r| r.stdout.trim().to_string())
-        .unwrap_or_default()
+    run_capture(
+        "git",
+        &[
+            "config".to_string(),
+            "--get".to_string(),
+            "remote.origin.url".to_string(),
+        ],
+        cwd,
+    )
+    .map(|r| r.stdout.trim().to_string())
+    .unwrap_or_default()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -358,7 +408,15 @@ fn git_repo_origin(cwd: &Path) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn rustup_target_installed(target: &str) -> bool {
-    match run_capture("rustup", &["target".to_string(), "list".to_string(), "--installed".to_string()], &util::current_dir()) {
+    match run_capture(
+        "rustup",
+        &[
+            "target".to_string(),
+            "list".to_string(),
+            "--installed".to_string(),
+        ],
+        &util::current_dir(),
+    ) {
         Ok(result) => result.stdout.lines().any(|line| line.trim() == target),
         Err(_) => false,
     }
@@ -375,7 +433,10 @@ fn ensure_zig() -> Result<Option<PathBuf>, String> {
         ("linux", "aarch64") => "linux-aarch64".to_string(),
         (os, arch) => return Err(format!("zig cross toolchain unsupported on {os}/{arch}")),
     };
-    let cache = Path::new(&util::home_dir()).join(".cache").join("eco").join("zig");
+    let cache = Path::new(&util::home_dir())
+        .join(".cache")
+        .join("eco")
+        .join("zig");
     let install_dir = cache.join(format!("zig-{triple}-{ZIG_VERSION}"));
     if install_dir.join("zig").is_file() {
         return Ok(Some(install_dir));
@@ -385,11 +446,32 @@ fn ensure_zig() -> Result<Option<PathBuf>, String> {
     let _ = std::fs::create_dir_all(&cache);
     let target_path = cache.join(&tarball);
     let url = format!("https://ziglang.org/download/{ZIG_VERSION}/{tarball}");
-    run_command("curl", &["-fsSL".to_string(), url, "-o".to_string(), target_path.display().to_string()], &util::current_dir())?;
-    run_command("tar", &["xf".to_string(), target_path.display().to_string(), "-C".to_string(), cache.display().to_string()], &util::current_dir())?;
+    run_command(
+        "curl",
+        &[
+            "-fsSL".to_string(),
+            url,
+            "-o".to_string(),
+            target_path.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+    run_command(
+        "tar",
+        &[
+            "xf".to_string(),
+            target_path.display().to_string(),
+            "-C".to_string(),
+            cache.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
     let _ = std::fs::remove_file(&target_path);
     if !install_dir.join("zig").is_file() {
-        return Err(format!("zig extraction did not produce {}", install_dir.display()));
+        return Err(format!(
+            "zig extraction did not produce {}",
+            install_dir.display()
+        ));
     }
     Ok(Some(install_dir))
 }
@@ -397,7 +479,11 @@ fn ensure_zig() -> Result<Option<PathBuf>, String> {
 fn ensure_toolchain(target: &str) -> Result<Option<PathBuf>, String> {
     if !rustup_target_installed(target) {
         println!("[eco lxs] Installing rustup target {target}");
-        run_command("rustup", &["target".to_string(), "add".to_string(), target.to_string()], &util::current_dir())?;
+        run_command(
+            "rustup",
+            &["target".to_string(), "add".to_string(), target.to_string()],
+            &util::current_dir(),
+        )?;
     }
     // Darwin targets build with the platform toolchain (plain cargo); only
     // musl-Linux and Windows-GNU cross-compiles need zig + cargo-zigbuild.
@@ -406,7 +492,15 @@ fn ensure_toolchain(target: &str) -> Result<Option<PathBuf>, String> {
     }
     if !util::command_on_path("cargo-zigbuild") {
         println!("[eco lxs] Installing cargo-zigbuild (pinned)");
-        run_command("cargo", &["install".to_string(), "cargo-zigbuild".to_string(), "--locked".to_string()], &util::current_dir())?;
+        run_command(
+            "cargo",
+            &[
+                "install".to_string(),
+                "cargo-zigbuild".to_string(),
+                "--locked".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
     }
     ensure_zig()
 }
@@ -430,7 +524,11 @@ fn crate_package_name(cargo_toml: &str) -> Option<String> {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("name") {
                 if let Some(eq) = rest.find('=') {
-                    let val = rest[eq + 1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    let val = rest[eq + 1..]
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
                     if !val.is_empty() {
                         return Some(val);
                     }
@@ -486,9 +584,15 @@ fn find_node_app_dir(source: &Path) -> Option<PathBuf> {
     None
 }
 
-fn build_crate_for_target(crate_dir: &Path, target: &str, zig_dir: &Option<PathBuf>) -> Result<(String, PathBuf), String> {
-    let cargo_text = std::fs::read_to_string(crate_dir.join("Cargo.toml")).map_err(|e| e.to_string())?;
-    let package = crate_package_name(&cargo_text).ok_or_else(|| format!("cannot determine package name from {}", crate_dir.display()))?;
+fn build_crate_for_target(
+    crate_dir: &Path,
+    target: &str,
+    zig_dir: &Option<PathBuf>,
+) -> Result<(String, PathBuf), String> {
+    let cargo_text =
+        std::fs::read_to_string(crate_dir.join("Cargo.toml")).map_err(|e| e.to_string())?;
+    let package = crate_package_name(&cargo_text)
+        .ok_or_else(|| format!("cannot determine package name from {}", crate_dir.display()))?;
     println!("[eco lxs] Cross-compiling {package} for {target}");
 
     // Build from an isolated, persistent workspace so an LXS build never
@@ -496,13 +600,18 @@ fn build_crate_for_target(crate_dir: &Path, target: &str, zig_dir: &Option<PathB
     // workspace. The domain crate is copied in; the target/ dir persists per
     // domain so incremental builds stay fast; the nearest Cargo.lock is reused
     // for reproducible versions.
-    let build_root = Path::new(&util::home_dir()).join(".cache").join("eco").join("lxs-build").join(&package);
+    let build_root = Path::new(&util::home_dir())
+        .join(".cache")
+        .join("eco")
+        .join("lxs-build")
+        .join(&package);
     let member_dir = build_root.join(&package);
     let _ = std::fs::remove_dir_all(&member_dir);
     std::fs::create_dir_all(&member_dir).map_err(|e| e.to_string())?;
     copy_crate_source(crate_dir, &member_dir)?;
     if let Some(lock) = nearest_cargo_lock(crate_dir) {
-        std::fs::copy(&lock, build_root.join("Cargo.lock")).map_err(|e| format!("copy Cargo.lock: {e}"))?;
+        std::fs::copy(&lock, build_root.join("Cargo.lock"))
+            .map_err(|e| format!("copy Cargo.lock: {e}"))?;
     }
     let workspace_toml = format!("# Generated by eco lxs build -- isolated LXS workspace\n[workspace]\nresolver = \"2\"\nmembers = [\"{package}\"]\n");
     std::fs::write(build_root.join("Cargo.toml"), workspace_toml).map_err(|e| e.to_string())?;
@@ -517,9 +626,15 @@ fn build_crate_for_target(crate_dir: &Path, target: &str, zig_dir: &Option<PathB
     // cargo-zigbuild so no C toolchain is needed on the build machine.
     let use_plain_cargo = target.contains("apple-darwin");
     let args: Vec<String> = if use_plain_cargo {
-        ["build", "--release", "--target", target].iter().map(|s| s.to_string()).collect()
+        ["build", "--release", "--target", target]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
-        ["zigbuild", "--release", "--target", target].iter().map(|s| s.to_string()).collect()
+        ["zigbuild", "--release", "--target", target]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     };
     let env_map: HashMap<String, String> = {
         let mut m: HashMap<String, String> = std::env::vars().collect();
@@ -531,12 +646,23 @@ fn build_crate_for_target(crate_dir: &Path, target: &str, zig_dir: &Option<PathB
     util::run_command_env("cargo", &args, &build_root, &env_map)?;
     let is_windows = target.contains("-windows-");
     let binary = if is_windows {
-        build_root.join("target").join(target).join("release").join(format!("{package}.exe"))
+        build_root
+            .join("target")
+            .join(target)
+            .join("release")
+            .join(format!("{package}.exe"))
     } else {
-        build_root.join("target").join(target).join("release").join(&package)
+        build_root
+            .join("target")
+            .join(target)
+            .join("release")
+            .join(&package)
     };
     if !binary.is_file() {
-        return Err(format!("cross-compiled binary not found: {}", binary.display()));
+        return Err(format!(
+            "cross-compiled binary not found: {}",
+            binary.display()
+        ));
     }
     Ok((package, binary))
 }
@@ -554,7 +680,8 @@ fn copy_crate_source(src: &Path, dst: &Path) -> Result<(), String> {
             std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
             copy_crate_source(&source, &destination)?;
         } else {
-            std::fs::copy(&source, &destination).map_err(|e| format!("copy {}: {e}", source.display()))?;
+            std::fs::copy(&source, &destination)
+                .map_err(|e| format!("copy {}: {e}", source.display()))?;
         }
     }
     Ok(())
@@ -580,14 +707,20 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             "--arch" => {
                 let raw = args.get(i + 1).cloned().unwrap_or_default();
-                archs = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                archs = raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 i += 2;
             }
             "--source" => {
                 source = Some(PathBuf::from(args.get(i + 1).cloned().unwrap_or_default()));
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs build option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs build option: {other}"))
+            }
             other => {
                 source = Some(PathBuf::from(other));
                 i += 1;
@@ -600,7 +733,10 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
     // single self-contained linux-x64 binary (no node_modules on the host).
     if find_crate_dir(&source).is_none() {
         if let Some(node_dir) = find_node_app_dir(&source) {
-            println!("[eco lxs] Detected Astro/Node UI project at {}", node_dir.display());
+            println!(
+                "[eco lxs] Detected Astro/Node UI project at {}",
+                node_dir.display()
+            );
             let mut artifacts: HashMap<String, String> = HashMap::new();
             for arch in &archs {
                 if arch != "linux/amd64" {
@@ -611,18 +747,33 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
                 let binary = build_node_app_for_target(&node_dir)?;
                 artifacts.insert(arch.clone(), binary.display().to_string());
             }
-            let artifacts_json = serde_json::json!({ "arch": archs, "binaries": artifacts }).to_string();
-            std::fs::write(source.join(ARTIFACTS_FILE), artifacts_json).map_err(|e| e.to_string())?;
-            println!("[eco lxs] Built {} artifact(s) for {}", artifacts.len(), source.display());
+            let artifacts_json =
+                serde_json::json!({ "arch": archs, "binaries": artifacts }).to_string();
+            std::fs::write(source.join(ARTIFACTS_FILE), artifacts_json)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "[eco lxs] Built {} artifact(s) for {}",
+                artifacts.len(),
+                source.display()
+            );
             for (arch, binary) in &artifacts {
                 println!("  {arch}: {binary}");
             }
-            println!("[eco lxs] Artifact map written to {}/{}", source.display(), ARTIFACTS_FILE);
+            println!(
+                "[eco lxs] Artifact map written to {}/{}",
+                source.display(),
+                ARTIFACTS_FILE
+            );
             return Ok(());
         }
     }
 
-    let crate_dir = find_crate_dir(&source).ok_or_else(|| format!("no Cargo crate or Astro/Node app found under {}", source.display()))?;
+    let crate_dir = find_crate_dir(&source).ok_or_else(|| {
+        format!(
+            "no Cargo crate or Astro/Node app found under {}",
+            source.display()
+        )
+    })?;
 
     let mut artifacts: HashMap<String, String> = HashMap::new();
     for arch in &archs {
@@ -634,11 +785,19 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
 
     let artifacts_json = serde_json::json!({ "arch": archs, "binaries": artifacts }).to_string();
     std::fs::write(source.join(ARTIFACTS_FILE), artifacts_json).map_err(|e| e.to_string())?;
-    println!("[eco lxs] Built {} artifact(s) for {}", artifacts.len(), source.display());
+    println!(
+        "[eco lxs] Built {} artifact(s) for {}",
+        artifacts.len(),
+        source.display()
+    );
     for (arch, binary) in &artifacts {
         println!("  {arch}: {binary}");
     }
-    println!("[eco lxs] Artifact map written to {}/{}", source.display(), ARTIFACTS_FILE);
+    println!(
+        "[eco lxs] Artifact map written to {}/{}",
+        source.display(),
+        ARTIFACTS_FILE
+    );
     Ok(())
 }
 
@@ -653,7 +812,11 @@ fn build_node_app_for_target(node_dir: &Path) -> Result<PathBuf, String> {
     // Isolated build root so the source stays pristine (node_modules never
     // lands in the repo); reuse a per-package cache for speed.
     let pkg_name = node_package_name(&node_dir)?;
-    let build_root = Path::new(&util::home_dir()).join(".cache").join("eco").join("lxs-build").join(&pkg_name);
+    let build_root = Path::new(&util::home_dir())
+        .join(".cache")
+        .join("eco")
+        .join("lxs-build")
+        .join(&pkg_name);
     let member_dir = build_root.join("app");
     let _ = std::fs::remove_dir_all(&member_dir);
     std::fs::create_dir_all(&member_dir).map_err(|e| e.to_string())?;
@@ -665,15 +828,38 @@ fn build_node_app_for_target(node_dir: &Path) -> Result<PathBuf, String> {
     let build = run_command_in_dir("npm", &["run", "build"], &member_dir)?;
     let _ = build;
 
-    let server_entry = ["dist/server/entry.mjs", "dist/server/index.js", "dist/index.js"]
-        .iter()
-        .map(|p| member_dir.join(p))
-        .find(|p| p.is_file())
-        .ok_or_else(|| format!("Astro build produced no dist/server entry under {}", member_dir.display()))?;
+    let server_entry = [
+        "dist/server/entry.mjs",
+        "dist/server/index.js",
+        "dist/index.js",
+    ]
+    .iter()
+    .map(|p| member_dir.join(p))
+    .find(|p| p.is_file())
+    .ok_or_else(|| {
+        format!(
+            "Astro build produced no dist/server entry under {}",
+            member_dir.display()
+        )
+    })?;
     let out = build_root.join(&pkg_name);
     let _ = std::fs::remove_file(&out);
-    let rel = server_entry.strip_prefix(&member_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| server_entry.display().to_string());
-    run_command_in_dir("bun", &["build", "--compile", "--target=bun-linux-x64", &rel, "--outfile", &out.display().to_string()], &member_dir)?;
+    let rel = server_entry
+        .strip_prefix(&member_dir)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| server_entry.display().to_string());
+    run_command_in_dir(
+        "bun",
+        &[
+            "build",
+            "--compile",
+            "--target=bun-linux-x64",
+            &rel,
+            "--outfile",
+            &out.display().to_string(),
+        ],
+        &member_dir,
+    )?;
     if !out.is_file() {
         return Err(format!("bun-compiled binary not found: {}", out.display()));
     }
@@ -682,8 +868,10 @@ fn build_node_app_for_target(node_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn node_package_name(node_dir: &Path) -> Result<String, String> {
-    let pkg_text = std::fs::read_to_string(node_dir.join("package.json")).map_err(|e| e.to_string())?;
-    let v: serde_json::Value = serde_json::from_str(&pkg_text).map_err(|e| format!("parse package.json: {e}"))?;
+    let pkg_text =
+        std::fs::read_to_string(node_dir.join("package.json")).map_err(|e| e.to_string())?;
+    let v: serde_json::Value =
+        serde_json::from_str(&pkg_text).map_err(|e| format!("parse package.json: {e}"))?;
     let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("node-lxs");
     Ok(name.trim_start_matches('@').replace('/', "-").to_string())
 }
@@ -692,7 +880,16 @@ fn copy_node_source(src: &Path, dst: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if [".git", "target", "node_modules", "dist", ".astro", ".output"].contains(&name.as_str()) {
+        if [
+            ".git",
+            "target",
+            "node_modules",
+            "dist",
+            ".astro",
+            ".output",
+        ]
+        .contains(&name.as_str())
+        {
             continue;
         }
         let source = entry.path();
@@ -701,14 +898,20 @@ fn copy_node_source(src: &Path, dst: &Path) -> Result<(), String> {
             std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
             copy_node_source(&source, &destination)?;
         } else if !source.is_symlink() {
-            std::fs::copy(&source, &destination).map_err(|e| format!("copy {}: {e}", source.display()))?;
+            std::fs::copy(&source, &destination)
+                .map_err(|e| format!("copy {}: {e}", source.display()))?;
         }
     }
     Ok(())
 }
 
 fn run_command_in_dir(cmd: &str, args: &[&str], dir: &Path) -> Result<(), String> {
-    util::run_command_env(cmd, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), dir, &std::env::vars().collect())
+    util::run_command_env(
+        cmd,
+        &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        dir,
+        &std::env::vars().collect(),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -723,14 +926,18 @@ pub(crate) fn parse_lxs_ref(ref_str: &str) -> Result<(String, Option<String>), S
         // No `@` present: only one part, the whole string is the name.
         None => {
             if tail.is_empty() {
-                Err(format!("invalid LXS reference: {ref_str} (expected name[@version])"))
+                Err(format!(
+                    "invalid LXS reference: {ref_str} (expected name[@version])"
+                ))
             } else {
                 Ok((tail, None))
             }
         }
         Some(name) => {
             if name.is_empty() || tail.is_empty() {
-                Err(format!("invalid LXS reference: {ref_str} (expected name[@version])"))
+                Err(format!(
+                    "invalid LXS reference: {ref_str} (expected name[@version])"
+                ))
             } else {
                 Ok((name, Some(tail)))
             }
@@ -739,7 +946,8 @@ pub(crate) fn parse_lxs_ref(ref_str: &str) -> Result<(String, Option<String>), S
 }
 
 pub(crate) fn load_manifest(path: &Path) -> Result<LxsManifest, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_yaml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
@@ -763,7 +971,9 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
                 bump_minor = true;
                 i += 1;
             }
-            other if other.starts_with("--") => return Err(format!("Unknown eco lxs publish option: {other}")),
+            other if other.starts_with("--") => {
+                return Err(format!("Unknown eco lxs publish option: {other}"))
+            }
             other => {
                 reference = other.to_string();
                 i += 1;
@@ -774,7 +984,10 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
         return Err("--major and --minor are mutually exclusive.".to_string());
     }
     if reference.is_empty() {
-        return Err("usage: eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]".to_string());
+        return Err(
+            "usage: eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]"
+                .to_string(),
+        );
     }
     // Version is optional: when omitted (just `<name>`), auto-bump the latest
     // published version — patch by default, or minor/major with the flag.
@@ -784,6 +997,12 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     };
     if name.is_empty() {
         return Err("usage: eco lxs publish <name>[@<version>]".to_string());
+    }
+    if explicit_version.is_some() && (bump_major || bump_minor) {
+        return Err(
+            "--major/--minor auto-bump only when no explicit version is supplied; use `eco lxs publish <name> --minor` or publish an explicit new version without a bump flag."
+                .to_string(),
+        );
     }
     let source = source.unwrap_or_else(util::current_dir);
     if !source.is_dir() {
@@ -798,13 +1017,29 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
                 // First publish: start at 0.1.0 (no bump on an empty registry).
                 None => "0.1.0".to_string(),
                 Some(latest_v) => {
-                    let base = parse_semver(&latest_v).unwrap_or(SemVer { major: 0, minor: 1, patch: 0 });
+                    let base = parse_semver(&latest_v).unwrap_or(SemVer {
+                        major: 0,
+                        minor: 1,
+                        patch: 0,
+                    });
                     let bumped = if bump_major {
-                        SemVer { major: base.major + 1, minor: 0, patch: 0 }
+                        SemVer {
+                            major: base.major + 1,
+                            minor: 0,
+                            patch: 0,
+                        }
                     } else if bump_minor {
-                        SemVer { major: base.major, minor: base.minor + 1, patch: 0 }
+                        SemVer {
+                            major: base.major,
+                            minor: base.minor + 1,
+                            patch: 0,
+                        }
                     } else {
-                        SemVer { major: base.major, minor: base.minor, patch: base.patch + 1 }
+                        SemVer {
+                            major: base.major,
+                            minor: base.minor,
+                            patch: base.patch + 1,
+                        }
                     };
                     let v = format!("{}.{}.{}", bumped.major, bumped.minor, bumped.patch);
                     println!("[eco lxs] Auto-bumped version: {} -> {}", latest_v, v);
@@ -817,13 +1052,20 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     let mut manifest = load_manifest(&source.join("lxs.yml"))?;
     validate_env_fields(&manifest.contract.env).map_err(|e| format!("publish lint: {e}"))?;
     if !manifest.name.is_empty() && manifest.name != name {
-        return Err(format!("lxs.yml name ({}) does not match reference ({name})", manifest.name));
+        return Err(format!(
+            "lxs.yml name ({}) does not match reference ({name})",
+            manifest.name
+        ));
     }
     if manifest.name.is_empty() {
         manifest.name = name.clone();
     }
     manifest.version = version.clone();
-    manifest.publisher = if manifest.publisher.is_empty() { "stuff8".to_string() } else { manifest.publisher };
+    manifest.publisher = if manifest.publisher.is_empty() {
+        "stuff8".to_string()
+    } else {
+        manifest.publisher
+    };
     if manifest.status.is_empty() {
         manifest.status = "unverified".to_string();
     }
@@ -835,28 +1077,55 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     }
 
     let artifacts_json = std::fs::read_to_string(source.join(ARTIFACTS_FILE)).map_err(|_| {
-        format!("{}/{} missing — run `eco lxs build` first", source.display(), ARTIFACTS_FILE)
+        format!(
+            "{}/{} missing — run `eco lxs build` first",
+            source.display(),
+            ARTIFACTS_FILE
+        )
     })?;
-    let artifacts_map: serde_json::Value = serde_json::from_str(&artifacts_json).map_err(|e| e.to_string())?;
-    let binaries = artifacts_map.get("binaries").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let artifacts_map: serde_json::Value =
+        serde_json::from_str(&artifacts_json).map_err(|e| e.to_string())?;
+    let binaries = artifacts_map
+        .get("binaries")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
     if binaries.is_empty() {
-        return Err(format!("{}/{} has no binaries — run `eco lxs build` first", source.display(), ARTIFACTS_FILE));
+        return Err(format!(
+            "{}/{} has no binaries — run `eco lxs build` first",
+            source.display(),
+            ARTIFACTS_FILE
+        ));
     }
 
     // Resolve the crate commit + origin for provenance.
     let commit = git(&["rev-parse".to_string(), "HEAD".to_string()], &source).unwrap_or_default();
     let origin = git_repo_origin(&source);
-    manifest.provenance.source = if manifest.provenance.source.is_empty() { origin } else { manifest.provenance.source };
+    manifest.provenance.source = if manifest.provenance.source.is_empty() {
+        origin
+    } else {
+        manifest.provenance.source
+    };
     manifest.provenance.commit = commit;
     manifest.provenance.built_by = format!("eco@{}", env!("CARGO_PKG_VERSION"));
     manifest.provenance.built_at = now_rfc3339();
 
     let version_dir = registry.join(&name).join(&version);
+    // Published versions are immutable. Rebuilding a binary is not an excuse
+    // to mutate a release that existing estates may already have verified and
+    // pinned; publish a new patch/minor/major instead.
+    if version_dir.exists() {
+        return Err(format!(
+            "refusing to overwrite existing published version {name}@{version}; LXS releases are immutable. Publish a new version (for example `eco lxs publish {name}` or `eco lxs publish {name} --minor`)."
+        ));
+    }
     std::fs::create_dir_all(&version_dir).map_err(|e| e.to_string())?;
 
     let mut targets = Vec::new();
     for (arch, binary) in &binaries {
-        let binary_str = binary.as_str().ok_or_else(|| format!("artifact map entry for {arch} is not a string path"))?;
+        let binary_str = binary
+            .as_str()
+            .ok_or_else(|| format!("artifact map entry for {arch} is not a string path"))?;
         let binary_path = Path::new(binary_str);
         if !binary_path.is_file() {
             return Err(format!("binary missing for {arch}: {binary_str}"));
@@ -865,14 +1134,29 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
         let dest_dir = version_dir.join(&short);
         std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
         let is_windows = arch.starts_with("windows/");
-        let artifact_name = if is_windows { format!("{name}.exe") } else { name.clone() };
+        let artifact_name = if is_windows {
+            format!("{name}.exe")
+        } else {
+            name.clone()
+        };
         let dest = dest_dir.join(&artifact_name);
-        std::fs::copy(binary_path, &dest).map_err(|e| format!("copy {} -> {}: {e}", binary_path.display(), dest.display()))?;
+        std::fs::copy(binary_path, &dest)
+            .map_err(|e| format!("copy {} -> {}: {e}", binary_path.display(), dest.display()))?;
         let size = std::fs::metadata(&dest).map_err(|e| e.to_string())?.len();
         let digest = sha256_file(&dest)?;
-        manifest.artifacts.insert(arch.clone(), LxsArtifact { path: format!("{short}/{artifact_name}"), sha256: digest, size });
+        manifest.artifacts.insert(
+            arch.clone(),
+            LxsArtifact {
+                path: format!("{short}/{artifact_name}"),
+                sha256: digest,
+                size,
+            },
+        );
         targets.push(arch.clone());
-        println!("[eco lxs] packaged {arch}: {} ({size} bytes)", dest.display());
+        println!(
+            "[eco lxs] packaged {arch}: {} ({size} bytes)",
+            dest.display()
+        );
     }
     manifest.targets = targets;
 
@@ -895,7 +1179,8 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
         ));
     }
     let docs_dest = version_dir.join("docs");
-    std::fs::create_dir_all(&docs_dest).map_err(|e| format!("create {}: {e}", docs_dest.display()))?;
+    std::fs::create_dir_all(&docs_dest)
+        .map_err(|e| format!("create {}: {e}", docs_dest.display()))?;
     copy_crate_source(&docs_dir, &docs_dest)?;
     let mut docs_files: Vec<String> = std::fs::read_dir(&docs_dir)
         .map_err(|e| format!("read {}: {e}", docs_dir.display()))?
@@ -906,7 +1191,10 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     docs_files.sort();
     let docs_count = docs_files.len();
     manifest.docs = docs_files;
-    println!("[eco lxs] bundled docs ({docs_count}) into {}", version_dir.join("docs").display());
+    println!(
+        "[eco lxs] bundled docs ({docs_count}) into {}",
+        version_dir.join("docs").display()
+    );
 
     if !manifest.release.contains(&version) {
         manifest.release.push(version.clone());
@@ -922,7 +1210,7 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
             "-c".to_string(),
             "user.name=Eko SW".to_string(),
             "-c".to_string(),
-            "user.email=swdev.bali@gmail.com".to_string(),
+            "user.email=576066+swdevbali@users.noreply.github.com".to_string(),
             "commit".to_string(),
             "-m".to_string(),
             format!("publish {name}@{version}"),
@@ -932,23 +1220,42 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
         git(&args, &registry)?;
     }
     // Tag only if the tag doesn't already exist.
-    let tag_exists = git(&["tag".to_string(), "-l".to_string(), tag.clone()], &registry).ok().map(|out| !out.is_empty()).unwrap_or(false);
+    let tag_exists = git(
+        &["tag".to_string(), "-l".to_string(), tag.clone()],
+        &registry,
+    )
+    .ok()
+    .map(|out| !out.is_empty())
+    .unwrap_or(false);
     if !tag_exists {
         git(&["tag".to_string(), tag.clone()], &registry)?;
     }
 
-    println!("[eco lxs] Published {name}@{version} to {} (tag {tag})", registry.display());
-    println!("[eco lxs] Push with: git -C {} push --tags", registry.display());
+    println!(
+        "[eco lxs] Published {name}@{version} to {} (tag {tag})",
+        registry.display()
+    );
+    println!(
+        "[eco lxs] Push with: git -C {} push --tags",
+        registry.display()
+    );
     Ok(())
 }
 
 pub(crate) fn now_rfc3339() -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs();
     let days = secs / 86400;
     let (year, month, day) = civil_from_days(days as i64);
     let rem = secs % 86400;
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rem / 3600, (rem % 3600) / 60, rem % 60)
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
@@ -976,7 +1283,9 @@ fn collect_lxs(registry: &Path) -> Result<Vec<LxsManifest>, String> {
     for name_entry in std::fs::read_dir(registry).map_err(|e| e.to_string())? {
         let name_entry = name_entry.map_err(|e| e.to_string())?;
         let name_dir = name_entry.path();
-        if !name_dir.is_dir() || ["node_modules", ".git"].contains(&name_entry.file_name().to_string_lossy().as_ref()) {
+        if !name_dir.is_dir()
+            || ["node_modules", ".git"].contains(&name_entry.file_name().to_string_lossy().as_ref())
+        {
             continue;
         }
         for version_entry in std::fs::read_dir(&name_dir).map_err(|e| e.to_string())? {
@@ -993,7 +1302,9 @@ fn collect_lxs(registry: &Path) -> Result<Vec<LxsManifest>, String> {
             }
         }
     }
-    out.sort_by(|a, b| format!("{}-{}", a.name, a.version).cmp(&format!("{}-{}", b.name, b.version)));
+    out.sort_by(|a, b| {
+        format!("{}-{}", a.name, a.version).cmp(&format!("{}-{}", b.name, b.version))
+    });
     Ok(out)
 }
 
@@ -1001,11 +1312,16 @@ fn collect_lxs(registry: &Path) -> Result<Vec<LxsManifest>, String> {
 /// downloading the artifact. Returns (name, latest_version, Some(current) if
 /// an address/pinned check applies). Used by `eco up`'s update check and by
 /// `eco lxs update`.
-pub fn latest_available_version(name: &str, address: Option<&str>) -> Result<Option<String>, String> {
+pub fn latest_available_version(
+    name: &str,
+    address: Option<&str>,
+) -> Result<Option<String>, String> {
     let target = resolve_registry_target(address)?;
     let versions = match target {
         RegistryTarget::Local(dir) => list_versions_local(&dir.join(name)),
-        RegistryTarget::Github { owner, repo, token } => list_versions_github(&owner, &repo, &token, name).unwrap_or_default(),
+        RegistryTarget::Github { owner, repo, token } => {
+            list_versions_github(&owner, &repo, &token, name).unwrap_or_default()
+        }
     };
     Ok(pick_latest(&versions))
 }
@@ -1020,15 +1336,27 @@ pub fn parse_pinned_ref(reference: &str) -> (String, Option<String>) {
 
 /// Fetch the changelog for a specific name@version from the registry (local
 /// path or GitHub). Returns the raw markdown; empty when unavailable.
-pub fn changelog_for_version(name: &str, version: &str, address: Option<&str>) -> Result<String, String> {
+pub fn changelog_for_version(
+    name: &str,
+    version: &str,
+    address: Option<&str>,
+) -> Result<String, String> {
     let target = resolve_registry_target(address)?;
     match target {
         RegistryTarget::Local(dir) => {
-            let path = dir.join(name).join(version).join("docs").join("changelog.md");
+            let path = dir
+                .join(name)
+                .join(version)
+                .join("docs")
+                .join("changelog.md");
             Ok(std::fs::read_to_string(&path).unwrap_or_default())
         }
         RegistryTarget::Github { owner, repo, token } => {
-            let url = github_raw_url(&owner, &repo, &format!("{name}/{version}/docs/changelog.md"));
+            let url = github_raw_url(
+                &owner,
+                &repo,
+                &format!("{name}/{version}/docs/changelog.md"),
+            );
             Ok(http_get_text(&url, &token).unwrap_or_default())
         }
     }
@@ -1081,7 +1409,12 @@ pub fn composed_lxs(content: &str) -> Vec<(String, String, String)> {
             in_services = true;
             continue;
         }
-        if in_services && !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+        if in_services
+            && !line.is_empty()
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && line.contains(':')
+        {
             break;
         }
         if !in_services {
@@ -1095,7 +1428,11 @@ pub fn composed_lxs(content: &str) -> Vec<(String, String, String)> {
             if let Some(lxs_val) = match_indented_value_4(line, "lxs") {
                 let (lxs_name, pinned) = parse_pinned_ref(&lxs_val);
                 if let Some(pinned) = pinned {
-                    out.push((current_service.clone(), lxs_name.clone(), format!("{lxs_name}@{pinned}")));
+                    out.push((
+                        current_service.clone(),
+                        lxs_name.clone(),
+                        format!("{lxs_name}@{pinned}"),
+                    ));
                 }
                 current_service.clear();
             }
@@ -1108,7 +1445,10 @@ pub fn composed_lxs(content: &str) -> Vec<(String, String, String)> {
 /// registry and return Vec<(service_name, pinned, latest)> where latest is a
 /// newer version. Fails silently (returns empty) when the registry is
 /// unreachable so `eco up` never blocks on an offline check.
-pub fn lxs_updates_available(content: &str, address: Option<&str>) -> Vec<(String, String, String)> {
+pub fn lxs_updates_available(
+    content: &str,
+    address: Option<&str>,
+) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     let mut in_services = false;
     let mut current_service = String::new();
@@ -1121,7 +1461,12 @@ pub fn lxs_updates_available(content: &str, address: Option<&str>) -> Vec<(Strin
             in_services = true;
             continue;
         }
-        if in_services && !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+        if in_services
+            && !line.is_empty()
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && line.contains(':')
+        {
             break;
         }
         if !in_services {
@@ -1136,8 +1481,22 @@ pub fn lxs_updates_available(content: &str, address: Option<&str>) -> Vec<(Strin
                 let (lxs_name, pinned) = parse_pinned_ref(&lxs_val);
                 if let Some(pinned) = pinned {
                     if let Ok(Some(latest)) = latest_available_version(&lxs_name, address) {
-                        if latest != pinned && parse_semver(&latest).map(|l| l > parse_semver(&pinned).unwrap_or(SemVer { major: 0, minor: 0, patch: 0 })).unwrap_or(false) {
-                            out.push((current_service.clone(), format!("{lxs_name}@{pinned}"), format!("{lxs_name}@{latest}")));
+                        if latest != pinned
+                            && parse_semver(&latest)
+                                .map(|l| {
+                                    l > parse_semver(&pinned).unwrap_or(SemVer {
+                                        major: 0,
+                                        minor: 0,
+                                        patch: 0,
+                                    })
+                                })
+                                .unwrap_or(false)
+                        {
+                            out.push((
+                                current_service.clone(),
+                                format!("{lxs_name}@{pinned}"),
+                                format!("{lxs_name}@{latest}"),
+                            ));
                         }
                     }
                 }
@@ -1152,7 +1511,11 @@ fn match_indented_key_2(line: &str) -> Option<String> {
     if line.len() >= 2 && line.starts_with("  ") && !line.starts_with("    ") {
         if let Some(rest) = line.trim_start().strip_suffix(':') {
             let key = rest.trim();
-            if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
                 return Some(key.to_string());
             }
         }
@@ -1173,7 +1536,10 @@ fn match_indented_value_4(line: &str, key: &str) -> Option<String> {
 
 /// Resolve just an LXS manifest (contract schema), without fetching any
 /// binary — used by `eco config` to render configuration forms.
-pub fn fetch_lxs_manifest(reference: &str, address: Option<&str>) -> Result<(LxsManifest, String), String> {
+pub fn fetch_lxs_manifest(
+    reference: &str,
+    address: Option<&str>,
+) -> Result<(LxsManifest, String), String> {
     let (name, pinned_version) = parse_lxs_ref(reference)?;
     let target = resolve_registry_target(address)?;
     match &target {
@@ -1181,8 +1547,12 @@ pub fn fetch_lxs_manifest(reference: &str, address: Option<&str>) -> Result<(Lxs
             let versions = list_versions_local(&dir.join(&name));
             let version = match &pinned_version {
                 Some(v) => v.clone(),
-                None => pick_latest(&versions)
-                    .ok_or_else(|| format!("no versions found for {name} under {}", dir.join(&name).display()))?,
+                None => pick_latest(&versions).ok_or_else(|| {
+                    format!(
+                        "no versions found for {name} under {}",
+                        dir.join(&name).display()
+                    )
+                })?,
             };
             let manifest = load_manifest(&dir.join(&name).join(&version).join("lxs.yml"))?;
             Ok((manifest, version))
@@ -1196,14 +1566,20 @@ pub fn fetch_lxs_manifest(reference: &str, address: Option<&str>) -> Result<(Lxs
                         .ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
                 }
             };
-            let text = http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
-            let manifest: LxsManifest = serde_yaml::from_str(&text).map_err(|e| format!("parse lxs.yml: {e}"))?;
+            let text =
+                http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
+            let manifest: LxsManifest =
+                serde_yaml::from_str(&text).map_err(|e| format!("parse lxs.yml: {e}"))?;
             Ok((manifest, version))
         }
     }
 }
 
-pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) -> Result<(LxsManifest, String, PathBuf), String> {
+pub fn fetch_lxs_to_cache(
+    reference: &str,
+    arch: &str,
+    address: Option<&str>,
+) -> Result<(LxsManifest, String, PathBuf), String> {
     let (name, pinned_version) = parse_lxs_ref(reference)?;
     let target = resolve_registry_target(address)?;
     let short = arch.replace("linux/", "linux-");
@@ -1216,8 +1592,12 @@ pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) ->
             let versions = list_versions_local(&dir.join(&name));
             let version = match &pinned_version {
                 Some(v) => v.clone(),
-                None => pick_latest(&versions)
-                    .ok_or_else(|| format!("no versions found for {name} under {}", dir.join(&name).display()))?,
+                None => pick_latest(&versions).ok_or_else(|| {
+                    format!(
+                        "no versions found for {name} under {}",
+                        dir.join(&name).display()
+                    )
+                })?,
             };
             let vdir = dir.join(&name).join(&version);
             let manifest = load_manifest(&vdir.join("lxs.yml"))?;
@@ -1228,28 +1608,44 @@ pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) ->
                 Some(v) => v.clone(),
                 None => {
                     let versions = list_versions_github(owner, repo, token, &name)?;
-                    pick_latest(&versions).ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
+                    pick_latest(&versions)
+                        .ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
                 }
             };
-            let manifest_text = http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
-            let manifest: LxsManifest = serde_yaml::from_str(&manifest_text).map_err(|e| format!("parse lxs.yml: {e}"))?;
+            let manifest_text =
+                http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
+            let manifest: LxsManifest =
+                serde_yaml::from_str(&manifest_text).map_err(|e| format!("parse lxs.yml: {e}"))?;
             (manifest, version)
         }
     };
 
-    let cache = Path::new(&util::home_dir()).join(".cache").join("eco").join("lxs").join(&name).join(&version).join(&short);
+    let cache = Path::new(&util::home_dir())
+        .join(".cache")
+        .join("eco")
+        .join("lxs")
+        .join(&name)
+        .join(&version)
+        .join(&short);
     let dest = cache.join(&name);
-    let want_sha = manifest
-        .artifacts
-        .get(arch)
-        .and_then(|a| if a.sha256.is_empty() { None } else { Some(a.sha256.clone()) });
+    let want_sha = manifest.artifacts.get(arch).and_then(|a| {
+        if a.sha256.is_empty() {
+            None
+        } else {
+            Some(a.sha256.clone())
+        }
+    });
 
     // Cache hit: reuse an existing binary whose checksum matches the manifest
     // instead of re-downloading (avoids GitHub raw CDN rate limits on repeated
     // deploys).
     if dest.is_file() {
         let digest = sha256_file(&dest)?;
-        if want_sha.as_deref().map(|w| w == digest.as_str()).unwrap_or(true) {
+        if want_sha
+            .as_deref()
+            .map(|w| w == digest.as_str())
+            .unwrap_or(true)
+        {
             return Ok((manifest, version, dest));
         }
     }
@@ -1257,18 +1653,26 @@ pub fn fetch_lxs_to_cache(reference: &str, arch: &str, address: Option<&str>) ->
     let bytes = match &target {
         RegistryTarget::Local(dir) => {
             let vdir = dir.join(&name).join(&version);
-            let artifact = manifest
-                .artifacts
-                .get(arch)
-                .ok_or_else(|| format!("{name}@{version} has no {arch} artifact (targets: {:?})", manifest.targets))?;
-            std::fs::read(vdir.join(&artifact.path)).map_err(|e| format!("read {}: {e}", vdir.join(&artifact.path).display()))?
+            let artifact = manifest.artifacts.get(arch).ok_or_else(|| {
+                format!(
+                    "{name}@{version} has no {arch} artifact (targets: {:?})",
+                    manifest.targets
+                )
+            })?;
+            std::fs::read(vdir.join(&artifact.path))
+                .map_err(|e| format!("read {}: {e}", vdir.join(&artifact.path).display()))?
         }
         RegistryTarget::Github { owner, repo, token } => {
-            let artifact = manifest
-                .artifacts
-                .get(arch)
-                .ok_or_else(|| format!("{name}@{version} has no {arch} artifact (targets: {:?})", manifest.targets))?;
-            http_get_bytes(&github_raw_url(owner, repo, &format!("{name}/{version}/{}", artifact.path)), token)?
+            let artifact = manifest.artifacts.get(arch).ok_or_else(|| {
+                format!(
+                    "{name}@{version} has no {arch} artifact (targets: {:?})",
+                    manifest.targets
+                )
+            })?;
+            http_get_bytes(
+                &github_raw_url(owner, repo, &format!("{name}/{version}/{}", artifact.path)),
+                token,
+            )?
         }
     };
 
@@ -1286,23 +1690,34 @@ fn collect_lxs_github(owner: &str, repo: &str, token: &str) -> Result<Vec<LxsMan
     let mut out = Vec::new();
     let root_url = github_api_contents_url(owner, repo, "");
     let root_text = http_get_text(&root_url, token)?;
-    let root: serde_json::Value = serde_json::from_str(&root_text).map_err(|e| format!("parse registry root: {e}"))?;
-    let arr = root.as_array().ok_or_else(|| format!("expected a directory listing for {owner}/{repo}"))?;
+    let root: serde_json::Value =
+        serde_json::from_str(&root_text).map_err(|e| format!("parse registry root: {e}"))?;
+    let arr = root
+        .as_array()
+        .ok_or_else(|| format!("expected a directory listing for {owner}/{repo}"))?;
     for item in arr {
-        let name = match (item.get("type").and_then(|t| t.as_str()), item.get("name").and_then(|n| n.as_str())) {
+        let name = match (
+            item.get("type").and_then(|t| t.as_str()),
+            item.get("name").and_then(|n| n.as_str()),
+        ) {
             (Some("dir"), Some(n)) => n.to_string(),
             _ => continue,
         };
         let versions = list_versions_github(owner, repo, token, &name).unwrap_or_default();
         for v in versions {
-            if let Ok(text) = http_get_text(&github_raw_url(owner, repo, &format!("{name}/{v}/lxs.yml")), token) {
+            if let Ok(text) = http_get_text(
+                &github_raw_url(owner, repo, &format!("{name}/{v}/lxs.yml")),
+                token,
+            ) {
                 if let Ok(m) = serde_yaml::from_str::<LxsManifest>(&text) {
                     out.push(m);
                 }
             }
         }
     }
-    out.sort_by(|a, b| format!("{}-{}", a.name, a.version).cmp(&format!("{}-{}", b.name, b.version)));
+    out.sort_by(|a, b| {
+        format!("{}-{}", a.name, a.version).cmp(&format!("{}-{}", b.name, b.version))
+    });
     Ok(out)
 }
 
@@ -1333,13 +1748,30 @@ fn run_lxs_search(args: &[String]) -> Result<(), String> {
         }
     }
     let all = collect_lxs_from_target(address.as_deref())?;
-    let matches: Vec<&LxsManifest> = all.iter().filter(|m| query.is_empty() || m.name.to_lowercase().contains(&query) || m.summary.to_lowercase().contains(&query)).collect();
+    let matches: Vec<&LxsManifest> = all
+        .iter()
+        .filter(|m| {
+            query.is_empty()
+                || m.name.to_lowercase().contains(&query)
+                || m.summary.to_lowercase().contains(&query)
+        })
+        .collect();
     if matches.is_empty() {
-        println!("[eco lxs] No LXS found{}", if query.is_empty() { String::new() } else { format!(" matching \"{query}\"") });
+        println!(
+            "[eco lxs] No LXS found{}",
+            if query.is_empty() {
+                String::new()
+            } else {
+                format!(" matching \"{query}\"")
+            }
+        );
         return Ok(());
     }
     for m in &matches {
-        println!("{:<18} {:<10} {:<12} {}", m.name, m.version, m.status, m.summary);
+        println!(
+            "{:<18} {:<10} {:<12} {}",
+            m.name, m.version, m.status, m.summary
+        );
     }
     Ok(())
 }
@@ -1353,7 +1785,9 @@ fn run_lxs_list(args: &[String]) -> Result<(), String> {
                 address = Some(args.get(i + 1).cloned().unwrap_or_default());
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs list option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs list option: {other}"))
+            }
             other => {
                 let _ = other;
                 i += 1;
@@ -1366,7 +1800,13 @@ fn run_lxs_list(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     for m in &all {
-        println!("{:<18} {:<10} {:<12} artifacts: {}", m.name, m.version, m.status, m.artifacts.len());
+        println!(
+            "{:<18} {:<10} {:<12} artifacts: {}",
+            m.name,
+            m.version,
+            m.status,
+            m.artifacts.len()
+        );
     }
     Ok(())
 }
@@ -1386,7 +1826,9 @@ fn run_lxs_pull(args: &[String]) -> Result<(), String> {
                 arch = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs pull option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs pull option: {other}"))
+            }
             other => {
                 reference = other.to_string();
                 i += 1;
@@ -1394,10 +1836,16 @@ fn run_lxs_pull(args: &[String]) -> Result<(), String> {
         }
     }
     if reference.is_empty() {
-        return Err("usage: eco lxs pull <name>@<version> [--arch linux/amd64] [--address <registry>]".to_string());
+        return Err(
+            "usage: eco lxs pull <name>@<version> [--arch linux/amd64] [--address <registry>]"
+                .to_string(),
+        );
     }
     let (_, version, dest) = fetch_lxs_to_cache(&reference, &arch, address.as_deref())?;
-    println!("[eco lxs] Pulled {reference} ({arch}) -> {} [verified] (version {version})", dest.display());
+    println!(
+        "[eco lxs] Pulled {reference} ({arch}) -> {} [verified] (version {version})",
+        dest.display()
+    );
     Ok(())
 }
 
@@ -1416,7 +1864,9 @@ fn run_lxs_verify(args: &[String]) -> Result<(), String> {
                 arch = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs verify option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs verify option: {other}"))
+            }
             other => {
                 reference = other.to_string();
                 i += 1;
@@ -1424,10 +1874,17 @@ fn run_lxs_verify(args: &[String]) -> Result<(), String> {
         }
     }
     if reference.is_empty() {
-        return Err("usage: eco lxs verify <name>@<version> [--arch linux/amd64] [--address <registry>]".to_string());
+        return Err(
+            "usage: eco lxs verify <name>@<version> [--arch linux/amd64] [--address <registry>]"
+                .to_string(),
+        );
     }
     let (manifest, version, dest) = fetch_lxs_to_cache(&reference, &arch, address.as_deref())?;
-    println!("[eco lxs] {reference} verified (v{version}, {} artifacts) -> {}", manifest.artifacts.len(), dest.display());
+    println!(
+        "[eco lxs] {reference} verified (v{version}, {} artifacts) -> {}",
+        manifest.artifacts.len(),
+        dest.display()
+    );
     Ok(())
 }
 
@@ -1454,7 +1911,11 @@ fn github_token_from_env() -> String {
             }
         }
     }
-    if let Ok(out) = util::run_capture("gh", &["auth".to_string(), "token".to_string()], &util::current_dir()) {
+    if let Ok(out) = util::run_capture(
+        "gh",
+        &["auth".to_string(), "token".to_string()],
+        &util::current_dir(),
+    ) {
         if out.code == 0 {
             let t = out.stdout.trim().to_string();
             if !t.is_empty() {
@@ -1467,12 +1928,20 @@ fn github_token_from_env() -> String {
 
 enum RegistryTarget {
     Local(PathBuf),
-    Github { owner: String, repo: String, token: String },
+    Github {
+        owner: String,
+        repo: String,
+        token: String,
+    },
 }
 
 fn is_local_path(address: &str) -> bool {
     let a = address.trim();
-    a.starts_with('.') || a.starts_with('/') || a.starts_with('~') || a.starts_with("file://") || Path::new(a).exists()
+    a.starts_with('.')
+        || a.starts_with('/')
+        || a.starts_with('~')
+        || a.starts_with("file://")
+        || Path::new(a).exists()
 }
 
 fn parse_github_owner_repo(address: &str) -> Option<(String, String)> {
@@ -1510,11 +1979,19 @@ fn resolve_registry_target(address: Option<&str>) -> Result<RegistryTarget, Stri
         Some(a) => {
             let (owner, repo) = parse_github_owner_repo(a)
                 .ok_or_else(|| format!("cannot parse registry address: {a} (use owner/repo, a git URL, or a local path)"))?;
-            Ok(RegistryTarget::Github { owner, repo, token: github_token_from_env() })
+            Ok(RegistryTarget::Github {
+                owner,
+                repo,
+                token: github_token_from_env(),
+            })
         }
         None => {
             let (owner, repo) = ("getecosphere".to_string(), DEFAULT_REGISTRY.to_string());
-            Ok(RegistryTarget::Github { owner, repo, token: github_token_from_env() })
+            Ok(RegistryTarget::Github {
+                owner,
+                repo,
+                token: github_token_from_env(),
+            })
         }
     }
 }
@@ -1530,10 +2007,16 @@ fn github_api_contents_url(owner: &str, repo: &str, path: &str) -> String {
 /// Fetch a file's text from GitHub via the contents API (base64), which is
 /// not cached by the raw.githubusercontent CDN the way raw URLs are — a raw
 /// URL can serve a stale version of a just-pushed manifest for minutes.
-fn http_get_github_text(owner: &str, repo: &str, path: &str, token: &str) -> Result<String, String> {
+fn http_get_github_text(
+    owner: &str,
+    repo: &str,
+    path: &str,
+    token: &str,
+) -> Result<String, String> {
     let url = github_api_contents_url(owner, repo, path);
     let text = http_get_text(&url, token)?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("parse contents response for {path}: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("parse contents response for {path}: {e}"))?;
     let b64 = value
         .get("content")
         .and_then(|c| c.as_str())
@@ -1560,7 +2043,11 @@ fn http_get_text(url: &str, token: &str) -> Result<String, String> {
             } else {
                 ""
             };
-            Err(format!("HTTP {code} fetching {url}: {}{}", body.chars().take(160).collect::<String>(), hint))
+            Err(format!(
+                "HTTP {code} fetching {url}: {}{}",
+                body.chars().take(160).collect::<String>(),
+                hint
+            ))
         }
         Err(ureq::Error::Transport(t)) => Err(format!("network error fetching {url}: {t}")),
     }
@@ -1575,22 +2062,35 @@ fn http_get_bytes(url: &str, token: &str) -> Result<Vec<u8>, String> {
     match req.timeout(std::time::Duration::from_secs(180)).call() {
         Ok(resp) => {
             let mut buf = Vec::new();
-            resp.into_reader().read_to_end(&mut buf).map_err(|e| format!("read {url}: {e}"))?;
+            resp.into_reader()
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("read {url}: {e}"))?;
             Ok(buf)
         }
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            Err(format!("HTTP {code} downloading {url}: {}", body.chars().take(160).collect::<String>()))
+            Err(format!(
+                "HTTP {code} downloading {url}: {}",
+                body.chars().take(160).collect::<String>()
+            ))
         }
         Err(ureq::Error::Transport(t)) => Err(format!("network error downloading {url}: {t}")),
     }
 }
 
-fn list_versions_github(owner: &str, repo: &str, token: &str, name: &str) -> Result<Vec<String>, String> {
+fn list_versions_github(
+    owner: &str,
+    repo: &str,
+    token: &str,
+    name: &str,
+) -> Result<Vec<String>, String> {
     let url = github_api_contents_url(owner, repo, name);
     let text = http_get_text(&url, token)?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("parse registry listing for {name}: {e}"))?;
-    let arr = value.as_array().ok_or_else(|| format!("expected a directory listing for {name} in {owner}/{repo}"))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("parse registry listing for {name}: {e}"))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| format!("expected a directory listing for {name} in {owner}/{repo}"))?;
     let mut versions = Vec::new();
     for item in arr {
         if item.get("type").and_then(|t| t.as_str()) == Some("dir") {
@@ -1627,7 +2127,11 @@ fn parse_semver(v: &str) -> Option<SemVer> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;
     let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some(SemVer { major, minor, patch })
+    Some(SemVer {
+        major,
+        minor,
+        patch,
+    })
 }
 
 fn pick_latest(versions: &[String]) -> Option<String> {
@@ -1638,22 +2142,34 @@ fn pick_latest(versions: &[String]) -> Option<String> {
         .map(|(_, v)| v)
 }
 
-fn fetch_lxs(target: &RegistryTarget, name: &str, version: Option<&str>, arch: &str) -> Result<(LxsManifest, String, Vec<u8>), String> {
+fn fetch_lxs(
+    target: &RegistryTarget,
+    name: &str,
+    version: Option<&str>,
+    arch: &str,
+) -> Result<(LxsManifest, String, Vec<u8>), String> {
     match target {
         RegistryTarget::Local(dir) => {
             let versions = list_versions_local(&dir.join(name));
             let version = match version {
                 Some(v) => v.to_string(),
-                None => pick_latest(&versions)
-                    .ok_or_else(|| format!("no versions found for {name} under {}", dir.join(name).display()))?,
+                None => pick_latest(&versions).ok_or_else(|| {
+                    format!(
+                        "no versions found for {name} under {}",
+                        dir.join(name).display()
+                    )
+                })?,
             };
             let vdir = dir.join(name).join(&version);
             let manifest = load_manifest(&vdir.join("lxs.yml"))?;
-            let artifact = manifest
-                .artifacts
-                .get(arch)
-                .ok_or_else(|| format!("{name}@{version} has no {arch} artifact (targets: {:?})", manifest.targets))?;
-            let bytes = std::fs::read(vdir.join(&artifact.path)).map_err(|e| format!("read {}: {e}", vdir.join(&artifact.path).display()))?;
+            let artifact = manifest.artifacts.get(arch).ok_or_else(|| {
+                format!(
+                    "{name}@{version} has no {arch} artifact (targets: {:?})",
+                    manifest.targets
+                )
+            })?;
+            let bytes = std::fs::read(vdir.join(&artifact.path))
+                .map_err(|e| format!("read {}: {e}", vdir.join(&artifact.path).display()))?;
             Ok((manifest, version, bytes))
         }
         RegistryTarget::Github { owner, repo, token } => {
@@ -1661,16 +2177,24 @@ fn fetch_lxs(target: &RegistryTarget, name: &str, version: Option<&str>, arch: &
                 Some(v) => v.to_string(),
                 None => {
                     let versions = list_versions_github(owner, repo, token, name)?;
-                    pick_latest(&versions).ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
+                    pick_latest(&versions)
+                        .ok_or_else(|| format!("no versions found for {name} in {owner}/{repo}"))?
                 }
             };
-            let manifest_text = http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
-            let manifest: LxsManifest = serde_yaml::from_str(&manifest_text).map_err(|e| format!("parse lxs.yml: {e}"))?;
-            let artifact = manifest
-                .artifacts
-                .get(arch)
-                .ok_or_else(|| format!("{name}@{version} has no {arch} artifact (targets: {:?})", manifest.targets))?;
-            let bytes = http_get_bytes(&github_raw_url(owner, repo, &format!("{name}/{version}/{}", artifact.path)), token)?;
+            let manifest_text =
+                http_get_github_text(owner, repo, &format!("{name}/{version}/lxs.yml"), token)?;
+            let manifest: LxsManifest =
+                serde_yaml::from_str(&manifest_text).map_err(|e| format!("parse lxs.yml: {e}"))?;
+            let artifact = manifest.artifacts.get(arch).ok_or_else(|| {
+                format!(
+                    "{name}@{version} has no {arch} artifact (targets: {:?})",
+                    manifest.targets
+                )
+            })?;
+            let bytes = http_get_bytes(
+                &github_raw_url(owner, repo, &format!("{name}/{version}/{}", artifact.path)),
+                token,
+            )?;
             Ok((manifest, version, bytes))
         }
     }
@@ -1681,7 +2205,11 @@ fn fetch_lxs(target: &RegistryTarget, name: &str, version: Option<&str>, arch: &
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn run_lxs_init_registry(args: &[String]) -> Result<(), String> {
-    let folder = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| ".".to_string());
+    let folder = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
     let dir = Path::new(&folder);
     if dir.exists() && !dir.is_dir() {
         return Err(format!("{} is not a directory", dir.display()));
@@ -1724,8 +2252,20 @@ eco lxs add <name>@<version>             # pin a specific version
     std::fs::write(dir.join("README.md"), readme).map_err(|e| format!("write README.md: {e}"))?;
     std::fs::write(dir.join(".gitignore"), "*.tmp\n").map_err(|e| e.to_string())?;
     if !dir.join(".git").exists() {
-        run_command("git", &["init".to_string(), "-b".to_string(), "main".to_string()], dir)?;
-        run_command("git", &["add".to_string(), "README.md".to_string(), ".gitignore".to_string()], dir)?;
+        run_command(
+            "git",
+            &["init".to_string(), "-b".to_string(), "main".to_string()],
+            dir,
+        )?;
+        run_command(
+            "git",
+            &[
+                "add".to_string(),
+                "README.md".to_string(),
+                ".gitignore".to_string(),
+            ],
+            dir,
+        )?;
         run_command(
             "git",
             &[
@@ -1772,7 +2312,9 @@ pub fn read_estate_state(estate_root: &Path) -> Option<EstateState> {
     if !path.is_file() {
         return None;
     }
-    std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok())
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 pub fn write_estate_state(estate_root: &Path, project: &str, registry: &str) -> Result<(), String> {
@@ -1780,7 +2322,11 @@ pub fn write_estate_state(estate_root: &Path, project: &str, registry: &str) -> 
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let state = EstateState {
         project: project.to_string(),
-        registry: if registry.is_empty() { "getecosphere/lxs-registry".to_string() } else { registry.to_string() },
+        registry: if registry.is_empty() {
+            "getecosphere/lxs-registry".to_string()
+        } else {
+            registry.to_string()
+        },
         updated_at: now_rfc3339(),
     };
     let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
@@ -1800,7 +2346,12 @@ fn estate_project_name(estate_root: &Path) -> String {
             }
             (!p.is_empty()).then_some(p)
         })
-        .unwrap_or_else(|| estate_root.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+        .unwrap_or_else(|| {
+            estate_root
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
 }
 
 fn ensure_estate_state(estate_root: &Path, registry: &str) -> Result<(), String> {
@@ -1823,7 +2374,9 @@ fn run_lxs_estates(args: &[String]) -> Result<(), String> {
                 base = Some(PathBuf::from(args.get(i + 1).cloned().unwrap_or_default()));
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs estates option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs estates option: {other}"))
+            }
             other => {
                 base = Some(PathBuf::from(other));
                 i += 1;
@@ -1845,10 +2398,23 @@ fn run_lxs_estates(args: &[String]) -> Result<(), String> {
             let state = read_estate_state(&dir);
             if ecompose.is_file() || state.is_some() {
                 found += 1;
-                let project = state.as_ref().map(|s| s.project.clone()).unwrap_or_else(|| estate_project_name(&dir));
-                let registry = state.as_ref().map(|s| s.registry.clone()).unwrap_or_else(|| "getecosphere/lxs-registry".to_string());
+                let project = state
+                    .as_ref()
+                    .map(|s| s.project.clone())
+                    .unwrap_or_else(|| estate_project_name(&dir));
+                let registry = state
+                    .as_ref()
+                    .map(|s| s.registry.clone())
+                    .unwrap_or_else(|| "getecosphere/lxs-registry".to_string());
                 println!("{:<20} registry: {}", project, registry);
-                println!("  ecompose: {}", if ecompose.is_file() { ecompose.display().to_string() } else { "(not yet adopted)".to_string() });
+                println!(
+                    "  ecompose: {}",
+                    if ecompose.is_file() {
+                        ecompose.display().to_string()
+                    } else {
+                        "(not yet adopted)".to_string()
+                    }
+                );
             }
         }
     }
@@ -1876,7 +2442,8 @@ fn find_estate_ecompose(cwd: &Path) -> Result<PathBuf, String> {
 }
 
 fn insert_service_into_ecompose(manifest_path: &Path, block: &str) -> Result<(), String> {
-    let content = std::fs::read_to_string(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     let lines: Vec<&str> = content.split('\n').collect();
     let mut svc_idx: Option<usize> = None;
     for (idx, line) in lines.iter().enumerate() {
@@ -1911,15 +2478,22 @@ fn insert_service_into_ecompose(manifest_path: &Path, block: &str) -> Result<(),
         }
         None => format!("{}\nservices:{block}", content.trim_end()),
     };
-    std::fs::write(manifest_path, new_content).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    std::fs::write(manifest_path, new_content)
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
     println!("[eco lxs] Updated {}", manifest_path.display());
     Ok(())
 }
 
-fn upsert_service_ref(manifest_path: &Path, service: &str, key: &str, value: &str) -> Result<bool, String> {
+fn upsert_service_ref(
+    manifest_path: &Path,
+    service: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
     // Ok(true) = service block already existed (its `key:` ref updated);
     // Ok(false) = a new service block was inserted.
-    let content = std::fs::read_to_string(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     let lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
     let service_header = format!("  {service}:");
     let mut start: Option<usize> = None;
@@ -1932,8 +2506,12 @@ fn upsert_service_ref(manifest_path: &Path, service: &str, key: &str, value: &st
         }
         if let Some(s) = start {
             if end.is_none() {
-                let is_sibling = t.len() >= 2 && t.starts_with("  ") && !t.starts_with("    ") && t.ends_with(':');
-                let is_top = !t.trim_start().is_empty() && !t.starts_with(' ') && !t.starts_with('\t');
+                let is_sibling = t.len() >= 2
+                    && t.starts_with("  ")
+                    && !t.starts_with("    ")
+                    && t.ends_with(':');
+                let is_top =
+                    !t.trim_start().is_empty() && !t.starts_with(' ') && !t.starts_with('\t');
                 if (is_sibling && idx > s) || is_top {
                     end = Some(idx);
                     break;
@@ -1983,7 +2561,8 @@ fn upsert_service_ref(manifest_path: &Path, service: &str, key: &str, value: &st
         }
         with_key
     };
-    std::fs::write(manifest_path, new_content).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    std::fs::write(manifest_path, new_content)
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
     Ok(true)
 }
 
@@ -1992,9 +2571,15 @@ fn add_lxs_service_to_ecompose(service: &str, lxs_ref: &str) -> Result<(), Strin
     let manifest_path = find_estate_ecompose(&cwd)?;
     let existed = upsert_service_ref(&manifest_path, service, "lxs", lxs_ref)?;
     if existed {
-        println!("[eco lxs] Updated {service} ({lxs_ref}) in {}", manifest_path.display());
+        println!(
+            "[eco lxs] Updated {service} ({lxs_ref}) in {}",
+            manifest_path.display()
+        );
     } else {
-        println!("[eco lxs] Added {service} ({lxs_ref}) to {}", manifest_path.display());
+        println!(
+            "[eco lxs] Added {service} ({lxs_ref}) to {}",
+            manifest_path.display()
+        );
     }
     Ok(())
 }
@@ -2004,9 +2589,15 @@ fn add_source_service_to_ecompose(service: &str, rel_path: &str) -> Result<(), S
     let manifest_path = find_estate_ecompose(&cwd)?;
     let existed = upsert_service_ref(&manifest_path, service, "path", rel_path)?;
     if existed {
-        println!("[eco lxs] Updated {service} (path: {rel_path}) in {}", manifest_path.display());
+        println!(
+            "[eco lxs] Updated {service} (path: {rel_path}) in {}",
+            manifest_path.display()
+        );
     } else {
-        println!("[eco lxs] Added {service} (path: {rel_path}) to {}", manifest_path.display());
+        println!(
+            "[eco lxs] Added {service} (path: {rel_path}) to {}",
+            manifest_path.display()
+        );
     }
     Ok(())
 }
@@ -2023,7 +2614,9 @@ fn run_lxs_update(args: &[String]) -> Result<(), String> {
                 address = Some(args.get(i + 1).cloned().unwrap_or_default());
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs update option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs update option: {other}"))
+            }
             other => {
                 name_filter = Some(other.to_string());
                 i += 1;
@@ -2033,10 +2626,14 @@ fn run_lxs_update(args: &[String]) -> Result<(), String> {
 
     let cwd = util::current_dir();
     let manifest_path = find_estate_ecompose(&cwd)?;
-    let content = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     let updates = lxs_updates_available(&content, address.as_deref());
     if updates.is_empty() {
-        println!("[eco lxs] All composed LXS are up to date in {}", manifest_path.display());
+        println!(
+            "[eco lxs] All composed LXS are up to date in {}",
+            manifest_path.display()
+        );
         return Ok(());
     }
 
@@ -2054,7 +2651,10 @@ fn run_lxs_update(args: &[String]) -> Result<(), String> {
     }
     if !any {
         if let Some(filter) = name_filter {
-            return Err(format!("No update available for LXS \"{filter}\" in {}", manifest_path.display()));
+            return Err(format!(
+                "No update available for LXS \"{filter}\" in {}",
+                manifest_path.display()
+            ));
         }
     }
     println!("\nRun `eco up --remote` to deploy the updated LXS binaries.");
@@ -2073,7 +2673,9 @@ fn run_lxs_outdated(args: &[String]) -> Result<(), String> {
                 address = Some(args.get(i + 1).cloned().unwrap_or_default());
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs outdated option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs outdated option: {other}"))
+            }
             _ => {
                 i += 1;
             }
@@ -2082,10 +2684,14 @@ fn run_lxs_outdated(args: &[String]) -> Result<(), String> {
 
     let cwd = util::current_dir();
     let manifest_path = find_estate_ecompose(&cwd)?;
-    let content = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     let composed = composed_lxs(&content);
     if composed.is_empty() {
-        println!("[eco lxs] No composed LXS found in {}", manifest_path.display());
+        println!(
+            "[eco lxs] No composed LXS found in {}",
+            manifest_path.display()
+        );
         return Ok(());
     }
 
@@ -2094,9 +2700,16 @@ fn run_lxs_outdated(args: &[String]) -> Result<(), String> {
     for (service, name, pinned) in &composed {
         let from_v = pinned.split('@').nth(1).unwrap_or("");
         match latest_available_version(name, address.as_deref()) {
-            Ok(Some(latest)) if latest != from_v && parse_semver(&latest) > parse_semver(from_v) => {
+            Ok(Some(latest))
+                if latest != from_v && parse_semver(&latest) > parse_semver(from_v) =>
+            {
                 outdated_count += 1;
-                util::println_stdout(&format!("  {}  \x1b[1;33m{} -> {}\x1b[0m", service, pinned, format!("{name}@{latest}")));
+                util::println_stdout(&format!(
+                    "  {}  \x1b[1;33m{} -> {}\x1b[0m",
+                    service,
+                    pinned,
+                    format!("{name}@{latest}")
+                ));
                 let note = changelog_note(name, &latest, from_v, address.as_deref());
                 if !note.is_empty() {
                     for line in note.lines() {
@@ -2106,10 +2719,16 @@ fn run_lxs_outdated(args: &[String]) -> Result<(), String> {
                 util::println_stdout(&format!("     update: `eco lxs update {name}`\n"));
             }
             Ok(Some(latest)) => {
-                util::println_stdout(&format!("  {}  {}  (\x1b[0;32mup to date\x1b[0m, latest {name}@{latest})", service, pinned));
+                util::println_stdout(&format!(
+                    "  {}  {}  (\x1b[0;32mup to date\x1b[0m, latest {name}@{latest})",
+                    service, pinned
+                ));
             }
             _ => {
-                util::println_stdout(&format!("  {}  {}  (latest unknown — registry unreachable)", service, pinned));
+                util::println_stdout(&format!(
+                    "  {}  {}  (latest unknown — registry unreachable)",
+                    service, pinned
+                ));
             }
         }
     }
@@ -2133,7 +2752,8 @@ fn run_lxs_remove(args: &[String]) -> Result<(), String> {
 
     let cwd = util::current_dir();
     let manifest_path = find_estate_ecompose(&cwd)?;
-    let content = std::fs::read_to_string(&manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     let lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
 
     // Find the service block: a 2-space `name:` line; capture through the next
@@ -2149,8 +2769,12 @@ fn run_lxs_remove(args: &[String]) -> Result<(), String> {
         }
         if let Some(s) = start {
             if end.is_none() && idx > s {
-                let is_sibling = t.len() >= 2 && t.starts_with("  ") && !t.starts_with("    ") && t.ends_with(':');
-                let is_top = !t.trim_start().is_empty() && !t.starts_with(' ') && !t.starts_with('\t');
+                let is_sibling = t.len() >= 2
+                    && t.starts_with("  ")
+                    && !t.starts_with("    ")
+                    && t.ends_with(':');
+                let is_top =
+                    !t.trim_start().is_empty() && !t.starts_with(' ') && !t.starts_with('\t');
                 if is_sibling || is_top {
                     end = Some(idx);
                     break;
@@ -2159,7 +2783,10 @@ fn run_lxs_remove(args: &[String]) -> Result<(), String> {
         }
     }
     let Some(s) = start else {
-        return Err(format!("No service named \"{name}\" in {}", manifest_path.display()));
+        return Err(format!(
+            "No service named \"{name}\" in {}",
+            manifest_path.display()
+        ));
     };
     let e = end.unwrap_or(lines.len());
     // Trim a trailing blank line that belonged to the removed block.
@@ -2245,7 +2872,8 @@ fn run_lxs_remove(args: &[String]) -> Result<(), String> {
     new_content = new_content.trim_end().to_string();
     new_content.push('\n');
 
-    std::fs::write(&manifest_path, new_content).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    std::fs::write(&manifest_path, new_content)
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
     println!("[eco lxs] Removed {name} from {}", manifest_path.display());
     Ok(())
 }
@@ -2265,7 +2893,9 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
                 arch = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs add option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs add option: {other}"))
+            }
             other => {
                 positional.push(other.to_string());
                 i += 1;
@@ -2277,10 +2907,9 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
         return run_lxs_add_source();
     }
 
-    let reference = positional
-        .first()
-        .cloned()
-        .ok_or_else(|| "usage: eco lxs add <name>[@<version>] [--address <registry>]  |  eco lxs add .".to_string())?;
+    let reference = positional.first().cloned().ok_or_else(|| {
+        "usage: eco lxs add <name>[@<version>] [--address <registry>]  |  eco lxs add .".to_string()
+    })?;
 
     let (name, pinned_version) = match reference.rsplit_once('@') {
         Some((n, v)) => (n.to_string(), Some(v.to_string())),
@@ -2294,8 +2923,13 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
     // --address is given).
     let cwd = util::current_dir();
     let manifest_path = find_estate_ecompose(&cwd)?;
-    let estate_root = manifest_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| cwd.clone());
-    let state_registry = read_estate_state(&estate_root).map(|s| s.registry).filter(|r| !r.is_empty());
+    let estate_root = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.clone());
+    let state_registry = read_estate_state(&estate_root)
+        .map(|s| s.registry)
+        .filter(|r| !r.is_empty());
     let effective_address = address.as_deref().or(state_registry.as_deref());
 
     let effective_ref = match &pinned_version {
@@ -2303,7 +2937,10 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
         None => name.clone(),
     };
     let (_, version, dest) = fetch_lxs_to_cache(&effective_ref, &arch, effective_address)?;
-    println!("[eco lxs] Added {name}@{version} ({arch}) -> {} [verified]", dest.display());
+    println!(
+        "[eco lxs] Added {name}@{version} ({arch}) -> {} [verified]",
+        dest.display()
+    );
 
     // Naming: an LXS is a backend by default (`<name>-backend`). A frontend
     // LXS (name ends in `-ui`/`-frontend`) keeps its own name so the gateway
@@ -2321,7 +2958,9 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
 fn run_lxs_add_source() -> Result<(), String> {
     let cwd = util::current_dir();
     let manifest_path = find_estate_ecompose(&cwd)?;
-    let source_dir = cwd.canonicalize().map_err(|e| format!("resolve cwd: {e}"))?;
+    let source_dir = cwd
+        .canonicalize()
+        .map_err(|e| format!("resolve cwd: {e}"))?;
     if !source_dir.join("lxs.yml").is_file() {
         return Err(format!(
             "{} has no lxs.yml — this folder is not an LXS yet. Run `eco lxs new <name>` to scaffold one.",
@@ -2333,7 +2972,10 @@ fn run_lxs_add_source() -> Result<(), String> {
         return Err("lxs.yml has no name:".to_string());
     }
     let name = manifest.name.clone();
-    let manifest_dir = manifest_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| cwd.clone());
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.clone());
     let estate_root = manifest_dir;
     let rel = source_dir
         .strip_prefix(&estate_root)
@@ -2369,7 +3011,9 @@ pub fn run_lxs(args: &[String]) -> Result<(), String> {
             println!("eco lxs\n\nLXS (Linux Service) — versioned executable capabilities.\n\nUsage:\n  eco lxs new <name>                       scaffold a domain repo from a template\n  eco lxs build [path] [--arch linux/amd64,linux/arm64,darwin/arm64,darwin/amd64,windows/amd64]\n  eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]  (auto patch bump)\n  eco lxs add <name>[@<version>] [--address <registry>]   compose an LXS binary\n  eco lxs add .                            register the current folder as a source LXS\n  eco lxs update [name] [--address <registry>]   bump composed LXS to the latest\n  eco lxs outdated [--address <registry>]   show composed LXS vs latest (+ changelog)\n  eco lxs remove <name>                 remove a composed LXS service from ecompose.yml\n  eco lxs estates                          list estates on this machine\n  eco lxs init-registry [folder]           create a registry repo (git init + contract)\n  eco lxs search [query]\n  eco lxs list\n  eco lxs pull <name>@<version> [--arch linux/amd64]\n  eco lxs verify <name>@<version>\n");
             Ok(())
         }
-        other => Err(format!("Unknown eco lxs subcommand: {other}\n\nRun \"eco lxs help\" for usage.")),
+        other => Err(format!(
+            "Unknown eco lxs subcommand: {other}\n\nRun \"eco lxs help\" for usage."
+        )),
     }
 }
 
@@ -2386,7 +3030,9 @@ fn run_lxs_new(args: &[String]) -> Result<(), String> {
                 skip_git = true;
                 i += 1;
             }
-            other if other.starts_with('-') => return Err(format!("Unknown eco lxs new option: {other}")),
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs new option: {other}"))
+            }
             other => {
                 name = other.to_string();
                 i += 1;
@@ -2396,8 +3042,14 @@ fn run_lxs_new(args: &[String]) -> Result<(), String> {
     if name.is_empty() {
         return Err("usage: eco lxs new <name>".to_string());
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err("domain name must be lowercase alphanumeric with dashes (e.g. notifications)".to_string());
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(
+            "domain name must be lowercase alphanumeric with dashes (e.g. notifications)"
+                .to_string(),
+        );
     }
     let dir = Path::new(&name);
     if dir.exists() {
@@ -2466,7 +3118,8 @@ jobs:
           /tmp/eco/rust/target/release/eco lxs publish "${REPO}@${V}"
           git -C /tmp/reg push origin main --tags
 "##;
-    std::fs::write(dir.join(".github/workflows/lxs-publish.yml"), workflow).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(".github/workflows/lxs-publish.yml"), workflow)
+        .map_err(|e| e.to_string())?;
 
     let readme = format!(
         "# {name}\n\n## What this LXS owns\n- <list the entities and responsibilities this capability owns>\n\n## What this LXS must NEVER own\n- <list anything that belongs to other domains>\n\n## Contracts (public API)\n- see `docs/api.md` for the full endpoint reference\n\n## Docs\n- `docs/README.md` — agent-facing index + composition example\n- `docs/api.md` — endpoint reference with request/response JSON + errors\n- `docs/changelog.md` — per-version + breaking-change notes\n- `docs/examples.sh` — executable smoke test\n- `docs/openapi.json` — machine-readable API spec\n- `docs/gotchas.md` — production-learned constraints\n\n## Runtime\n- Rust (axum), self-contained static binary (musl)\n\n## Environment variables\n- `SERVER_PORT` — listen port\n\n## Build + publish\n\n```bash\neco lxs build\nVERSION=0.1.0 eco lxs publish {name}@$VERSION\ngit tag v$VERSION && git push --tags\n```\n"
@@ -2483,12 +3136,32 @@ jobs:
     );
     std::fs::write(dir.join("docs/README.md"), docs_readme).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("docs/api.md"), "# API\n\n## Health\n- `GET /health` — liveness\n\n_(fill in every endpoint from the backend code, with JSON request/response examples and error codes)_\n").map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("docs/changelog.md"), "# Changelog\n\n## 0.1.0\n- initial scaffold\n").map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("docs/changelog.md"),
+        "# Changelog\n\n## 0.1.0\n- initial scaffold\n",
+    )
+    .map_err(|e| e.to_string())?;
 
     if !skip_git {
-        run_command("git", &["init".to_string(), "-b".to_string(), "main".to_string()], dir)?;
+        run_command(
+            "git",
+            &["init".to_string(), "-b".to_string(), "main".to_string()],
+            dir,
+        )?;
         run_command("git", &["add".to_string(), "-A".to_string()], dir)?;
-        run_command("git", &["-c".to_string(), "user.name=Eko SW".to_string(), "-c".to_string(), "user.email=swdev.bali@gmail.com".to_string(), "commit".to_string(), "-m".to_string(), format!("chore: scaffold {name} domain from eco lxs new template")], dir)?;
+        run_command(
+            "git",
+            &[
+                "-c".to_string(),
+                "user.name=Eko SW".to_string(),
+                "-c".to_string(),
+                "user.email=swdev.bali@gmail.com".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                format!("chore: scaffold {name} domain from eco lxs new template"),
+            ],
+            dir,
+        )?;
     }
 
     println!("[eco lxs] Scaffolded LXS domain in {}/", dir.display());
@@ -2523,20 +3196,38 @@ mod tests {
 
     fn auth_env() -> LxsEnv {
         let mut fields = HashMap::new();
-        fields.insert("JWT_SECRET".to_string(), field("secret", "", true, "shared-jwt"));
-        fields.insert("MONGODB_URI".to_string(), field("uri", "", false, "mongo-db"));
+        fields.insert(
+            "JWT_SECRET".to_string(),
+            field("secret", "", true, "shared-jwt"),
+        );
+        fields.insert(
+            "MONGODB_URI".to_string(),
+            field("uri", "", false, "mongo-db"),
+        );
         fields.insert("SERVER_PORT".to_string(), field("int", "", false, "port"));
-        fields.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), field("bool", "false", false, ""));
+        fields.insert(
+            "EMAIL_VERIFICATION_REQUIRED".to_string(),
+            field("bool", "false", false, ""),
+        );
         fields.insert("BREVO_API_KEY".to_string(), field("secret", "", true, ""));
-        fields.insert("RATE_LIMIT_AUTH_BURST".to_string(), field("int", "5", false, ""));
-        LxsEnv { fields, ..Default::default() }
+        fields.insert(
+            "RATE_LIMIT_AUTH_BURST".to_string(),
+            field("int", "5", false, ""),
+        );
+        LxsEnv {
+            fields,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn v2_fields_render_defaults_with_config_overlay() {
         let env = auth_env();
         let mut config = HashMap::new();
-        config.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "true".to_string());
+        config.insert(
+            "EMAIL_VERIFICATION_REQUIRED".to_string(),
+            "true".to_string(),
+        );
         config.insert("RATE_LIMIT_AUTH_BURST".to_string(), "10".to_string());
         let text = build_lxs_env_example(&env, "auth-backend", &config).unwrap();
         assert!(text.contains("EMAIL_VERIFICATION_REQUIRED=true\n"));
@@ -2569,7 +3260,10 @@ mod tests {
     fn v2_managed_config_key_is_rejected() {
         let env = auth_env();
         let mut config = HashMap::new();
-        config.insert("MONGODB_URI".to_string(), "mongodb://localhost/x".to_string());
+        config.insert(
+            "MONGODB_URI".to_string(),
+            "mongodb://localhost/x".to_string(),
+        );
         let err = build_lxs_env_example(&env, "auth-backend", &config).unwrap_err();
         assert!(err.contains("managed by eco (mongo-db)"));
     }
@@ -2578,7 +3272,10 @@ mod tests {
     fn v2_publish_lint_rejects_missing_description_and_bad_enum() {
         let mut fields = HashMap::new();
         fields.insert("SERVER_PORT".to_string(), field("int", "", false, ""));
-        let no_desc = LxsEnv { fields, ..Default::default() };
+        let no_desc = LxsEnv {
+            fields,
+            ..Default::default()
+        };
         let err = validate_env_fields(&no_desc).unwrap_err();
         assert!(err.contains("missing description"));
 
@@ -2586,7 +3283,10 @@ mod tests {
         let mut enum_field = field("enum", "", false, "");
         enum_field.description = "login mode".to_string();
         fields2.insert("LOGIN_MODE".to_string(), enum_field);
-        let bad_enum = LxsEnv { fields: fields2, ..Default::default() };
+        let bad_enum = LxsEnv {
+            fields: fields2,
+            ..Default::default()
+        };
         let err = validate_env_fields(&bad_enum).unwrap_err();
         assert!(err.contains("enum requires non-empty choices"));
 
@@ -2604,13 +3304,19 @@ mod tests {
             optional: vec!["EMAIL_VERIFICATION_REQUIRED".to_string()],
             defaults: {
                 let mut m = HashMap::new();
-                m.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "false".to_string());
+                m.insert(
+                    "EMAIL_VERIFICATION_REQUIRED".to_string(),
+                    "false".to_string(),
+                );
                 m
             },
             ..Default::default()
         };
         let mut config = HashMap::new();
-        config.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "true".to_string());
+        config.insert(
+            "EMAIL_VERIFICATION_REQUIRED".to_string(),
+            "true".to_string(),
+        );
         let text = build_lxs_env_example(&env, "auth-backend", &config).unwrap();
         assert!(text.contains("EMAIL_VERIFICATION_REQUIRED=true\n"));
         assert!(text.contains("JWT_SECRET=\n"));
