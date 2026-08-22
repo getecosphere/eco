@@ -20,7 +20,12 @@ fn parse_options(args: &[String]) -> (HashMap<String, String>, Vec<String>) {
             continue;
         }
         let key = arg[2..].to_string();
-        if key == "dry-run" || key == "staging" || key == "prod-only" || key == "rebuild-frontends" || key == "force-frontend" {
+        if key == "dry-run"
+            || key == "staging"
+            || key == "prod-only"
+            || key == "rebuild-frontends"
+            || key == "force-frontend"
+        {
             options.insert(key, "true".to_string());
             i += 1;
             continue;
@@ -38,7 +43,12 @@ fn parse_options(args: &[String]) -> (HashMap<String, String>, Vec<String>) {
     (options, positionals)
 }
 
-fn run_command_env(command: &str, args: &[String], cwd: &Path, extra: &[(String, String)]) -> Result<(), String> {
+fn run_command_env(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    extra: &[(String, String)],
+) -> Result<(), String> {
     let mut env_map: HashMap<String, String> = std::env::vars().collect();
     for (k, v) in extra {
         env_map.insert(k.clone(), v.clone());
@@ -175,7 +185,12 @@ fn domain_runtimes_from_services(domain: &str, services: &[ecompose::Service]) -
 
 fn repo_name_from_git_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    trimmed.rsplit('/').next().unwrap_or("").trim_end_matches(".git").to_string()
+    trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(".git")
+        .to_string()
 }
 
 fn stat_exists(path: &Path) -> bool {
@@ -187,7 +202,11 @@ fn runtime_satisfiable(token: &str) -> bool {
         return true;
     }
     if util::platform() == "darwin" {
-        let result = run_capture("brew", &["list".to_string(), "onnxruntime".to_string()], &util::current_dir());
+        let result = run_capture(
+            "brew",
+            &["list".to_string(), "onnxruntime".to_string()],
+            &util::current_dir(),
+        );
         return result.map(|r| r.code == 0).unwrap_or(false);
     }
     Path::new("/opt/eco-tools/libonnxruntime.so").exists()
@@ -209,8 +228,17 @@ fn shell_single_quote(value: &str) -> String {
     util::shell_single_quote(value)
 }
 
-fn relative_ct_service_path(service_path: &str, project: &str, project_dir: &str, estate_core: &str) -> String {
-    let mut segments: Vec<String> = service_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+fn relative_ct_service_path(
+    service_path: &str,
+    project: &str,
+    project_dir: &str,
+    estate_core: &str,
+) -> String {
+    let mut segments: Vec<String> = service_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
     let project_base = Path::new(project_dir)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -219,7 +247,11 @@ fn relative_ct_service_path(service_path: &str, project: &str, project_dir: &str
     // the estate core repo name (e.g. `stuff8_core/frontend` where the estate
     // core repo is `stuff8_core` but the project is `stuff8`). All three are
     // flattened to the CT project root, so strip whichever matched.
-    if !segments.is_empty() && (segments[0] == project || segments[0] == project_base || (!estate_core.is_empty() && segments[0] == estate_core)) {
+    if !segments.is_empty()
+        && (segments[0] == project
+            || segments[0] == project_base
+            || (!estate_core.is_empty() && segments[0] == estate_core))
+    {
         segments.remove(0);
     }
     segments.join("/")
@@ -236,10 +268,18 @@ fn is_peer_dependency_resolution_error(result: &util::Captured) -> bool {
         || text.to_lowercase().contains("legacy-peer-deps")
 }
 
-fn resolve_domain_git(domain: &str, project: &str, content: &str) -> Result<Option<(String, String)>, String> {
+fn resolve_domain_git(
+    domain: &str,
+    project: &str,
+    content: &str,
+) -> Result<Option<(String, String)>, String> {
     if let Ok(Some(repo)) = repos::find_repo_by_name(domain) {
         if !repo.git.is_empty() {
-            let branch = if repo.branch.is_empty() { "main".to_string() } else { repo.branch.clone() };
+            let branch = if repo.branch.is_empty() {
+                "main".to_string()
+            } else {
+                repo.branch.clone()
+            };
             return Ok(Some((repo.git, branch)));
         }
     }
@@ -247,7 +287,10 @@ fn resolve_domain_git(domain: &str, project: &str, content: &str) -> Result<Opti
         let composition = ecompose::parse_composition(content);
         if let Some(git) = composition.get("git") {
             if !git.is_empty() {
-                let branch = composition.get("branch").cloned().unwrap_or_else(|| "main".to_string());
+                let branch = composition
+                    .get("branch")
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string());
                 return Ok(Some((git.clone(), branch)));
             }
         }
@@ -259,7 +302,10 @@ fn resolve_domain_git(domain: &str, project: &str, content: &str) -> Result<Opti
     let composition = ecompose::parse_composition(content);
     if let Some(git) = composition.get("git") {
         if !git.is_empty() && domain == repo_name_from_git_url(git) {
-            let branch = composition.get("branch").cloned().unwrap_or_else(|| "main".to_string());
+            let branch = composition
+                .get("branch")
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
             return Ok(Some((git.clone(), branch)));
         }
     }
@@ -281,7 +327,11 @@ fn cargo_package_name(cargo_toml: &str) -> Option<String> {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("name") {
                 if let Some(eq) = rest.find('=') {
-                    let val = rest[eq + 1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    let val = rest[eq + 1..]
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
                     if !val.is_empty() {
                         return Some(val);
                     }
@@ -342,7 +392,16 @@ pub fn load_project_deployment(input: &str, start_dir: &Path) -> Result<ProjectD
     if ct.get("template").map(|s| s.is_empty()).unwrap_or(true) {
         ct.insert("template".to_string(), FALLBACK_CT_TEMPLATE.to_string());
     }
-    for (k, v) in [("storage", "local-lvm"), ("disk", "16"), ("bridge", "vmbr0"), ("ip", "dhcp"), ("cores", "1"), ("memory", "1024"), ("swap", "512"), ("unprivileged", "1")] {
+    for (k, v) in [
+        ("storage", "local-lvm"),
+        ("disk", "16"),
+        ("bridge", "vmbr0"),
+        ("ip", "dhcp"),
+        ("cores", "1"),
+        ("memory", "1024"),
+        ("swap", "512"),
+        ("unprivileged", "1"),
+    ] {
         if ct.get(k).map(|s| s.is_empty()).unwrap_or(true) {
             ct.insert(k.to_string(), v.to_string());
         }
@@ -357,7 +416,10 @@ pub fn load_project_deployment(input: &str, start_dir: &Path) -> Result<ProjectD
         || ct.get("disk").map(|s| s.is_empty()).unwrap_or(true)
         || ct.get("bridge").map(|s| s.is_empty()).unwrap_or(true)
     {
-        return Err(format!("Missing required ct metadata in {}", deployment.file_path.display()));
+        return Err(format!(
+            "Missing required ct metadata in {}",
+            deployment.file_path.display()
+        ));
     }
 
     let ctid = ct.get("id").cloned().unwrap_or_default();
@@ -369,7 +431,11 @@ pub fn load_project_deployment(input: &str, start_dir: &Path) -> Result<ProjectD
         .unwrap_or_else(|| ct_project_root.clone());
     let ct_eco_root = format!("{ct_workspace_root}/eco");
     let is_esm = project_is_esm(&project_dir);
-    let pm2_config_filename = if is_esm { "ecosystem.config.cjs".to_string() } else { "ecosystem.config.js".to_string() };
+    let pm2_config_filename = if is_esm {
+        "ecosystem.config.cjs".to_string()
+    } else {
+        "ecosystem.config.js".to_string()
+    };
     let ct_config_path = format!("{ct_project_root}/{pm2_config_filename}");
 
     Ok(ProjectDeployment {
@@ -395,7 +461,11 @@ fn project_is_esm(project_dir: &Path) -> bool {
     let raw = std::fs::read_to_string(project_dir.join("package.json")).unwrap_or_default();
     serde_json::from_str::<serde_json::Value>(&raw)
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "module"))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s == "module")
+        })
         .unwrap_or(false)
 }
 
@@ -448,21 +518,38 @@ fn assert_local_pm2_apps_present(config_path: &Path, cwd: &Path) -> Result<(), S
     for _ in 0..20 {
         let result = run_capture("pm2", &["jlist".to_string()], cwd)?;
         if result.code != 0 {
-            return Err(format!("Unable to verify PM2 services after startup: {}", result.stderr.trim()));
+            return Err(format!(
+                "Unable to verify PM2 services after startup: {}",
+                result.stderr.trim()
+            ));
         }
         let processes: serde_json::Value = serde_json::from_str(&result.stdout)
             .map_err(|_| "Unable to parse PM2 service list after startup.".to_string())?;
         last_actual = processes
             .as_array()
-            .map(|arr| arr.iter().filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        p.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
-        let missing: Vec<&String> = expected.iter().filter(|name| !last_actual.contains(name)).collect();
+        let missing: Vec<&String> = expected
+            .iter()
+            .filter(|name| !last_actual.contains(name))
+            .collect();
         if missing.is_empty() {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    let missing: Vec<&String> = expected.iter().filter(|name| !last_actual.contains(name)).collect();
+    let missing: Vec<&String> = expected
+        .iter()
+        .filter(|name| !last_actual.contains(name))
+        .collect();
     Err(format!(
         "PM2 did not register declared service(s): {}. Check the generated ecosystem config and service logs.",
         missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
@@ -489,14 +576,25 @@ fn extract_pm2_app_names(config_text: &str) -> Vec<String> {
 
 fn run_up_dev(args: &[String]) -> Result<(), String> {
     let (options, positionals) = parse_options(args);
-    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let input = positionals
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
     // The eco-init model: a `.eco/state.json` marker makes the project dir the
     // ONLY scanned root (no sibling-domain discovery, no parent estate). Legacy
     // estates without the marker keep the parent-as-estate-root layout.
-    let is_init_project = deployment.project_dir.join(".eco").join("state.json").is_file();
-    print_lxs_update_notice(&deployment.content, &deployment.project_dir, lxs_check_disabled(&options));
+    let is_init_project = deployment
+        .project_dir
+        .join(".eco")
+        .join("state.json")
+        .is_file();
+    print_lxs_update_notice(
+        &deployment.content,
+        &deployment.project_dir,
+        lxs_check_disabled(&options),
+    );
     let estate_root = if is_init_project {
         deployment.project_dir.clone()
     } else {
@@ -536,7 +634,11 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
             }
         }
     }
-    let dev_domains: Vec<String> = domains.iter().filter(|d| !skipped_domains.contains(*d)).cloned().collect();
+    let dev_domains: Vec<String> = domains
+        .iter()
+        .filter(|d| !skipped_domains.contains(*d))
+        .cloned()
+        .collect();
     let dev_services: Vec<ecompose::Service> = deployment
         .services
         .iter()
@@ -551,19 +653,32 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     } else {
         format!(
             "\nSkipped optional domain(s) in local dev (still deployed in prod): {}{}\n",
-            skipped_domains.iter().cloned().collect::<Vec<_>>().join(", "),
+            skipped_domains
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
             if skipped_runtimes.is_empty() {
                 String::new()
             } else {
                 format!(
                     " -- runtime(s) not available on this machine: {}",
-                    skipped_runtimes.iter().cloned().collect::<Vec<_>>().join(", ")
+                    skipped_runtimes
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
         )
     };
 
-    let services = discover_local_services(&estate_root, Some(&dev_services), &deployment.project_dir, &deployment.project);
+    let services = discover_local_services(
+        &estate_root,
+        Some(&dev_services),
+        &deployment.project_dir,
+        &deployment.project,
+    );
 
     let dev_plan: Vec<String> = vec![
         format!("estate root: {}", estate_root.display()),
@@ -573,16 +688,27 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
             .map(|d| format!("clone repo if missing: {d}"))
             .collect::<Vec<_>>()
             .join("\n"),
-        format!("provision local runtimes from manifest: {}", deployment.project_dir.display()),
+        format!(
+            "provision local runtimes from manifest: {}",
+            deployment.project_dir.display()
+        ),
         dev_services
             .iter()
             .filter(|s| s.runtimes.iter().any(|r| r == "postgresql@15"))
-            .map(|s| format!("ensure local PostgreSQL database: {}", sql_database_name_for_service(s, &deployment.project)))
+            .map(|s| {
+                format!(
+                    "ensure local PostgreSQL database: {}",
+                    sql_database_name_for_service(s, &deployment.project)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         dev_services
             .iter()
-            .filter(|s| s.runtimes.iter().any(|r| r == "rust") && s.runtimes.iter().any(|r| r == "postgresql@15"))
+            .filter(|s| {
+                s.runtimes.iter().any(|r| r == "rust")
+                    && s.runtimes.iter().any(|r| r == "postgresql@15")
+            })
             .map(|s| format!("run Rust migrations if present: {}", s.name))
             .collect::<Vec<_>>()
             .join("\n"),
@@ -598,7 +724,10 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
             .map(|s| format!("npm install: {} ({})", s.name, s.dir))
             .collect::<Vec<_>>()
             .join("\n"),
-        format!("configure locally in estate scope: {}", deployment.project_dir.display()),
+        format!(
+            "configure locally in estate scope: {}",
+            deployment.project_dir.display()
+        ),
         format!(
             "delete existing PM2 services declared by {}",
             resolve_local_pm2_config_path(&deployment.project_dir).display()
@@ -616,7 +745,10 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
         util::println_stdout("eco up dev plan");
         util::println_stdout(&format!("Manifest: {}", deployment.file_path));
-        util::println_stdout(&format!("Project root: {}\n", deployment.project_dir.display()));
+        util::println_stdout(&format!(
+            "Project root: {}\n",
+            deployment.project_dir.display()
+        ));
         if !skip_notice.is_empty() {
             util::println_stdout(&skip_notice);
         }
@@ -629,53 +761,130 @@ fn run_up_dev(args: &[String]) -> Result<(), String> {
     if !skip_notice.is_empty() {
         util::println_stdout(&skip_notice);
     }
-    ensure_local_domain_repos(&estate_root, &dev_domains, &deployment.project, &domain_branch_overrides, &deployment.content)?;
-    print_step(&format!("Provisioning local runtimes for {}", deployment.project));
+    ensure_local_domain_repos(
+        &estate_root,
+        &dev_domains,
+        &deployment.project,
+        &domain_branch_overrides,
+        &deployment.content,
+    )?;
+    print_step(&format!(
+        "Provisioning local runtimes for {}",
+        deployment.project
+    ));
     let mut extra_env: Vec<(String, String)> = Vec::new();
     if !skipped_runtimes.is_empty() {
-        extra_env.push(("ECO_DEV_SKIP_RUNTIMES".to_string(), skipped_runtimes.iter().cloned().collect::<Vec<_>>().join(",")));
+        extra_env.push((
+            "ECO_DEV_SKIP_RUNTIMES".to_string(),
+            skipped_runtimes
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
     }
-    embedded::run_bundled_script("provision.sh", &[deployment.project_dir.display().to_string()], "estate", &extra_env)?;
-    print_step(&format!("Bootstrapping local PostgreSQL for {}", deployment.project));
-    bootstrap_local_postgres(&dev_services, &estate_root, &deployment.project_dir, &deployment.project)?;
-    print_step(&format!("Running local Rust migrations for {}", deployment.project));
-    run_local_rust_migrations(&dev_services, &estate_root, &deployment.project_dir)?;
-
+    embedded::run_bundled_script(
+        "provision.sh",
+        &[deployment.project_dir.display().to_string()],
+        "estate",
+        &extra_env,
+    )?;
     // Install `lxs:` services as local binaries so configure.sh/PM2 can run
     // them in dev, mirroring the CT release path (native arch binary).
-    print_step(&format!("Installing local LXS binaries for {}", deployment.project));
+    print_step(&format!(
+        "Installing local LXS binaries for {}",
+        deployment.project
+    ));
     install_lxs_services_local(&deployment, &estate_root)?;
 
-    print_step(&format!("Generating local ecosystem config for {}", deployment.project));
+    print_step(&format!(
+        "Generating local ecosystem config for {}",
+        deployment.project
+    ));
     let mut configure_env: Vec<(String, String)> = vec![
         ("ECO_NON_INTERACTIVE".to_string(), "1".to_string()),
         ("ECO_INIT".to_string(), "1".to_string()),
         ("PROJECT_DIR".to_string(), estate_root.display().to_string()),
         ("PROJECT_NAME".to_string(), deployment.project.clone()),
-        ("PM2_DIR".to_string(), deployment.project_dir.display().to_string()),
+        (
+            "PM2_DIR".to_string(),
+            deployment.project_dir.display().to_string(),
+        ),
     ];
     if !skipped_domains.is_empty() {
-        configure_env.push(("ECO_DEV_SKIP_DOMAINS".to_string(), skipped_domains.iter().cloned().collect::<Vec<_>>().join(",")));
+        configure_env.push((
+            "ECO_DEV_SKIP_DOMAINS".to_string(),
+            skipped_domains
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
     }
     // Stream dev service stdout into the eco log FIFO when logging is on.
-    configure_env.push(("ECO_LOG_FIFO".to_string(), crate::commands::log::default_fifo()));
+    configure_env.push((
+        "ECO_LOG_FIFO".to_string(),
+        crate::commands::log::default_fifo(),
+    ));
     // Start the local Grafana+Loki stack (fail-soft) so the FIFO has a reader.
     crate::commands::log::ensure_dev_log_stack()?;
     embedded::run_bundled_script("configure.sh", &[], "estate", &configure_env)?;
 
-    let refreshed_services = discover_local_services(&estate_root, Some(&dev_services), &deployment.project_dir, &deployment.project);
+    // LXS contracts are materialized into `.env.example` during installation,
+    // so database bootstrap must happen after install + configure. Previously
+    // this ran first and missed PostgreSQL LXS entirely.
+    print_step(&format!(
+        "Bootstrapping local PostgreSQL for {}",
+        deployment.project
+    ));
+    bootstrap_local_postgres(
+        &deployment.services,
+        &estate_root,
+        &deployment.project_dir,
+        &deployment.project,
+    )?;
+    print_step(&format!(
+        "Running local Rust migrations for {}",
+        deployment.project
+    ));
+    run_local_rust_migrations(&dev_services, &estate_root, &deployment.project_dir)?;
+    write_local_gateway_config(&deployment, &estate_root)?;
+
+    let refreshed_services = discover_local_services(
+        &estate_root,
+        Some(&dev_services),
+        &deployment.project_dir,
+        &deployment.project,
+    );
     build_local_rust_services(&refreshed_services)?;
     install_local_dependencies(&refreshed_services)?;
 
     print_step(&format!("Starting PM2 services for {}", deployment.project));
     let ecosystem_config = resolve_local_pm2_config_path(&deployment.project_dir);
-    print_step(&format!("Removing existing PM2 services for {}", deployment.project));
-    delete_local_declared_pm2_apps(&ecosystem_config.display().to_string(), &deployment.project_dir)?;
+    print_step(&format!(
+        "Removing existing PM2 services for {}",
+        deployment.project
+    ));
+    delete_local_declared_pm2_apps(
+        &ecosystem_config.display().to_string(),
+        &deployment.project_dir,
+    )?;
 
     clear_local_next_development_caches(&refreshed_services)?;
-    run_command("pm2", &["start".to_string(), ecosystem_config.display().to_string(), "--update-env".to_string()], &deployment.project_dir)?;
+    run_command(
+        "pm2",
+        &[
+            "start".to_string(),
+            ecosystem_config.display().to_string(),
+            "--update-env".to_string(),
+        ],
+        &deployment.project_dir,
+    )?;
     assert_local_pm2_apps_present(&ecosystem_config, &deployment.project_dir)?;
-    print_step(&format!("Completed local dev bootstrap for {}", deployment.project));
+    print_step(&format!(
+        "Completed local dev bootstrap for {}",
+        deployment.project
+    ));
 
     util::println_stdout("\nFollowing PM2 logs — press Ctrl+C to stop\n");
     let status = std::process::Command::new("pm2")
@@ -697,9 +906,124 @@ fn clear_local_next_development_caches(services: &[LocalService]) -> Result<(), 
         if !cache_dir.exists() {
             continue;
         }
-        print_step(&format!("Clearing Next.js development cache: {}", service.name));
+        print_step(&format!(
+            "Clearing Next.js development cache: {}",
+            service.name
+        ));
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
+    Ok(())
+}
+
+/// Write the local counterpart of server-side configgen's gateway.json. Local
+/// dev must exercise the same default-deny access table as a deployed estate;
+/// a gateway with no config must never silently become an open proxy.
+fn write_local_gateway_config(
+    deployment: &ProjectDeployment,
+    estate_root: &Path,
+) -> Result<(), String> {
+    let Some(gateway) = deployment
+        .services
+        .iter()
+        .find(|service| service.lxs.split('@').next() == Some("gateway"))
+    else {
+        return Ok(());
+    };
+    let ecosystem = std::fs::read_to_string(resolve_local_pm2_config_path(&deployment.project_dir))
+        .map_err(|e| format!("read generated ecosystem config for gateway: {e}"))?;
+    let mut ports: HashMap<String, u32> = HashMap::new();
+    let mut current: Option<String> = None;
+    for line in ecosystem.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name: ") {
+            current = rest
+                .trim_matches(',')
+                .trim_matches('"')
+                .strip_prefix(&format!("{}-", deployment.project))
+                .map(str::to_string);
+        }
+        if let Some(rest) = trimmed.strip_prefix("env: { SERVER_PORT: ") {
+            if let (Some(name), Some(value)) = (current.as_ref(), rest.split('}').next()) {
+                if let Ok(port) = value.trim().trim_end_matches(',').parse::<u32>() {
+                    ports.insert(name.clone(), port);
+                }
+            }
+        }
+    }
+    let mut routes = Vec::new();
+    for service in &deployment.services {
+        let Some(port) = ports.get(&service.name) else {
+            continue;
+        };
+        for route in &service.access_routes {
+            routes.push(serde_json::json!({
+                "path": route.path,
+                "upstream": format!("127.0.0.1:{port}"),
+                "level": route.level,
+                "strip": route.strip,
+                "rewrite": route.rewrite,
+                "cookie": route.cookie,
+            }));
+        }
+    }
+    if routes.is_empty() {
+        return Err("gateway is composed but no access.routes are declared; default-deny would expose no pages".to_string());
+    }
+    let roles = ecompose::parse_auth(&deployment.content)
+        .roles
+        .into_iter()
+        .map(|role| {
+            (
+                role.name,
+                if role.level.is_empty() {
+                    "auth".to_string()
+                } else {
+                    role.level
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let gateway_dir = estate_root.join(&gateway.name);
+    let config_path = gateway_dir.join("gateway.json");
+    let config =
+        serde_json::json!({ "estate": deployment.project, "roles": roles, "routes": routes });
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {}: {e}", config_path.display()))?;
+
+    let auth_port = ports.get("auth-backend").copied();
+    let env_path = gateway_dir.join(".env");
+    let original = std::fs::read_to_string(&env_path).unwrap_or_default();
+    let mut replacements = HashMap::new();
+    replacements.insert("GATEWAY_CONFIG", config_path.display().to_string());
+    if let Some(port) = auth_port {
+        replacements.insert(
+            "AUTH_SESSION_CHECK_URL",
+            format!("http://127.0.0.1:{port}/api/auth/session-status"),
+        );
+        replacements.insert("AUTH_BASE_URL", format!("http://127.0.0.1:{port}"));
+    }
+    let mut found = HashMap::new();
+    let mut lines = Vec::new();
+    for line in original.lines() {
+        let key = line.split('=').next().unwrap_or("");
+        if let Some(value) = replacements.get(key) {
+            lines.push(format!("{key}={value}"));
+            found.insert(key.to_string(), true);
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    for (key, value) in replacements {
+        if !found.contains_key(key) {
+            lines.push(format!("{key}={value}"));
+        }
+    }
+    std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
+        .map_err(|e| format!("write {}: {e}", env_path.display()))?;
+    print_step("Generated local gateway.json from ecompose access routes");
     Ok(())
 }
 
@@ -749,7 +1073,9 @@ fn discover_local_services(
     services
         .into_iter()
         .filter(|s| {
-            let canonical = Path::new(&s.dir).canonicalize().unwrap_or_else(|_| PathBuf::from(&s.dir));
+            let canonical = Path::new(&s.dir)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&s.dir));
             allowed.contains(&canonical)
         })
         .collect()
@@ -768,15 +1094,27 @@ fn scan_local_dir(scan_path: &Path, label: &str, rel_path: &str, services: &mut 
     };
 
     if pom.is_file() {
-        services.push(LocalService { name, r#type: "spring-boot".to_string(), dir: scan_path.display().to_string() });
+        services.push(LocalService {
+            name,
+            r#type: "spring-boot".to_string(),
+            dir: scan_path.display().to_string(),
+        });
         return;
     }
     if cargo.is_file() {
-        services.push(LocalService { name, r#type: "rust".to_string(), dir: scan_path.display().to_string() });
+        services.push(LocalService {
+            name,
+            r#type: "rust".to_string(),
+            dir: scan_path.display().to_string(),
+        });
         return;
     }
     if go_mod.is_file() {
-        services.push(LocalService { name, r#type: "go".to_string(), dir: scan_path.display().to_string() });
+        services.push(LocalService {
+            name,
+            r#type: "go".to_string(),
+            dir: scan_path.display().to_string(),
+        });
         return;
     }
     if pkg.is_file() {
@@ -800,7 +1138,11 @@ fn scan_local_dir(scan_path: &Path, label: &str, rel_path: &str, services: &mut 
         if ["node_modules", "target", ".next", ".git"].contains(&child_name.as_str()) {
             continue;
         }
-        let child_rel = if rel_path.is_empty() { child_name.clone() } else { format!("{rel_path}/{child_name}") };
+        let child_rel = if rel_path.is_empty() {
+            child_name.clone()
+        } else {
+            format!("{rel_path}/{child_name}")
+        };
         scan_local_dir(&path, label, &child_rel, services);
     }
 }
@@ -817,10 +1159,25 @@ fn estate_service_dirs(
         if service.path.is_empty() {
             continue;
         }
-        let relative = relative_ct_service_path(&service.path, project, &project_dir.display().to_string(), "");
-        let relative = if relative.is_empty() { service.path.clone() } else { relative };
-        dirs.insert(std::fs::canonicalize(estate_root.join(&relative)).unwrap_or_else(|_| estate_root.join(&relative)));
-        dirs.insert(std::fs::canonicalize(project_dir.join(&relative)).unwrap_or_else(|_| project_dir.join(&relative)));
+        let relative = relative_ct_service_path(
+            &service.path,
+            project,
+            &project_dir.display().to_string(),
+            "",
+        );
+        let relative = if relative.is_empty() {
+            service.path.clone()
+        } else {
+            relative
+        };
+        dirs.insert(
+            std::fs::canonicalize(estate_root.join(&relative))
+                .unwrap_or_else(|_| estate_root.join(&relative)),
+        );
+        dirs.insert(
+            std::fs::canonicalize(project_dir.join(&relative))
+                .unwrap_or_else(|_| project_dir.join(&relative)),
+        );
     }
     dirs
 }
@@ -847,7 +1204,10 @@ fn ensure_local_domain_repos(
                 )
             })?;
         if target_path.exists() {
-            return Err(format!("Refusing to clone {domain} into existing non-git path: {}", target_path.display()));
+            return Err(format!(
+                "Refusing to clone {domain} into existing non-git path: {}",
+                target_path.display()
+            ));
         }
         let branch = domain_branch_overrides
             .get(domain)
@@ -859,7 +1219,17 @@ fn ensure_local_domain_repos(
             String::new()
         };
         print_step(&format!("Cloning repo: {domain}{branch_note}"));
-        run_command("git", &["clone".to_string(), "--branch".to_string(), branch, git, target_path.display().to_string()], estate_root)?;
+        run_command(
+            "git",
+            &[
+                "clone".to_string(),
+                "--branch".to_string(),
+                branch,
+                git,
+                target_path.display().to_string(),
+            ],
+            estate_root,
+        )?;
     }
     Ok(())
 }
@@ -878,8 +1248,15 @@ fn install_local_dependencies(services: &[LocalService]) -> Result<(), String> {
         let install_result = run_capture("npm", &["install".to_string()], service_dir)?;
         if install_result.code != 0 {
             if is_peer_dependency_resolution_error(&install_result) {
-                print_step(&format!("Retrying npm install with --legacy-peer-deps: {}", service.name));
-                run_command("npm", &["install".to_string(), "--legacy-peer-deps".to_string()], service_dir)?;
+                print_step(&format!(
+                    "Retrying npm install with --legacy-peer-deps: {}",
+                    service.name
+                ));
+                run_command(
+                    "npm",
+                    &["install".to_string(), "--legacy-peer-deps".to_string()],
+                    service_dir,
+                )?;
             } else {
                 return Err(format!("npm install failed for {}", service.name));
             }
@@ -907,7 +1284,10 @@ fn local_postgres_client() -> Result<String, String> {
             return Ok(candidate.to_string());
         }
     }
-    Err("PostgreSQL is declared in ecompose.yml but psql was not found. Run `eco provision` first.".to_string())
+    Err(
+        "PostgreSQL is declared in ecompose.yml but psql was not found. Run `eco provision` first."
+            .to_string(),
+    )
 }
 
 fn is_placeholder_database_url(value: &str) -> bool {
@@ -922,16 +1302,18 @@ fn is_placeholder_database_url(value: &str) -> bool {
 
 fn write_local_database_url(env_file: &Path, database_url: &str) -> Result<bool, String> {
     let content = std::fs::read_to_string(env_file).unwrap_or_default();
-    let existing = content
-        .split('\n')
-        .find_map(|l| l.strip_prefix("DATABASE_URL=").map(|v| v.trim().to_string()));
+    let existing = content.split('\n').find_map(|l| {
+        l.strip_prefix("DATABASE_URL=")
+            .map(|v| v.trim().to_string())
+    });
     if let Some(existing) = existing {
         if !is_placeholder_database_url(&existing) {
             return Ok(false);
         }
     }
     let next_line = format!("DATABASE_URL={database_url}");
-    let next_content = if let Some(_) = content.split('\n').find(|l| l.starts_with("DATABASE_URL=")) {
+    let next_content = if let Some(_) = content.split('\n').find(|l| l.starts_with("DATABASE_URL="))
+    {
         let mut lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
         for l in lines.iter_mut() {
             if l.starts_with("DATABASE_URL=") {
@@ -940,7 +1322,11 @@ fn write_local_database_url(env_file: &Path, database_url: &str) -> Result<bool,
         }
         lines.join("\n")
     } else {
-        let suffix = if content.is_empty() || content.ends_with('\n') { "" } else { "\n" };
+        let suffix = if content.is_empty() || content.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
         format!("{content}{suffix}{next_line}\n")
     };
     std::fs::write(env_file, next_content).map_err(|e| e.to_string())?;
@@ -950,7 +1336,11 @@ fn write_local_database_url(env_file: &Path, database_url: &str) -> Result<bool,
 /// Resolve a source service's local directory: service `path:` is relative to
 /// the estate repo (project_dir); it may also live directly under the estate
 /// root in legacy flat layouts. Prefer project_dir (v2), fall back to root.
-fn resolve_local_service_dir(service: &ecompose::Service, estate_root: &Path, project_dir: &Path) -> PathBuf {
+fn resolve_local_service_dir(
+    service: &ecompose::Service,
+    estate_root: &Path,
+    project_dir: &Path,
+) -> PathBuf {
     let p = project_dir.join(&service.path);
     if p.is_dir() {
         return p;
@@ -962,15 +1352,53 @@ fn resolve_local_service_dir(service: &ecompose::Service, estate_root: &Path, pr
     p
 }
 
-fn bootstrap_local_postgres(services: &[ecompose::Service], estate_root: &Path, project_dir: &Path, project: &str) -> Result<(), String> {
-    let sql_services: Vec<&ecompose::Service> = services.iter().filter(|s| s.runtimes.iter().any(|r| r == "postgresql@15")).collect();
+fn bootstrap_local_postgres(
+    services: &[ecompose::Service],
+    estate_root: &Path,
+    project_dir: &Path,
+    project: &str,
+) -> Result<(), String> {
+    // Source services declare `postgresql@15` as a runtime. Registry LXS keep
+    // their DB ownership in their contract, which is rendered into the local
+    // `.env.example` during installation. Support both forms.
+    let sql_services: Vec<&ecompose::Service> = services
+        .iter()
+        .filter(|s| {
+            s.runtimes.iter().any(|r| r == "postgresql@15")
+                || (!s.lxs.is_empty()
+                    && std::fs::read_to_string(
+                        resolve_local_service_dir(s, estate_root, project_dir).join(".env.example"),
+                    )
+                    .map(|contents| {
+                        contents
+                            .lines()
+                            .any(|line| line.starts_with("DATABASE_URL="))
+                    })
+                    .unwrap_or(false))
+        })
+        .collect();
     if sql_services.is_empty() {
         return Ok(());
     }
     let psql = local_postgres_client()?;
     print_step(&format!("Using local psql client: {psql}"));
-    let auth_args: Vec<String> = ["-h".to_string(), "localhost".to_string(), "-d".to_string(), "postgres".to_string(), "-Atqc".to_string()].to_vec();
-    let current_user = run_capture(&psql, &auth_args.iter().cloned().chain(vec!["SELECT current_user".to_string()]).collect::<Vec<_>>(), &util::current_dir())?;
+    let auth_args: Vec<String> = [
+        "-h".to_string(),
+        "localhost".to_string(),
+        "-d".to_string(),
+        "postgres".to_string(),
+        "-Atqc".to_string(),
+    ]
+    .to_vec();
+    let current_user = run_capture(
+        &psql,
+        &auth_args
+            .iter()
+            .cloned()
+            .chain(vec!["SELECT current_user".to_string()])
+            .collect::<Vec<_>>(),
+        &util::current_dir(),
+    )?;
     if current_user.code != 0 || current_user.stdout.trim().is_empty() {
         return Err("Could not connect to local PostgreSQL. Start PostgreSQL and configure a local role, then rerun `eco up`.".to_string());
     }
@@ -978,19 +1406,52 @@ fn bootstrap_local_postgres(services: &[ecompose::Service], estate_root: &Path, 
 
     for service in sql_services {
         let db_name = sql_database_name_for_service(service, project);
-        if !db_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(format!("Unsafe generated PostgreSQL database name: {db_name}"));
+        if !db_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(format!(
+                "Unsafe generated PostgreSQL database name: {db_name}"
+            ));
         }
-        let exists = run_capture(&psql, &auth_args.iter().cloned().chain(vec![format!("SELECT 1 FROM pg_database WHERE datname = '{db_name}'")]).collect::<Vec<_>>(), &util::current_dir())?;
+        let exists = run_capture(
+            &psql,
+            &auth_args
+                .iter()
+                .cloned()
+                .chain(vec![format!(
+                    "SELECT 1 FROM pg_database WHERE datname = '{db_name}'"
+                )])
+                .collect::<Vec<_>>(),
+            &util::current_dir(),
+        )?;
         if exists.code != 0 {
-            return Err(format!("Could not inspect local PostgreSQL database {db_name}."));
+            return Err(format!(
+                "Could not inspect local PostgreSQL database {db_name}."
+            ));
         }
         if exists.stdout.trim().is_empty() {
-            run_command(&psql, &["-h".to_string(), "localhost".to_string(), "-d".to_string(), "postgres".to_string(), "-v".to_string(), "ON_ERROR_STOP=1".to_string(), "-c".to_string(), format!("CREATE DATABASE \"{db_name}\"")], &util::current_dir())?;
+            run_command(
+                &psql,
+                &[
+                    "-h".to_string(),
+                    "localhost".to_string(),
+                    "-d".to_string(),
+                    "postgres".to_string(),
+                    "-v".to_string(),
+                    "ON_ERROR_STOP=1".to_string(),
+                    "-c".to_string(),
+                    format!("CREATE DATABASE \"{db_name}\""),
+                ],
+                &util::current_dir(),
+            )?;
             print_step(&format!("Created local PostgreSQL database {db_name}"));
         }
         let env_file = resolve_local_service_dir(service, estate_root, project_dir).join(".env");
-        let database_url = format!("postgresql://{}@localhost:5432/{db_name}", url::form_urlencoded::byte_serialize(username.as_bytes()).collect::<String>());
+        let database_url = format!(
+            "postgresql://{}@localhost:5432/{db_name}",
+            url::form_urlencoded::byte_serialize(username.as_bytes()).collect::<String>()
+        );
         if write_local_database_url(&env_file, &database_url)? {
             print_step(&format!("Configured DATABASE_URL for {}", service.name));
         }
@@ -1002,10 +1463,18 @@ fn cargo_run_env() -> HashMap<String, String> {
     let mut env_map: HashMap<String, String> = std::env::vars().collect();
     let mut path_entries: Vec<String> = env_map
         .get("PATH")
-        .map(|p| p.split(':').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+        .map(|p| {
+            p.split(':')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
         .unwrap_or_default();
     let home = util::home_dir();
-    for candidate in [format!("{home}/.cargo/bin"), "/usr/local/cargo/bin".to_string()] {
+    for candidate in [
+        format!("{home}/.cargo/bin"),
+        "/usr/local/cargo/bin".to_string(),
+    ] {
         if !path_entries.contains(&candidate) {
             path_entries.push(candidate);
         }
@@ -1014,10 +1483,17 @@ fn cargo_run_env() -> HashMap<String, String> {
     env_map
 }
 
-fn run_local_rust_migrations(services: &[ecompose::Service], estate_root: &Path, project_dir: &Path) -> Result<(), String> {
+fn run_local_rust_migrations(
+    services: &[ecompose::Service],
+    estate_root: &Path,
+    project_dir: &Path,
+) -> Result<(), String> {
     let rust_sql: Vec<&ecompose::Service> = services
         .iter()
-        .filter(|s| s.runtimes.iter().any(|r| r == "rust") && s.runtimes.iter().any(|r| r == "postgresql@15"))
+        .filter(|s| {
+            s.runtimes.iter().any(|r| r == "rust")
+                && s.runtimes.iter().any(|r| r == "postgresql@15")
+        })
         .collect();
     for service in rust_sql {
         let service_dir = resolve_local_service_dir(service, estate_root, project_dir);
@@ -1028,15 +1504,29 @@ fn run_local_rust_migrations(services: &[ecompose::Service], estate_root: &Path,
         let env_content = std::fs::read_to_string(service_dir.join(".env")).unwrap_or_default();
         let database_url = env_content
             .split('\n')
-            .find_map(|l| l.strip_prefix("DATABASE_URL=").map(|v| v.trim().to_string()))
-            .ok_or_else(|| format!("DATABASE_URL is required to run migrations for {}.", service.name))?;
+            .find_map(|l| {
+                l.strip_prefix("DATABASE_URL=")
+                    .map(|v| v.trim().to_string())
+            })
+            .ok_or_else(|| {
+                format!(
+                    "DATABASE_URL is required to run migrations for {}.",
+                    service.name
+                )
+            })?;
 
         let sqlx = run_capture("which", &["sqlx".to_string()], &util::current_dir())?;
         if sqlx.code != 0 {
             print_step("Installing sqlx-cli for Rust migrations");
             run_command_env(
                 "cargo",
-                &["install".to_string(), "sqlx-cli".to_string(), "--no-default-features".to_string(), "--features".to_string(), "postgres,rustls".to_string()],
+                &[
+                    "install".to_string(),
+                    "sqlx-cli".to_string(),
+                    "--no-default-features".to_string(),
+                    "--features".to_string(),
+                    "postgres,rustls".to_string(),
+                ],
                 &util::current_dir(),
                 &cargo_run_env().into_iter().collect::<Vec<_>>(),
             )?;
@@ -1045,21 +1535,54 @@ fn run_local_rust_migrations(services: &[ecompose::Service], estate_root: &Path,
         let env_map: HashMap<String, String> = std::env::vars().collect();
         let mut run_env = env_map.clone();
         run_env.insert("DATABASE_URL".to_string(), database_url);
-        run_command_env("sqlx", &["migrate".to_string(), "run".to_string(), "--source".to_string(), "migrations".to_string()], &service_dir, &run_env.into_iter().collect::<Vec<_>>())?;
+        run_command_env(
+            "sqlx",
+            &[
+                "migrate".to_string(),
+                "run".to_string(),
+                "--source".to_string(),
+                "migrations".to_string(),
+            ],
+            &service_dir,
+            &run_env.into_iter().collect::<Vec<_>>(),
+        )?;
     }
     Ok(())
 }
 
-fn find_rust_artifact(service_dir: &Path, package_name: &str) -> Result<Option<(String, i64, String)>, String> {
-    let metadata_result = run_capture("cargo", &["metadata".to_string(), "--no-deps".to_string(), "--format-version".to_string(), "1".to_string()], service_dir)?;
+fn find_rust_artifact(
+    service_dir: &Path,
+    package_name: &str,
+) -> Result<Option<(String, i64, String)>, String> {
+    let metadata_result = run_capture(
+        "cargo",
+        &[
+            "metadata".to_string(),
+            "--no-deps".to_string(),
+            "--format-version".to_string(),
+            "1".to_string(),
+        ],
+        service_dir,
+    )?;
     if metadata_result.code == 0 {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&metadata_result.stdout) {
-            if let Some(target_directory) = parsed.get("target_directory").and_then(|t| t.as_str()) {
+            if let Some(target_directory) = parsed.get("target_directory").and_then(|t| t.as_str())
+            {
                 for profile in ["release", "debug"] {
                     let candidate = Path::new(target_directory).join(profile).join(package_name);
                     if candidate.is_file() {
-                        let mtime = std::fs::metadata(&candidate).and_then(|m| m.modified()).map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)).unwrap_or(0);
-                        let file_desc = run_capture("file", &[candidate.display().to_string()], service_dir).map(|r| r.stdout).unwrap_or_default();
+                        let mtime = std::fs::metadata(&candidate)
+                            .and_then(|m| m.modified())
+                            .map(|m| {
+                                m.duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as i64)
+                                    .unwrap_or(0)
+                            })
+                            .unwrap_or(0);
+                        let file_desc =
+                            run_capture("file", &[candidate.display().to_string()], service_dir)
+                                .map(|r| r.stdout)
+                                .unwrap_or_default();
                         return Ok(Some((candidate.display().to_string(), mtime, file_desc)));
                     }
                 }
@@ -1068,17 +1591,43 @@ fn find_rust_artifact(service_dir: &Path, package_name: &str) -> Result<Option<(
         }
     }
     let candidates = [
-        service_dir.join("target").join("release").join(package_name),
-        service_dir.parent().map(|p| p.join("target").join("release").join(package_name)).unwrap_or_default(),
-        service_dir.parent().and_then(|p| p.parent()).map(|p| p.join("target").join("release").join(package_name)).unwrap_or_default(),
+        service_dir
+            .join("target")
+            .join("release")
+            .join(package_name),
+        service_dir
+            .parent()
+            .map(|p| p.join("target").join("release").join(package_name))
+            .unwrap_or_default(),
+        service_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("target").join("release").join(package_name))
+            .unwrap_or_default(),
         service_dir.join("target").join("debug").join(package_name),
-        service_dir.parent().map(|p| p.join("target").join("debug").join(package_name)).unwrap_or_default(),
-        service_dir.parent().and_then(|p| p.parent()).map(|p| p.join("target").join("debug").join(package_name)).unwrap_or_default(),
+        service_dir
+            .parent()
+            .map(|p| p.join("target").join("debug").join(package_name))
+            .unwrap_or_default(),
+        service_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("target").join("debug").join(package_name))
+            .unwrap_or_default(),
     ];
     for candidate in candidates {
         if candidate.is_file() {
-            let mtime = std::fs::metadata(&candidate).and_then(|m| m.modified()).map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)).unwrap_or(0);
-            let file_desc = run_capture("file", &[candidate.display().to_string()], service_dir).map(|r| r.stdout).unwrap_or_default();
+            let mtime = std::fs::metadata(&candidate)
+                .and_then(|m| m.modified())
+                .map(|m| {
+                    m.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            let file_desc = run_capture("file", &[candidate.display().to_string()], service_dir)
+                .map(|r| r.stdout)
+                .unwrap_or_default();
             return Ok(Some((candidate.display().to_string(), mtime, file_desc)));
         }
     }
@@ -1130,13 +1679,31 @@ fn rust_build_state(service_dir: &Path) -> Result<(bool, String, bool), String> 
         return Ok((true, "binary is missing".to_string(), false));
     };
     if util::platform() == "darwin" && file_desc.contains("Mach-O") {
-        let expected_arch = if util::arch() == "x64" { "x86_64".to_string() } else { util::arch() };
+        let expected_arch = if util::arch() == "x64" {
+            "x86_64".to_string()
+        } else {
+            util::arch()
+        };
         if !file_desc.contains(&expected_arch) {
-            return Ok((true, "binary has a non-native architecture".to_string(), true));
+            return Ok((
+                true,
+                "binary has a non-native architecture".to_string(),
+                true,
+            ));
         }
     }
     let mut newest_input = newest_rust_input_mtime(service_dir);
-    for directory in [service_dir.parent().map(|p| p.to_path_buf()).unwrap_or_default(), service_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default()] {
+    for directory in [
+        service_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
+        service_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
+    ] {
         for filename in ["Cargo.toml", "Cargo.lock"] {
             let input_path = directory.join(filename);
             if input_path.is_file() {
@@ -1168,7 +1735,10 @@ fn build_local_rust_services(services: &[LocalService]) -> Result<(), String> {
         }
         let (needs_build, reason, clean) = rust_build_state(service_dir)?;
         if !needs_build {
-            print_step(&format!("Rust service is current; skipping build: {}", service.name));
+            print_step(&format!(
+                "Rust service is current; skipping build: {}",
+                service.name
+            ));
             continue;
         }
         if reason == "unknown package binary" {
@@ -1176,16 +1746,36 @@ fn build_local_rust_services(services: &[LocalService]) -> Result<(), String> {
             continue;
         }
         if clean {
-            print_step(&format!("Removing non-native Rust build cache: {}", service.name));
-            run_command_env("cargo", &["clean".to_string()], service_dir, &cargo_run_env().into_iter().collect::<Vec<_>>())?;
+            print_step(&format!(
+                "Removing non-native Rust build cache: {}",
+                service.name
+            ));
+            run_command_env(
+                "cargo",
+                &["clean".to_string()],
+                service_dir,
+                &cargo_run_env().into_iter().collect::<Vec<_>>(),
+            )?;
         }
-        print_step(&format!("Building Rust service ({reason}): {}", service.name));
-        run_command_env("cargo", &["build".to_string()], service_dir, &cargo_run_env().into_iter().collect::<Vec<_>>())?;
+        print_step(&format!(
+            "Building Rust service ({reason}): {}",
+            service.name
+        ));
+        run_command_env(
+            "cargo",
+            &["build".to_string()],
+            service_dir,
+            &cargo_run_env().into_iter().collect::<Vec<_>>(),
+        )?;
     }
     Ok(())
 }
 
-fn derive_staging_ecompose_content(content: &str, staging_config: &HashMap<String, String>, staging_hostname: &str) -> String {
+fn derive_staging_ecompose_content(
+    content: &str,
+    staging_config: &HashMap<String, String>,
+    staging_hostname: &str,
+) -> String {
     let mut rewritten: Vec<String> = Vec::new();
     let mut in_ct = false;
     let mut in_expose = false;
@@ -1270,20 +1860,30 @@ fn skip_sensitive_artifact_entry(name: &str) -> bool {
         || name.ends_with(".log")
 }
 
-fn collect_payload_files(root: &Path, dir: &Path, out: &mut Vec<serde_json::Value>) -> Result<(), String> {
+fn collect_payload_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<serde_json::Value>,
+) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let file_type = entry.file_type().map_err(|e| e.to_string())?;
         if file_type.is_symlink() {
-            return Err(format!("deploy payload must not contain symlinks: {}", path.display()));
+            return Err(format!(
+                "deploy payload must not contain symlinks: {}",
+                path.display()
+            ));
         }
         if file_type.is_dir() {
             collect_payload_files(root, &path, out)?;
             continue;
         }
         if !file_type.is_file() {
-            return Err(format!("deploy payload contains unsupported file type: {}", path.display()));
+            return Err(format!(
+                "deploy payload contains unsupported file type: {}",
+                path.display()
+            ));
         }
         let rel = path
             .strip_prefix(root)
@@ -1314,8 +1914,11 @@ fn write_payload_manifest(payload_dir: &Path, project: &str) -> Result<(), Strin
         "files": files,
     });
     let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(payload_dir.join("artifact-manifest.json"), format!("{text}\n"))
-        .map_err(|e| format!("write artifact manifest: {e}"))
+    std::fs::write(
+        payload_dir.join("artifact-manifest.json"),
+        format!("{text}\n"),
+    )
+    .map_err(|e| format!("write artifact manifest: {e}"))
 }
 
 fn copy_tree_excluding(src: &Path, dst: &Path, skip: &dyn Fn(&str) -> bool) -> Result<(), String> {
@@ -1338,7 +1941,8 @@ fn copy_tree_excluding(src: &Path, dst: &Path, skip: &dyn Fn(&str) -> bool) -> R
             // Keep payloads self-contained: skip symlinks.
             continue;
         } else {
-            std::fs::copy(&source, &destination).map_err(|e| format!("copy {}: {e}", source.display()))?;
+            std::fs::copy(&source, &destination)
+                .map_err(|e| format!("copy {}: {e}", source.display()))?;
         }
     }
     Ok(())
@@ -1371,8 +1975,15 @@ fn compute_rust_input_hash(service_dir: &Path) -> Result<String, String> {
     collect_rust_inputs(service_dir, &mut inputs)?;
     let ancestors = [
         service_dir.to_path_buf(),
-        service_dir.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
-        service_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default(),
+        service_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
+        service_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
     ];
     for dir in ancestors {
         for manifest in ["Cargo.toml", "Cargo.lock"] {
@@ -1387,7 +1998,10 @@ fn compute_rust_input_hash(service_dir: &Path) -> Result<String, String> {
     for path in &inputs {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
         let digest = sha2::Sha256::digest(&bytes);
-        combined.push_str(&format!("{}  {path}\n", crate::registry::hex_encode(&digest)));
+        combined.push_str(&format!(
+            "{}  {path}\n",
+            crate::registry::hex_encode(&digest)
+        ));
     }
     let final_digest = sha2::Sha256::digest(combined.as_bytes());
     Ok(crate::registry::hex_encode(&final_digest))
@@ -1396,7 +2010,15 @@ fn compute_rust_input_hash(service_dir: &Path) -> Result<String, String> {
 // True when a crate uses the compile-time sqlx macros (which need a live DB or
 // committed .sqlx/ offline metadata); runtime sqlx::query(&str) does not.
 fn crate_uses_sqlx_query_macros(dir: &Path) -> bool {
-    const MACRO_TOKENS: [&str; 7] = ["query!", "query_as!", "query_scalar!", "query_with!", "query_file!", "query_as_file!", "query_scalar_file!"];
+    const MACRO_TOKENS: [&str; 7] = [
+        "query!",
+        "query_as!",
+        "query_scalar!",
+        "query_with!",
+        "query_file!",
+        "query_as_file!",
+        "query_scalar_file!",
+    ];
     let src = dir.join("src");
     if !src.is_dir() {
         return false;
@@ -1432,23 +2054,49 @@ fn crate_uses_sqlx_query_macros(dir: &Path) -> bool {
 }
 
 fn resolve_cargo_target_dir(dir: &Path) -> Option<String> {
-    let result = run_capture("cargo", &["metadata".to_string(), "--no-deps".to_string(), "--format-version".to_string(), "1".to_string()], dir).ok()?;
+    let result = run_capture(
+        "cargo",
+        &[
+            "metadata".to_string(),
+            "--no-deps".to_string(),
+            "--format-version".to_string(),
+            "1".to_string(),
+        ],
+        dir,
+    )
+    .ok()?;
     if result.code != 0 {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(&result.stdout).ok()?;
-    value.get("target_directory").and_then(|v| v.as_str()).map(|s| s.to_string())
+    value
+        .get("target_directory")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 // The workspace root that owns this crate, if any. Workspace members must be
 // built with `cargo ... -p <package>` from this root, not from the member dir.
 fn cargo_workspace_root(dir: &Path) -> Option<String> {
-    let result = run_capture("cargo", &["metadata".to_string(), "--no-deps".to_string(), "--format-version".to_string(), "1".to_string()], dir).ok()?;
+    let result = run_capture(
+        "cargo",
+        &[
+            "metadata".to_string(),
+            "--no-deps".to_string(),
+            "--format-version".to_string(),
+            "1".to_string(),
+        ],
+        dir,
+    )
+    .ok()?;
     if result.code != 0 {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(&result.stdout).ok()?;
-    value.get("workspace_root").and_then(|v| v.as_str()).map(|s| s.to_string())
+    value
+        .get("workspace_root")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn is_shell_ident(key: &str) -> bool {
@@ -1460,7 +2108,8 @@ fn is_shell_ident(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn parse_env_line(line: &str) -> Option<(String, String)> {    let line = line.trim();
+fn parse_env_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
@@ -1471,9 +2120,15 @@ fn parse_env_line(line: &str) -> Option<(String, String)> {    let line = line.t
     }
     let mut value = value.trim().to_string();
     if let Some(stripped) = value.strip_prefix('"') {
-        value = stripped.strip_suffix('"').map(|s| s.to_string()).unwrap_or_else(|| stripped.to_string());
+        value = stripped
+            .strip_suffix('"')
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| stripped.to_string());
     } else if let Some(stripped) = value.strip_prefix('\'') {
-        value = stripped.strip_suffix('\'').map(|s| s.to_string()).unwrap_or_else(|| stripped.to_string());
+        value = stripped
+            .strip_suffix('\'')
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| stripped.to_string());
     }
     Some((key, value))
 }
@@ -1485,8 +2140,14 @@ fn project_path_segment(value: &str) -> String {
 fn agent_client_get(url: &str, api_key: &str) -> Result<String, String> {
     let response = match ureq::get(url)
         .set("Authorization", &format!("Bearer {api_key}"))
-        .set(crate::util::PROTOCOL_HEADER, &crate::util::PROTOCOL_VERSION.to_string())
-        .set(crate::util::CLIENT_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
+        .set(
+            crate::util::PROTOCOL_HEADER,
+            &crate::util::PROTOCOL_VERSION.to_string(),
+        )
+        .set(
+            crate::util::CLIENT_VERSION_HEADER,
+            env!("CARGO_PKG_VERSION"),
+        )
         .call()
     {
         Ok(response) => response,
@@ -1502,18 +2163,25 @@ fn agent_client_get(url: &str, api_key: &str) -> Result<String, String> {
     }
 }
 
-
 fn agent_client_post(url: &str, api_key: &str, body: &[u8]) -> Result<String, String> {
     // Retry the payload upload — large payloads over lossy links (tailnet,
     // flaky dev machines) can drop mid-stream. Up to 6 attempts with backoff.
     let mut last_err = String::new();
     for attempt in 1..=6 {
-        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(3600)).build();
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(3600))
+            .build();
         let response = match agent
             .post(url)
             .set("Authorization", &format!("Bearer {api_key}"))
-            .set(crate::util::PROTOCOL_HEADER, &crate::util::PROTOCOL_VERSION.to_string())
-            .set(crate::util::CLIENT_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
+            .set(
+                crate::util::PROTOCOL_HEADER,
+                &crate::util::PROTOCOL_VERSION.to_string(),
+            )
+            .set(
+                crate::util::CLIENT_VERSION_HEADER,
+                env!("CARGO_PKG_VERSION"),
+            )
             .set("Content-Type", "application/gzip")
             .send_bytes(body)
         {
@@ -1522,7 +2190,9 @@ fn agent_client_post(url: &str, api_key: &str, body: &[u8]) -> Result<String, St
             Err(e) => {
                 last_err = format!("agent request failed: {e}");
                 if attempt < 6 {
-                    print_step(&format!("payload upload attempt {attempt} failed ({e}); retrying..."));
+                    print_step(&format!(
+                        "payload upload attempt {attempt} failed ({e}); retrying..."
+                    ));
                     std::thread::sleep(std::time::Duration::from_secs(attempt as u64 * 3));
                 }
                 continue;
@@ -1540,7 +2210,15 @@ fn agent_client_post(url: &str, api_key: &str, body: &[u8]) -> Result<String, St
 }
 
 fn rustup_target_installed(target: &str) -> bool {
-    match run_capture("rustup", &["target".to_string(), "list".to_string(), "--installed".to_string()], &util::current_dir()) {
+    match run_capture(
+        "rustup",
+        &[
+            "target".to_string(),
+            "list".to_string(),
+            "--installed".to_string(),
+        ],
+        &util::current_dir(),
+    ) {
         Ok(result) => result.stdout.lines().any(|line| line.trim() == target),
         Err(_) => false,
     }
@@ -1555,7 +2233,10 @@ fn ensure_pinned_zig() -> Result<PathBuf, String> {
         ("linux", "aarch64") => "linux-aarch64".to_string(),
         (os, arch) => return Err(format!("zig cross toolchain unsupported on {os}/{arch}")),
     };
-    let cache = Path::new(&util::home_dir()).join(".cache").join("eco").join("zig");
+    let cache = Path::new(&util::home_dir())
+        .join(".cache")
+        .join("eco")
+        .join("zig");
     let install_dir = cache.join(format!("zig-{triple}-{ZIG_VERSION}"));
     if install_dir.join("zig").is_file() {
         return Ok(install_dir);
@@ -1565,11 +2246,32 @@ fn ensure_pinned_zig() -> Result<PathBuf, String> {
     let _ = std::fs::create_dir_all(&cache);
     let target_path = cache.join(&tarball);
     let url = format!("https://ziglang.org/download/{ZIG_VERSION}/{tarball}");
-    run_command("curl", &["-fsSL".to_string(), url, "-o".to_string(), target_path.display().to_string()], &util::current_dir())?;
-    run_command("tar", &["xf".to_string(), target_path.display().to_string(), "-C".to_string(), cache.display().to_string()], &util::current_dir())?;
+    run_command(
+        "curl",
+        &[
+            "-fsSL".to_string(),
+            url,
+            "-o".to_string(),
+            target_path.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
+    run_command(
+        "tar",
+        &[
+            "xf".to_string(),
+            target_path.display().to_string(),
+            "-C".to_string(),
+            cache.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
     let _ = std::fs::remove_file(&target_path);
     if !install_dir.join("zig").is_file() {
-        return Err(format!("zig extraction did not produce {}", install_dir.display()));
+        return Err(format!(
+            "zig extraction did not produce {}",
+            install_dir.display()
+        ));
     }
     Ok(install_dir)
 }
@@ -1581,11 +2283,27 @@ fn ensure_pinned_zig() -> Result<PathBuf, String> {
 fn ensure_cross_toolchain() -> Result<Option<PathBuf>, String> {
     if !rustup_target_installed("x86_64-unknown-linux-musl") {
         print_step("Installing rustup target x86_64-unknown-linux-musl");
-        run_command("rustup", &["target".to_string(), "add".to_string(), "x86_64-unknown-linux-musl".to_string()], &util::current_dir())?;
+        run_command(
+            "rustup",
+            &[
+                "target".to_string(),
+                "add".to_string(),
+                "x86_64-unknown-linux-musl".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
     }
     if !util::command_on_path("cargo-zigbuild") {
         print_step("Installing cargo-zigbuild (pinned)");
-        run_command("cargo", &["install".to_string(), "cargo-zigbuild".to_string(), "--locked".to_string()], &util::current_dir())?;
+        run_command(
+            "cargo",
+            &[
+                "install".to_string(),
+                "cargo-zigbuild".to_string(),
+                "--locked".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
     }
     if util::command_on_path("zig") {
         return Ok(None);
@@ -1736,9 +2454,19 @@ fn builder_cmd() -> Vec<String> {
         return cmd.split_whitespace().map(|s| s.to_string()).collect();
     }
     if builder_driver_is_lima() {
-        vec!["limactl".to_string(), "shell".to_string(), builder_name(), "--".to_string()]
+        vec![
+            "limactl".to_string(),
+            "shell".to_string(),
+            builder_name(),
+            "--".to_string(),
+        ]
     } else {
-        vec!["multipass".to_string(), "exec".to_string(), builder_name(), "--".to_string()]
+        vec![
+            "multipass".to_string(),
+            "exec".to_string(),
+            builder_name(),
+            "--".to_string(),
+        ]
     }
 }
 
@@ -1770,9 +2498,21 @@ fn builder_exec(script: &str) -> Result<util::Captured, String> {
 fn builder_transfer_push(local: &Path, remote: &str) -> Result<(), String> {
     let local = local.display().to_string();
     if builder_driver_is_lima() {
-        return run_command("limactl", &["copy".to_string(), local, format!("{}:{remote}", builder_name())], &util::current_dir());
+        return run_command(
+            "limactl",
+            &[
+                "copy".to_string(),
+                local,
+                format!("{}:{remote}", builder_name()),
+            ],
+            &util::current_dir(),
+        );
     }
-    let args = vec!["transfer".to_string(), local, format!("{}:{remote}", builder_name())];
+    let args = vec![
+        "transfer".to_string(),
+        local,
+        format!("{}:{remote}", builder_name()),
+    ];
     run_command("multipass", &args, &util::current_dir())
 }
 
@@ -1781,16 +2521,32 @@ fn builder_transfer_push(local: &Path, remote: &str) -> Result<(), String> {
 fn builder_transfer_pull(remote: &str, local: &Path) -> Result<(), String> {
     let local = local.display().to_string();
     if builder_driver_is_lima() {
-        return run_command("limactl", &["copy".to_string(), format!("{}:{remote}", builder_name()), local], &util::current_dir());
+        return run_command(
+            "limactl",
+            &[
+                "copy".to_string(),
+                format!("{}:{remote}", builder_name()),
+                local,
+            ],
+            &util::current_dir(),
+        );
     }
-    let args = vec!["transfer".to_string(), format!("{}:{remote}", builder_name()), local];
+    let args = vec![
+        "transfer".to_string(),
+        format!("{}:{remote}", builder_name()),
+        local,
+    ];
     run_command("multipass", &args, &util::current_dir())
 }
 
 fn builder_exec_ok(script: &str) -> Result<(), String> {
     let result = builder_exec(script)?;
     if result.code != 0 {
-        return Err(format!("builder command failed ({}): {}", result.code, result.stderr.trim()));
+        return Err(format!(
+            "builder command failed ({}): {}",
+            result.code,
+            result.stderr.trim()
+        ));
     }
     Ok(())
 }
@@ -1804,13 +2560,19 @@ fn builder_available() -> bool {
     }
     if builder_driver_is_lima() {
         // `limactl list` shows Running only for a started instance.
-        let args = vec!["list".to_string(), "-f".to_string(), "{{.Name}} {{.Status}}".to_string()];
+        let args = vec![
+            "list".to_string(),
+            "-f".to_string(),
+            "{{.Name}} {{.Status}}".to_string(),
+        ];
         return run_capture("limactl", &args, &util::current_dir())
             .map(|c| c.code == 0 && c.stdout.contains(&format!("{} Running", builder_name())))
             .unwrap_or(false);
     }
     let args = vec!["info".to_string(), builder_name()];
-    run_capture("multipass", &args, &util::current_dir()).map(|c| c.code == 0).unwrap_or(false)
+    run_capture("multipass", &args, &util::current_dir())
+        .map(|c| c.code == 0)
+        .unwrap_or(false)
 }
 
 // ── Builder auto-provision ──────────────────────────────────────────────────
@@ -1892,7 +2654,9 @@ fn ensure_lima_installed() -> Result<(), String> {
         } else {
             // No Homebrew (and maybe no sudo for one) — download the limactl
             // binary directly into ~/.local/bin. Sudo-free.
-            print_step("Homebrew not found — downloading the limactl binary directly (no sudo needed)…");
+            print_step(
+                "Homebrew not found — downloading the limactl binary directly (no sudo needed)…",
+            );
             install_limactl_binary()?;
         }
         if !limactl_available() {
@@ -1903,7 +2667,16 @@ fn ensure_lima_installed() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         print_step("Installing Lima via apt (apt-get install lima)…");
-        run_command("sudo", &["apt-get".to_string(), "install".to_string(), "-y".to_string(), "lima".to_string()], &util::current_dir())?;
+        run_command(
+            "sudo",
+            &[
+                "apt-get".to_string(),
+                "install".to_string(),
+                "-y".to_string(),
+                "lima".to_string(),
+            ],
+            &util::current_dir(),
+        )?;
         if !limactl_available() {
             return Err("Lima not available after apt install. Install it from https://github.com/lima-vm/lima/releases, or set ECO_BUILDER=host (dev only).".to_string());
         }
@@ -1920,11 +2693,15 @@ fn ensure_lima_installed() -> Result<(), String> {
 fn run_host_command(command: &str, args: &[String]) -> Result<(), String> {
     let mut env = std::env::vars().collect::<HashMap<String, String>>();
     let path = env.get("PATH").cloned().unwrap_or_default();
-    let extra = ["/opt/homebrew/bin", "/usr/local/bin", &format!("{}/.local/bin", util::home_dir())]
-        .iter()
-        .filter(|d| Path::new(d).is_dir())
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
+    let extra = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        &format!("{}/.local/bin", util::home_dir()),
+    ]
+    .iter()
+    .filter(|d| Path::new(d).is_dir())
+    .map(|s| s.to_string())
+    .collect::<Vec<_>>();
     let mut new_path = extra;
     if !path.is_empty() {
         new_path.push(path);
@@ -1950,19 +2727,36 @@ fn install_limactl_binary() -> Result<(), String> {
     let extract = std::env::temp_dir().join("lima-download");
     let bin_dir = PathBuf::from(format!("{}/.local/bin", util::home_dir()));
 
-    print_step(&format!("Downloading limactl {LIMA_VERSION} ({os}/{arch})…"));
+    print_step(&format!(
+        "Downloading limactl {LIMA_VERSION} ({os}/{arch})…"
+    ));
     download_to(&url, &tarball)?;
     std::fs::create_dir_all(&extract).map_err(|e| format!("create {}: {e}", extract.display()))?;
-    run_command("tar", &["xzf".to_string(), tarball.display().to_string(), "-C".to_string(), extract.display().to_string()], &util::current_dir())?;
+    run_command(
+        "tar",
+        &[
+            "xzf".to_string(),
+            tarball.display().to_string(),
+            "-C".to_string(),
+            extract.display().to_string(),
+        ],
+        &util::current_dir(),
+    )?;
     let limactl = extract.join("lima").join("bin").join("limactl");
     if !limactl.is_file() {
-        return Err(format!("limactl binary not found after extracting {}", tarball.display()));
+        return Err(format!(
+            "limactl binary not found after extracting {}",
+            tarball.display()
+        ));
     }
     std::fs::create_dir_all(&bin_dir).map_err(|e| format!("create {}: {e}", bin_dir.display()))?;
     std::fs::copy(&limactl, bin_dir.join("limactl")).map_err(|e| format!("copy limactl: {e}"))?;
     std::fs::remove_dir_all(&extract).ok();
     std::fs::remove_file(&tarball).ok();
-    print_step(&format!("limactl installed at {}", bin_dir.join("limactl").display()));
+    print_step(&format!(
+        "limactl installed at {}",
+        bin_dir.join("limactl").display()
+    ));
     Ok(())
 }
 
@@ -1975,14 +2769,23 @@ fn lima_arch() -> String {
 }
 
 fn download_to(url: &str, dest: &Path) -> Result<(), String> {
-    let args = vec!["-fsSL".to_string(), url.to_string(), "-o".to_string(), dest.display().to_string()];
+    let args = vec![
+        "-fsSL".to_string(),
+        url.to_string(),
+        "-o".to_string(),
+        dest.display().to_string(),
+    ];
     run_command("curl", &args, &util::current_dir())
 }
 
 // Run a command while showing an npm-style spinner, so long provisioning steps
 // (VM image download, first boot, toolchain bootstrap — minutes of silence
 // otherwise) never look frozen. The spinner line is cleared when done.
-fn run_capture_with_spinner(program: &str, args: &[String], label: &str) -> Result<util::Captured, String> {
+fn run_capture_with_spinner(
+    program: &str,
+    args: &[String],
+    label: &str,
+) -> Result<util::Captured, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     let done = std::sync::Arc::new(AtomicBool::new(false));
     let done_spinner = done.clone();
@@ -2024,7 +2827,11 @@ fn ensure_eco_builder_vm(needs: &str) -> Result<(), String> {
         .map(|c| c.code == 0 && c.stdout.contains(builder_name().as_str()))
         .unwrap_or(false);
     let start_args: Vec<String> = if exists {
-        vec!["start".to_string(), "--tty=false".to_string(), builder_name()]
+        vec![
+            "start".to_string(),
+            "--tty=false".to_string(),
+            builder_name(),
+        ]
     } else {
         vec![
             "start".to_string(),
@@ -2034,17 +2841,30 @@ fn ensure_eco_builder_vm(needs: &str) -> Result<(), String> {
             yml.display().to_string(),
         ]
     };
-    let result = run_capture_with_spinner("limactl", &start_args, "Starting secure builder (Lima VM)")?;
+    let result =
+        run_capture_with_spinner("limactl", &start_args, "Starting secure builder (Lima VM)")?;
     if result.code != 0 && !builder_available() {
         // A leftover instance — possibly created by an older tool with an arch
         // limactl cannot manage ("unsupported arch") — refuses to resume and
         // even refuses `limactl delete`. Remove its directory directly and
         // recreate from the bundled template.
-        print_step(&format!("Builder VM `{}` is unusable — recreating it from the template…", builder_name()));
-        let del = run_capture("limactl", &["delete".to_string(), "--force".to_string(), builder_name()], &util::current_dir());
-        let instance_dir = Path::new(&util::home_dir()).join(".lima").join(builder_name());
+        print_step(&format!(
+            "Builder VM `{}` is unusable — recreating it from the template…",
+            builder_name()
+        ));
+        let del = run_capture(
+            "limactl",
+            &["delete".to_string(), "--force".to_string(), builder_name()],
+            &util::current_dir(),
+        );
+        let instance_dir = Path::new(&util::home_dir())
+            .join(".lima")
+            .join(builder_name());
         if del.as_ref().map(|d| d.code != 0).unwrap_or(true) || instance_dir.exists() {
-            print_step(&format!("Removing stale builder instance at {}", instance_dir.display()));
+            print_step(&format!(
+                "Removing stale builder instance at {}",
+                instance_dir.display()
+            ));
             let _ = std::fs::remove_dir_all(&instance_dir);
         }
         let recreate = run_capture_with_spinner(
@@ -2059,7 +2879,13 @@ fn ensure_eco_builder_vm(needs: &str) -> Result<(), String> {
             "Creating secure builder (Lima VM)",
         )?;
         if recreate.code != 0 {
-            let detail = recreate.stderr.lines().next().unwrap_or("").trim().to_string();
+            let detail = recreate
+                .stderr
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             return Err(format!(
                 "Can't complete Lima Provisioning. Reason: {}",
                 if detail.is_empty() {
@@ -2105,7 +2931,10 @@ fn ensure_eco_builder_vm(needs: &str) -> Result<(), String> {
         "Bootstrapping builder toolchain",
     )?;
 
-    print_step(&format!("Builder VM `{}` ready (toolchain bootstrapped).", builder_name()));
+    print_step(&format!(
+        "Builder VM `{}` ready (toolchain bootstrapped).",
+        builder_name()
+    ));
     Ok(())
 }
 
@@ -2114,20 +2943,54 @@ fn skip_build_sync(name: &str) -> bool {
     // stale local `.next`/`.vite`/`dist` can carry dev-baked public URLs or a
     // stale framework config output (e.g. an old `trailingSlash`) into a
     // production frontend build. Regenerable — the build recreates them.
-    ["node_modules", "target", ".git", ".env", ".env.local", ".next", ".vite", ".cache", ".eco", "dist", "build", ".output", "build-eco"].contains(&name)
+    [
+        "node_modules",
+        "target",
+        ".git",
+        ".env",
+        ".env.local",
+        ".next",
+        ".vite",
+        ".cache",
+        ".eco",
+        "dist",
+        "build",
+        ".output",
+        "build-eco",
+    ]
+    .contains(&name)
 }
 
 // Syncs a local tree into the build location (VM or host cache).
 fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
     if builder_is_host() {
         std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-        return copy_tree_excluding(local_dir, Path::new(dest), &(skip_build_sync as fn(&str) -> bool));
+        return copy_tree_excluding(
+            local_dir,
+            Path::new(dest),
+            &(skip_build_sync as fn(&str) -> bool),
+        );
     }
     // Same exclusion set as the host path: build outputs and dev caches are
     // never copied up, so a stale local build can't be mistaken for a fresh
     // one when the hash-skip decides to reuse the builder's output.
-    let excludes = ["node_modules", "target", ".git", ".env", ".env.local", ".next", ".vite", ".cache", ".eco", "dist", "build", ".output", "build-eco"];
-    let tar_path = std::env::temp_dir().join(format!("eco-builder-sync-{}.tar.gz", std::process::id()));
+    let excludes = [
+        "node_modules",
+        "target",
+        ".git",
+        ".env",
+        ".env.local",
+        ".next",
+        ".vite",
+        ".cache",
+        ".eco",
+        "dist",
+        "build",
+        ".output",
+        "build-eco",
+    ];
+    let tar_path =
+        std::env::temp_dir().join(format!("eco-builder-sync-{}.tar.gz", std::process::id()));
     let _ = std::fs::remove_file(&tar_path);
     let mut tar_args: Vec<String> = Vec::new();
     tar_args.push("czf".to_string());
@@ -2139,14 +3002,15 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
     tar_args.push("-C".to_string());
     tar_args.push(local_dir.display().to_string());
     tar_args.push(".".to_string());
-    run_command(
-        "tar",
-        &tar_args,
-        &util::current_dir(),
-    )?;
+    run_command("tar", &tar_args, &util::current_dir())?;
     let remote_tar = format!("/tmp/eco-builder-sync-{}.tar.gz", std::process::id());
     builder_transfer_push(&tar_path, &remote_tar)?;
-    builder_exec_ok(&format!("mkdir -p {} && tar xzf {} -C {}", shell_single_quote(dest), remote_tar, shell_single_quote(dest)))?;
+    builder_exec_ok(&format!(
+        "mkdir -p {} && tar xzf {} -C {}",
+        shell_single_quote(dest),
+        remote_tar,
+        shell_single_quote(dest)
+    ))?;
     let _ = std::fs::remove_file(&tar_path);
     Ok(())
 }
@@ -2161,7 +3025,13 @@ fn sync_dir_to_builder(local_dir: &Path, dest: &str) -> Result<(), String> {
 // `root` (the artifact dir) so .next/dev is found whether .next sits directly
 // under the artifact or under a nested dist/ output dir.
 fn trim_dev_artifact(_dir: &Path, root: &Path) {
-    for name in [".next/dev", ".next/cache", ".next/build", "node_modules/.cache", ".vite/cache"] {
+    for name in [
+        ".next/dev",
+        ".next/cache",
+        ".next/build",
+        "node_modules/.cache",
+        ".vite/cache",
+    ] {
         let p = root.join(name);
         if p.is_dir() {
             let _ = std::fs::remove_dir_all(&p);
@@ -2172,9 +3042,14 @@ fn trim_dev_artifact(_dir: &Path, root: &Path) {
 // True for Next.js frontends (next.config present or package.json declares
 // "next"), so eco can force the standalone SSR build output.
 fn is_nextjs_frontend(dir: &Path) -> bool {
-    if ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"]
-        .iter()
-        .any(|f| dir.join(f).is_file())
+    if [
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.ts",
+        "next.config.cjs",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
     {
         return true;
     }
@@ -2209,16 +3084,27 @@ fn is_sveltekit_dir(dir: &Path) -> bool {
 
 /// True for plain Vite frontends (vite.config.* present).
 fn is_vite_dir(dir: &Path) -> bool {
-    ["vite.config.js", "vite.config.mjs", "vite.config.ts", "vite.config.cjs", "vite.config.mts", "vite.config.cts"]
-        .iter()
-        .any(|f| dir.join(f).is_file())
+    [
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.ts",
+        "vite.config.cjs",
+        "vite.config.mts",
+        "vite.config.cts",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
         || std::fs::read_to_string(dir.join("package.json"))
             .ok()
             .map(|s| s.contains("\"vite\"") || s.contains("@vitejs"))
             .unwrap_or(false)
 }
 
-fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, service_name: &str) -> Result<(), String> {
+fn copy_frontend_artifact_from_builder(
+    build_dir: &str,
+    artifact_dir: &Path,
+    service_name: &str,
+) -> Result<(), String> {
     std::fs::create_dir_all(artifact_dir).map_err(|e| e.to_string())?;
     // SvelteKit adapter-node that will be bun-compiled ships only the compiled
     // binary + a static `client/` dir (the recipe copies build/client next to
@@ -2228,14 +3114,30 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
     let sveltekit_bun = builder_is_host()
         && util::command_on_path("bun")
         && Path::new(build_dir).join("build").join("client").is_dir();
-    let subdirs = ["dist", "build", ".next", ".output", "output", "app/dist", "app/.next", "app/build", "app/.output", "public", "app/public"];
+    let subdirs = [
+        "dist",
+        "build",
+        ".next",
+        ".output",
+        "output",
+        "app/dist",
+        "app/.next",
+        "app/build",
+        "app/.output",
+        "public",
+        "app/public",
+    ];
     let mut included: Vec<String> = Vec::new();
     for sub in subdirs {
         let path = Path::new(build_dir).join(sub);
         let present = if builder_is_host() {
             path.is_dir()
         } else {
-            let c = builder_exec(&format!("test -d {} && echo yes || echo no", shell_single_quote(&path.display().to_string()))).ok();
+            let c = builder_exec(&format!(
+                "test -d {} && echo yes || echo no",
+                shell_single_quote(&path.display().to_string())
+            ))
+            .ok();
             c.map(|c| c.stdout.trim() == "yes").unwrap_or(false)
         };
         if present {
@@ -2252,9 +3154,12 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         if builder_is_host() {
             Path::new(&marker).is_file()
         } else {
-            builder_exec(&format!("test -f {} && echo yes || echo no", shell_single_quote(&marker)))
-                .map(|c| c.stdout.trim() == "yes")
-                .unwrap_or(false)
+            builder_exec(&format!(
+                "test -f {} && echo yes || echo no",
+                shell_single_quote(&marker)
+            ))
+            .map(|c| c.stdout.trim() == "yes")
+            .unwrap_or(false)
         }
     };
     if included.is_empty() {
@@ -2262,7 +3167,15 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         // a single linux-x64 binary so the CT still gets an executable-only
         // artifact (no node_modules, no source). Entry is the `start`/`main`
         // script target or the conventional index/server file.
-        let entry_candidates = ["index.js", "server.js", "main.js", "app.js", "src/index.js", "src/server.js", "src/main.js"];
+        let entry_candidates = [
+            "index.js",
+            "server.js",
+            "main.js",
+            "app.js",
+            "src/index.js",
+            "src/server.js",
+            "src/main.js",
+        ];
         let entry = entry_candidates
             .iter()
             .map(|p| Path::new(build_dir).join(p))
@@ -2270,7 +3183,10 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         if let Some(entry) = entry {
             if builder_is_host() && util::command_on_path("bun") {
                 let out = artifact_dir.join(service_name);
-                print_step(&format!("Bun-compiling plain Node {} -> single linux-x64 binary", service_name));
+                print_step(&format!(
+                    "Bun-compiling plain Node {} -> single linux-x64 binary",
+                    service_name
+                ));
                 let rel = entry
                     .strip_prefix(Path::new(build_dir))
                     .map(|p| p.display().to_string())
@@ -2287,22 +3203,40 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                     ],
                     Path::new(build_dir),
                 )?;
-                std::fs::write(artifact_dir.join(".eco-bun"), service_name).map_err(|e| e.to_string())?;
+                std::fs::write(artifact_dir.join(".eco-bun"), service_name)
+                    .map_err(|e| e.to_string())?;
                 return Ok(());
             }
         }
-        return Err(format!("builder produced no dist/build/.next/output under {build_dir}"));
+        return Err(format!(
+            "builder produced no dist/build/.next/output under {build_dir}"
+        ));
     }
     if builder_is_host() {
         if nextjs_standalone {
-            copy_tree_excluding(&Path::new(build_dir).join(".next").join("standalone"), artifact_dir, &(skip_none as fn(&str) -> bool))?;
-            copy_tree_excluding(&Path::new(build_dir).join(".next").join("static"), &artifact_dir.join(".next").join("static"), &(skip_none as fn(&str) -> bool))?;
+            copy_tree_excluding(
+                &Path::new(build_dir).join(".next").join("standalone"),
+                artifact_dir,
+                &(skip_none as fn(&str) -> bool),
+            )?;
+            copy_tree_excluding(
+                &Path::new(build_dir).join(".next").join("static"),
+                &artifact_dir.join(".next").join("static"),
+                &(skip_none as fn(&str) -> bool),
+            )?;
             let public_src = Path::new(build_dir).join("public");
             if public_src.is_dir() {
-                copy_tree_excluding(&public_src, &artifact_dir.join("public"), &(skip_none as fn(&str) -> bool))?;
+                copy_tree_excluding(
+                    &public_src,
+                    &artifact_dir.join("public"),
+                    &(skip_none as fn(&str) -> bool),
+                )?;
             }
-            std::fs::write(artifact_dir.join(".eco-node-ssr"), service_name).map_err(|e| e.to_string())?;
-            print_step("Next.js standalone SSR artifact prepared -> ship (agent runs `node server.js`)");
+            std::fs::write(artifact_dir.join(".eco-node-ssr"), service_name)
+                .map_err(|e| e.to_string())?;
+            print_step(
+                "Next.js standalone SSR artifact prepared -> ship (agent runs `node server.js`)",
+            );
             return Ok(());
         }
         for sub in &included {
@@ -2312,7 +3246,11 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             if sveltekit_bun && sub == "build" {
                 continue;
             }
-            copy_tree_excluding(&Path::new(build_dir).join(sub), &artifact_dir.join(sub), &(skip_none as fn(&str) -> bool))?;
+            copy_tree_excluding(
+                &Path::new(build_dir).join(sub),
+                &artifact_dir.join(sub),
+                &(skip_none as fn(&str) -> bool),
+            )?;
         }
         // Trim dev/build-cache cruft from the artifact so the shipped payload
         // stays small (Next.js dev builds put ~hundreds of MB under
@@ -2332,7 +3270,9 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         // modules are linux).
         if included.iter().any(|s| s == ".next" || s == "app/.next")
             || Path::new(build_dir).join("dist/server/entry.mjs").is_file()
-            || Path::new(build_dir).join("app/dist/server/entry.mjs").is_file()
+            || Path::new(build_dir)
+                .join("app/dist/server/entry.mjs")
+                .is_file()
             || Path::new(build_dir).join("build/index.js").is_file()
         {
             for f in ["package.json", "package-lock.json", "npm-shrinkwrap.json"] {
@@ -2346,7 +3286,8 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             for f in ["package.json", "package-lock.json"] {
                 let src = Path::new(build_dir).join("app").join(f);
                 if src.is_file() {
-                    std::fs::copy(&src, artifact_dir.join("app").join(f)).map_err(|e| e.to_string())?;
+                    std::fs::copy(&src, artifact_dir.join("app").join(f))
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -2373,17 +3314,11 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             ));
             std::fs::write(&local_recipe, crate::embedded::SVELTEKIT_BUN_RECIPE_MJS)
                 .map_err(|e| format!("write sveltekit recipe: {e}"))?;
-            let remote_recipe = format!(
-                "/tmp/eco-sveltekit-bun-recipe-{}.mjs",
-                std::process::id()
-            );
+            let remote_recipe = format!("/tmp/eco-sveltekit-bun-recipe-{}.mjs", std::process::id());
             builder_transfer_push(&local_recipe, &remote_recipe)?;
 
             let stage = format!("{build_dir}/.eco-sveltekit-stage");
-            let remote_tar = format!(
-                "/tmp/eco-sveltekit-artifact-{}.tar.gz",
-                std::process::id()
-            );
+            let remote_tar = format!("/tmp/eco-sveltekit-artifact-{}.tar.gz", std::process::id());
             builder_exec_ok(&format!(
                 "set -euo pipefail; command -v bun >/dev/null; node {recipe} {build_dir}; rm -rf {stage}; mkdir -p {stage}/client; cd {build_dir}; bun build --compile --target=bun-linux-x64 build-eco/eco-entry.js --outfile {stage}/{service}; cp -r build/client/. {stage}/client/; printf %s {service_q} > {stage}/.eco-bun; tar czf {remote_tar} -C {stage} .",
                 recipe = shell_single_quote(&remote_recipe),
@@ -2446,28 +3381,26 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 "Astro adapter-node build ({}): preparing self-contained bun recipe in builder VM",
                 astro_client
             ));
-            let local_recipe = std::env::temp_dir().join(format!(
-                "eco-astro-bun-recipe-{}.mjs",
-                std::process::id()
-            ));
+            let local_recipe = std::env::temp_dir()
+                .join(format!("eco-astro-bun-recipe-{}.mjs", std::process::id()));
             std::fs::write(&local_recipe, crate::embedded::ASTRO_BUN_RECIPE_MJS)
                 .map_err(|e| format!("write astro recipe: {e}"))?;
-            let remote_recipe = format!(
-                "/tmp/eco-astro-bun-recipe-{}.mjs",
-                std::process::id()
-            );
+            let remote_recipe = format!("/tmp/eco-astro-bun-recipe-{}.mjs", std::process::id());
             builder_transfer_push(&local_recipe, &remote_recipe)?;
 
             let stage = format!("{build_dir}/.eco-astro-stage");
-            let remote_tar = format!(
-                "/tmp/eco-astro-artifact-{}.tar.gz",
-                std::process::id()
-            );
+            let remote_tar = format!("/tmp/eco-astro-artifact-{}.tar.gz", std::process::id());
             // The recipe patches node_modules/@astrojs/node serve-static in the
             // build dir and emits build-eco/eco-entry.js; the wrapper imports
             // the server entry (root or workspace) via a relative specifier
             // that bun resolves from the build dir. Ship the matching client.
-            let client_dir = if builder_exec(&format!("test -f {} && echo yes || echo no", shell_single_quote(&astro_entry))).map(|c| c.stdout.trim() == "yes").unwrap_or(false) {
+            let client_dir = if builder_exec(&format!(
+                "test -f {} && echo yes || echo no",
+                shell_single_quote(&astro_entry)
+            ))
+            .map(|c| c.stdout.trim() == "yes")
+            .unwrap_or(false)
+            {
                 astro_client
             } else {
                 astro_client_app
@@ -2483,10 +3416,8 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 remote_tar = shell_single_quote(&remote_tar),
             ))?;
 
-            let local_tar = std::env::temp_dir().join(format!(
-                "eco-astro-artifact-{}.tar.gz",
-                std::process::id()
-            ));
+            let local_tar = std::env::temp_dir()
+                .join(format!("eco-astro-artifact-{}.tar.gz", std::process::id()));
             builder_transfer_pull(&remote_tar, &local_tar)?;
             run_command(
                 "tar",
@@ -2525,10 +3456,22 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 remote_tar = remote_tar,
             ))?;
             builder_transfer_pull(&remote_tar, Path::new("/tmp/eco-nextjs-artifact.tar.gz"))?;
-            run_command("tar", &["xzf".to_string(), "/tmp/eco-nextjs-artifact.tar.gz".to_string(), "-C".to_string(), artifact_dir.display().to_string()], &util::current_dir())?;
+            run_command(
+                "tar",
+                &[
+                    "xzf".to_string(),
+                    "/tmp/eco-nextjs-artifact.tar.gz".to_string(),
+                    "-C".to_string(),
+                    artifact_dir.display().to_string(),
+                ],
+                &util::current_dir(),
+            )?;
             builder_exec(&format!("rm -f {remote_tar}; rm -rf {stage}"))?;
-            std::fs::write(artifact_dir.join(".eco-node-ssr"), service_name).map_err(|e| e.to_string())?;
-            print_step("Next.js standalone SSR artifact prepared -> ship (agent runs `node server.js`)");
+            std::fs::write(artifact_dir.join(".eco-node-ssr"), service_name)
+                .map_err(|e| e.to_string())?;
+            print_step(
+                "Next.js standalone SSR artifact prepared -> ship (agent runs `node server.js`)",
+            );
             return Ok(());
         }
         let remote_tar = format!("/tmp/eco-builder-artifact-{}.tar.gz", std::process::id());
@@ -2539,7 +3482,16 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
             included.join(" ")
         ))?;
         builder_transfer_pull(&remote_tar, Path::new("/tmp/eco-builder-artifact.tar.gz"))?;
-        run_command("tar", &["xzf".to_string(), "/tmp/eco-builder-artifact.tar.gz".to_string(), "-C".to_string(), artifact_dir.display().to_string()], &util::current_dir())?;
+        run_command(
+            "tar",
+            &[
+                "xzf".to_string(),
+                "/tmp/eco-builder-artifact.tar.gz".to_string(),
+                "-C".to_string(),
+                artifact_dir.display().to_string(),
+            ],
+            &util::current_dir(),
+        )?;
         builder_exec(&format!("rm -f {}", remote_tar))?;
     }
     // Bun-compile SSR node apps (host builder mode) into a single linux-x64
@@ -2565,7 +3517,13 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         }
         // Astro @astrojs/node standalone: dist/server/entry.mjs + dist/client.
         let astro_client = Path::new(build_dir).join("dist").join("client");
-        let is_astro = builder_is_host() && astro_client.is_dir() && Path::new(build_dir).join("dist").join("server").join("entry.mjs").is_file();
+        let is_astro = builder_is_host()
+            && astro_client.is_dir()
+            && Path::new(build_dir)
+                .join("dist")
+                .join("server")
+                .join("entry.mjs")
+                .is_file();
         if is_astro {
             print_step(&format!(
                 "Astro adapter-node build ({}): preparing self-contained bun recipe",
@@ -2585,9 +3543,15 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
         .find(|p| p.is_file());
         if let Some(entry) = server_entry {
             let out = artifact_dir.join(service_name);
-            print_step(&format!("Bun-compiling {} (SSR node app) -> single linux-x64 binary", service_name));
+            print_step(&format!(
+                "Bun-compiling {} (SSR node app) -> single linux-x64 binary",
+                service_name
+            ));
             // Entry path relative to the build dir so node_modules resolve.
-            let rel = entry.strip_prefix(Path::new(build_dir)).map(|p| p.display().to_string()).unwrap_or_else(|_| entry.display().to_string());
+            let rel = entry
+                .strip_prefix(Path::new(build_dir))
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| entry.display().to_string());
             run_command(
                 "bun",
                 &[
@@ -2600,7 +3564,8 @@ fn copy_frontend_artifact_from_builder(build_dir: &str, artifact_dir: &Path, ser
                 ],
                 Path::new(build_dir),
             )?;
-            std::fs::write(artifact_dir.join(".eco-bun"), service_name).map_err(|e| e.to_string())?;
+            std::fs::write(artifact_dir.join(".eco-bun"), service_name)
+                .map_err(|e| e.to_string())?;
             // SvelteKit adapter-node: ship the client assets as static files
             // next to the binary. The wrapper points the server at
             // dirname(execPath)/client, so no node_modules ever reach the CT.
@@ -2642,7 +3607,12 @@ fn count_tree_files(dir: &Path) -> usize {
 // Linux builder VM, then pull the binary back to a temp dir. Mirrors the
 // host-side zigbuild path (workspace `-p` handling, target-dir resolution) but
 // keeps production binaries out of the raw client OS — the SOC2/ISO27001 fix.
-fn cross_compile_rust_on_builder(service: &str, dir: &Path, package: &str, build_env: &[(String, String)]) -> Result<PathBuf, String> {
+fn cross_compile_rust_on_builder(
+    service: &str,
+    dir: &Path,
+    package: &str,
+    build_env: &[(String, String)],
+) -> Result<PathBuf, String> {
     if !builder_driver_is_available() {
         return Err(format!(
             "{} is a Rust service but no local Linux builder VM is reachable. Provision it with Lima (`brew install lima && limactl start --name eco-builder scripts/eco-builder.lima.yml`), or set ECO_BUILDER=host to build on this machine (dev only).",
@@ -2660,7 +3630,10 @@ fn cross_compile_rust_on_builder(service: &str, dir: &Path, package: &str, build
     // Sync the source into the VM build root (never a live mount — copy-in so
     // no host folder can be swapped mid-build / TOCTOU).
     let build_dir = format!("{}/{}", builder_build_root(), service);
-    print_step(&format!("Syncing {} source into builder VM ({})", service, build_dir));
+    print_step(&format!(
+        "Syncing {} source into builder VM ({})",
+        service, build_dir
+    ));
     sync_dir_to_builder(dir, &build_dir)?;
     // Determine the workspace root from INSIDE the VM so `-p` builds resolve
     // against the synced layout, not the host paths.
@@ -2685,11 +3658,17 @@ fn cross_compile_rust_on_builder(service: &str, dir: &Path, package: &str, build
     // them to PATH before running cargo so non-login `bash -c` finds them.
     exports.push_str("export PATH=\"$HOME/.cargo/bin:/usr/local/bin:$PATH\"\n");
     let build_args = if workspace_build {
-        format!("cargo zigbuild --release -p {} --target x86_64-unknown-linux-musl", shell_single_quote(package))
+        format!(
+            "cargo zigbuild --release -p {} --target x86_64-unknown-linux-musl",
+            shell_single_quote(package)
+        )
     } else {
         format!("cargo zigbuild --release --target x86_64-unknown-linux-musl")
     };
-    let script = format!("cd {} && {exports}{build_args}", shell_single_quote(&build_dir));
+    let script = format!(
+        "cd {} && {exports}{build_args}",
+        shell_single_quote(&build_dir)
+    );
     builder_exec_ok(&script)?;
     // Resolve the real target dir inside the VM (workspace builds land in the
     // workspace root's target/), then pull the binary back.
@@ -2703,21 +3682,37 @@ fn cross_compile_rust_on_builder(service: &str, dir: &Path, package: &str, build
         format!("{build_dir}/target")
     };
     let remote_bin = format!("{target_dir}/x86_64-unknown-linux-musl/release/{package}");
-    let local_dir = std::env::temp_dir().join(format!("eco-rust-builder-{}-{}", service, std::process::id()));
+    let local_dir = std::env::temp_dir().join(format!(
+        "eco-rust-builder-{}-{}",
+        service,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&local_dir);
-    std::fs::create_dir_all(&local_dir).map_err(|e| format!("create {}: {e}", local_dir.display()))?;
+    std::fs::create_dir_all(&local_dir)
+        .map_err(|e| format!("create {}: {e}", local_dir.display()))?;
     let local_bin = local_dir.join(package);
-    let exists = builder_exec(&format!("test -f {} && echo yes || echo no", shell_single_quote(&remote_bin)))
-        .map(|c| c.stdout.trim() == "yes")
-        .unwrap_or(false);
+    let exists = builder_exec(&format!(
+        "test -f {} && echo yes || echo no",
+        shell_single_quote(&remote_bin)
+    ))
+    .map(|c| c.stdout.trim() == "yes")
+    .unwrap_or(false);
     if !exists {
-        return Err(format!("cross-compiled binary not found in builder VM: {remote_bin}"));
+        return Err(format!(
+            "cross-compiled binary not found in builder VM: {remote_bin}"
+        ));
     }
     builder_transfer_pull(&remote_bin, &local_bin)?;
     if !local_bin.is_file() {
-        return Err(format!("failed to pull cross-compiled binary from builder VM: {remote_bin}"));
+        return Err(format!(
+            "failed to pull cross-compiled binary from builder VM: {remote_bin}"
+        ));
     }
-    print_step(&format!("Pulled {} binary from builder VM ({} bytes)", package, std::fs::metadata(&local_bin).map(|m| m.len()).unwrap_or(0)));
+    print_step(&format!(
+        "Pulled {} binary from builder VM ({} bytes)",
+        package,
+        std::fs::metadata(&local_bin).map(|m| m.len()).unwrap_or(0)
+    ));
     Ok(local_bin)
 }
 
@@ -2783,7 +3778,20 @@ fn collect_frontend_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), Stri
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if path.is_dir() {
-            if ["target", "node_modules", ".git", ".next", "dist", "build", ".output", ".cache", ".eco", "build-eco"].contains(&name.as_str()) {
+            if [
+                "target",
+                "node_modules",
+                ".git",
+                ".next",
+                "dist",
+                "build",
+                ".output",
+                ".cache",
+                ".eco",
+                "build-eco",
+            ]
+            .contains(&name.as_str())
+            {
                 continue;
             }
             collect_frontend_inputs(&path, out)?;
@@ -2797,10 +3805,18 @@ fn collect_frontend_inputs(dir: &Path, out: &mut Vec<String>) -> Result<(), Stri
     Ok(())
 }
 
-fn compute_frontend_input_hash(service_dir: &Path, build_env: &[(String, String)]) -> Result<String, String> {
+fn compute_frontend_input_hash(
+    service_dir: &Path,
+    build_env: &[(String, String)],
+) -> Result<String, String> {
     let mut inputs: Vec<String> = Vec::new();
     collect_frontend_inputs(service_dir, &mut inputs)?;
-    for manifest in ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"] {
+    for manifest in [
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+    ] {
         let path = service_dir.join(manifest);
         if path.is_file() {
             inputs.push(path.display().to_string());
@@ -2811,14 +3827,18 @@ fn compute_frontend_input_hash(service_dir: &Path, build_env: &[(String, String)
     for path in &inputs {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
         let digest = sha2::Sha256::digest(&bytes);
-        combined.push_str(&format!("{}  {path}\n", crate::registry::hex_encode(&digest)));
+        combined.push_str(&format!(
+            "{}  {path}\n",
+            crate::registry::hex_encode(&digest)
+        ));
     }
     // Build-time public env vars (NEXT_PUBLIC_*/VITE_*/PUBLIC_*) are baked
     // into the output, so a change to them must invalidate the cached build —
     // otherwise the hash-skip reuses a stale artifact (e.g. an old localhost
     // API URL) even though the CT .env now resolves the real public address.
     for (key, value) in build_env {
-        if key.starts_with("NEXT_PUBLIC_") || key.starts_with("VITE_") || key.starts_with("PUBLIC_") {
+        if key.starts_with("NEXT_PUBLIC_") || key.starts_with("VITE_") || key.starts_with("PUBLIC_")
+        {
             combined.push_str(&format!("{key}={value}\n"));
         }
     }
@@ -2842,7 +3862,11 @@ fn compute_frontend_env_hash(build_env: &[(String, String)]) -> String {
         // invalidate the cache. NEXT_PRIVATE_STANDALONE is an eco-forced build
         // mode flag (Next.js SSR → standalone artifact) that must invalidate
         // too, or the hash-skip would reuse a non-standalone build.
-        if key.starts_with("NEXT_PUBLIC_") || key.starts_with("VITE_") || key.starts_with("PUBLIC_") || key == "NEXT_PRIVATE_STANDALONE" {
+        if key.starts_with("NEXT_PUBLIC_")
+            || key.starts_with("VITE_")
+            || key.starts_with("PUBLIC_")
+            || key == "NEXT_PRIVATE_STANDALONE"
+        {
             combined.push_str(&format!("{key}={value}\n"));
         }
     }
@@ -2855,20 +3879,34 @@ fn compute_frontend_env_hash(build_env: &[(String, String)]) -> String {
 
 pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let (options, positionals) = parse_options(args);
-    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let input = positionals
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
     let cwd = util::current_dir();
     let deployment = load_project_deployment(&input, &cwd)?;
     // API URL + key: explicit env wins, else the `eco login`-stored auth
     // (defaulting the URL to the public api.getecosphere.com).
     let (api_url, api_key) = crate::commands::account::resolve_api_credentials()?;
-    let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+    let api_url = if api_url.is_empty() {
+        "https://api.getecosphere.com".to_string()
+    } else {
+        api_url
+    };
     if api_key.is_empty() {
-        return Err("Not logged in. Run `eco login` to connect your account before `eco up --remote`.".to_string());
+        return Err(
+            "Not logged in. Run `eco login` to connect your account before `eco up --remote`."
+                .to_string(),
+        );
     }
     let base = api_url.trim_end_matches('/').to_string();
     let staging = options.get("staging").map(|v| v == "true").unwrap_or(false);
 
-    print_lxs_update_notice(&deployment.content, &deployment.project_dir, lxs_check_disabled(&options));
+    print_lxs_update_notice(
+        &deployment.content,
+        &deployment.project_dir,
+        lxs_check_disabled(&options),
+    );
 
     // Fail fast on protocol mismatch BEFORE building the payload: ask the
     // agent its protocol, and require an exact match (a stale client could
@@ -2878,7 +3916,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&health_text) {
             let agent_protocol = v.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
             if agent_protocol != 0 && agent_protocol != crate::util::PROTOCOL_VERSION {
-                let agent_semver = v.get("version").and_then(|s| s.as_str()).unwrap_or("(unknown)");
+                let agent_semver = v
+                    .get("version")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("(unknown)");
                 return Err(crate::util::protocol_mismatch_msg(
                     &crate::util::PROTOCOL_VERSION.to_string(),
                     env!("CARGO_PKG_VERSION"),
@@ -2888,7 +3929,12 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         }
     }
     let staging_config = ecompose::parse_staging(&deployment.content);
-    if staging && staging_config.get("ct").map(|s| s.is_empty()).unwrap_or(true) {
+    if staging
+        && staging_config
+            .get("ct")
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+    {
         return Err(format!(
             "--staging requested for {}, but ecompose.yml has no staging.ct declared. Add a staging: block (staging.ct: 1000).",
             deployment.project
@@ -2907,8 +3953,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         .iter()
         .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "rust"))
     {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let rel =
+            relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() {
+            service.path.clone()
+        } else {
+            rel
+        };
         let candidate = deployment.project_dir.join(&rel);
         if !candidate.join("Cargo.toml").is_file() {
             return Err(format!(
@@ -2929,13 +3980,19 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // native modules come out linux-x64 and match the production CTs), and
     // the built dist ships to the CT so it never runs `npm run build`.
     let mut frontend_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
-    for service in deployment
-        .services
-        .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "npm" || r.starts_with("node@") || r == "leptos" || r == "static"))
-    {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+    for service in deployment.services.iter().filter(|s| {
+        !s.path.is_empty()
+            && s.runtimes
+                .iter()
+                .any(|r| r == "npm" || r.starts_with("node@") || r == "leptos" || r == "static")
+    }) {
+        let rel =
+            relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() {
+            service.path.clone()
+        } else {
+            rel
+        };
         let candidate = deployment.project_dir.join(&rel);
         // Node frontends have package.json; Leptos/Rust frontends have
         // Cargo.toml + index.html (the trunk CSR entry); static sites have
@@ -2952,7 +4009,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         if !ok {
             return Err(format!(
                 "Cannot find local {} for service {} (looked at {})",
-                if is_leptos { "Cargo.toml + index.html (Leptos)" } else if is_static { "index.html (static)" } else { "package.json" },
+                if is_leptos {
+                    "Cargo.toml + index.html (Leptos)"
+                } else if is_static {
+                    "index.html (static)"
+                } else {
+                    "package.json"
+                },
                 service.name,
                 candidate.display()
             ));
@@ -2973,8 +4036,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         .iter()
         .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "go"))
     {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let rel =
+            relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() {
+            service.path.clone()
+        } else {
+            rel
+        };
         let candidate = deployment.project_dir.join(&rel);
         if !candidate.join("go.mod").is_file() {
             return Err(format!(
@@ -2993,8 +4061,13 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         .iter()
         .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "java@17" || r == "maven"))
     {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+        let rel =
+            relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() {
+            service.path.clone()
+        } else {
+            rel
+        };
         let candidate = deployment.project_dir.join(&rel);
         if !candidate.join("pom.xml").is_file() {
             return Err(format!(
@@ -3010,13 +4083,19 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // (pip download --only-binary => prebuilt linux binaries, never built on
     // the server). The CT's python3 runs the app with PYTHONPATH=vendored.
     let mut python_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
-    for service in deployment
-        .services
-        .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "python" || r.starts_with("python@")))
-    {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+    for service in deployment.services.iter().filter(|s| {
+        !s.path.is_empty()
+            && s.runtimes
+                .iter()
+                .any(|r| r == "python" || r.starts_with("python@"))
+    }) {
+        let rel =
+            relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() {
+            service.path.clone()
+        } else {
+            rel
+        };
         let candidate = deployment.project_dir.join(&rel);
         if !candidate.join("manage.py").is_file() && !candidate.join("app.py").is_file() {
             return Err(format!(
@@ -3031,16 +4110,25 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // dotnet services: `dotnet publish` a self-contained linux-x64 single-file
     // executable on the dev machine (the build farm) and ship that binary.
     let mut dotnet_targets: Vec<(ecompose::Service, String, PathBuf)> = Vec::new();
-    for service in deployment
-        .services
-        .iter()
-        .filter(|s| !s.path.is_empty() && s.runtimes.iter().any(|r| r == "dotnet" || r.starts_with("dotnet@")))
-    {
-        let rel = relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
-        let rel = if rel.is_empty() { service.path.clone() } else { rel };
+    for service in deployment.services.iter().filter(|s| {
+        !s.path.is_empty()
+            && s.runtimes
+                .iter()
+                .any(|r| r == "dotnet" || r.starts_with("dotnet@"))
+    }) {
+        let rel =
+            relative_ct_service_path(&service.path, &deployment.project, &project_dir_str, "");
+        let rel = if rel.is_empty() {
+            service.path.clone()
+        } else {
+            rel
+        };
         let candidate = deployment.project_dir.join(&rel);
         let has_csproj = std::fs::read_dir(&candidate)
-            .map(|rd| rd.flatten().any(|e| e.path().extension().map(|x| x == "csproj").unwrap_or(false)))
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.path().extension().map(|x| x == "csproj").unwrap_or(false))
+            })
             .unwrap_or(false);
         if !has_csproj {
             return Err(format!(
@@ -3053,17 +4141,32 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     }
 
     if options.get("dry-run").map(|v| v == "true").unwrap_or(false) {
-        print_step(&format!("remote deploy plan for {}{} (dry-run)", deployment.project, if staging { " (staging)" } else { "" }));
+        print_step(&format!(
+            "remote deploy plan for {}{} (dry-run)",
+            deployment.project,
+            if staging { " (staging)" } else { "" }
+        ));
         if staging {
-            print_step(&format!("target CT: {} (staging.getecosphere.com style footprint)", staging_config.get("ct").cloned().unwrap_or_default()));
+            print_step(&format!(
+                "target CT: {} (staging.getecosphere.com style footprint)",
+                staging_config.get("ct").cloned().unwrap_or_default()
+            ));
         }
         print_step(&format!("agent: {base}"));
         print_step("cross-toolchain: x86_64-unknown-linux-musl via cargo-zigbuild");
         for (service, _, dir) in &rust_targets {
             if builder_is_host() {
-                print_step(&format!("cross-compile {} from {} and ship binary", service.name, dir.display()));
+                print_step(&format!(
+                    "cross-compile {} from {} and ship binary",
+                    service.name,
+                    dir.display()
+                ));
             } else {
-                print_step(&format!("cross-compile {} in builder VM ({}): zigbuild x86_64-unknown-linux-musl", service.name, builder_name()));
+                print_step(&format!(
+                    "cross-compile {} in builder VM ({}): zigbuild x86_64-unknown-linux-musl",
+                    service.name,
+                    builder_name()
+                ));
             }
         }
         for (service, _, dir) in &frontend_targets {
@@ -3075,10 +4178,18 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             print_step(&format!("  local source: {}", dir.display()));
         }
         for (service, _, dir) in &go_targets {
-            print_step(&format!("cross-compile Go {} from {} and ship binary", service.name, dir.display()));
+            print_step(&format!(
+                "cross-compile Go {} from {} and ship binary",
+                service.name,
+                dir.display()
+            ));
         }
         for (service, _, dir) in &spring_targets {
-            print_step(&format!("build Spring Boot {} from {} and ship jar", service.name, dir.display()));
+            print_step(&format!(
+                "build Spring Boot {} from {} and ship jar",
+                service.name,
+                dir.display()
+            ));
         }
         return Ok(());
     }
@@ -3106,7 +4217,8 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // no zig/cargo-zigbuild needs to live on the client machine.
         None
     };
-    let mut build_env: Vec<(String, String)> = vec![("SQLX_OFFLINE".to_string(), "true".to_string())];
+    let mut build_env: Vec<(String, String)> =
+        vec![("SQLX_OFFLINE".to_string(), "true".to_string())];
     if let Some(zig_dir) = &zig_dir {
         let path = std::env::var("PATH").unwrap_or_default();
         build_env.push(("PATH".to_string(), format!("{}:{path}", zig_dir.display())));
@@ -3152,13 +4264,19 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             );
             if let Ok(t) = agent_client_get(&prod_url, &api_key) {
                 env_text = Some(t);
-                print_step(&format!("Staging has no .env for {} yet — using production .env for the build", service.name));
+                print_step(&format!(
+                    "Staging has no .env for {} yet — using production .env for the build",
+                    service.name
+                ));
             }
         }
         if let Some(text) = env_text {
             for line in text.lines() {
                 if let Some((key, value)) = parse_env_line(line) {
-                    if !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
+                    if !(key.starts_with("PUBLIC_")
+                        || key.starts_with("VITE_")
+                        || key.starts_with("NEXT_PUBLIC_"))
+                    {
                         continue;
                     }
                     if !build_env.iter().any(|(existing, _)| existing == &key) {
@@ -3166,7 +4284,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                     }
                 }
             }
-            print_step(&format!("Using CT .env for {} build environment", service.name));
+            print_step(&format!(
+                "Using CT .env for {} build environment",
+                service.name
+            ));
         } else {
             print_step(&format!(
                 "No .env detected for {} yet — creating a default build env. This is fine: sqlx builds offline and the server generates the real .env on deploy.",
@@ -3183,7 +4304,10 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         if let Ok(text) = std::fs::read_to_string(&example_path) {
             for line in text.lines() {
                 if let Some((key, value)) = parse_env_line(line) {
-                    if !(key.starts_with("PUBLIC_") || key.starts_with("VITE_") || key.starts_with("NEXT_PUBLIC_")) {
+                    if !(key.starts_with("PUBLIC_")
+                        || key.starts_with("VITE_")
+                        || key.starts_with("NEXT_PUBLIC_"))
+                    {
                         continue;
                     }
                     if !build_env.iter().any(|(existing, _)| existing == &key) {
@@ -3198,12 +4322,19 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     let mut artifacts: Vec<(String, String, PathBuf)> = Vec::new();
     let mut hash_lines: Vec<String> = Vec::new();
     for (service, rel, dir) in &rust_targets {
-        let cargo_text = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|e| format!("read {}: {e}", dir.join("Cargo.toml").display()))?;
+        let cargo_text = std::fs::read_to_string(dir.join("Cargo.toml"))
+            .map_err(|e| format!("read {}: {e}", dir.join("Cargo.toml").display()))?;
         let Some(package) = cargo_package_name(&cargo_text) else {
-            print_step(&format!("Skipping {}: no [package] binary name", service.name));
+            print_step(&format!(
+                "Skipping {}: no [package] binary name",
+                service.name
+            ));
             continue;
         };
-        print_step(&format!("Cross-compiling {} ({package}) for x86_64-unknown-linux-musl", service.name));
+        print_step(&format!(
+            "Cross-compiling {} ({package}) for x86_64-unknown-linux-musl",
+            service.name
+        ));
         // Compliance default: production binaries are cross-compiled inside the
         // isolated Linux builder VM. Host zigbuild is the explicit ECO_BUILDER=host
         // (dev-only) path.
@@ -3220,14 +4351,29 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // there; standalone crates build from their own dir as before.
         let (build_cwd, build_args) = match cargo_workspace_root(dir) {
             Some(root) if PathBuf::from(&root) != *dir => {
-                let args: Vec<String> = ["zigbuild", "--release", "-p", &package, "--target", "x86_64-unknown-linux-musl"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let args: Vec<String> = [
+                    "zigbuild",
+                    "--release",
+                    "-p",
+                    &package,
+                    "--target",
+                    "x86_64-unknown-linux-musl",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
                 (PathBuf::from(&root), args)
             }
             _ => {
-                let args: Vec<String> = ["zigbuild", "--release", "--target", "x86_64-unknown-linux-musl"].iter().map(|s| s.to_string()).collect();
+                let args: Vec<String> = [
+                    "zigbuild",
+                    "--release",
+                    "--target",
+                    "x86_64-unknown-linux-musl",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
                 (dir.clone(), args)
             }
         };
@@ -3241,27 +4387,46 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             .join("release")
             .join(&package);
         if let Some(target_dir) = resolve_cargo_target_dir(dir) {
-            let workspace_binary = Path::new(&target_dir).join("x86_64-unknown-linux-musl").join("release").join(&package);
+            let workspace_binary = Path::new(&target_dir)
+                .join("x86_64-unknown-linux-musl")
+                .join("release")
+                .join(&package);
             if workspace_binary.is_file() {
                 binary = workspace_binary;
             }
         }
         if !binary.is_file() {
-            return Err(format!("cross-compiled binary not found: {}", binary.display()));
+            return Err(format!(
+                "cross-compiled binary not found: {}",
+                binary.display()
+            ));
         }
         artifacts.push((service.name.clone(), package.clone(), binary));
         let hash = compute_rust_input_hash(dir)?;
         hash_lines.push(format!("{rel} {hash}"));
     }
-    if artifacts.is_empty() && frontend_targets.is_empty() && go_targets.is_empty() && spring_targets.is_empty() && python_targets.is_empty() && dotnet_targets.is_empty() {
+    if artifacts.is_empty()
+        && frontend_targets.is_empty()
+        && go_targets.is_empty()
+        && spring_targets.is_empty()
+        && python_targets.is_empty()
+        && dotnet_targets.is_empty()
+    {
         return Err("no Rust/Go/Spring/Python/dotnet binaries or frontend dist were produced; aborting remote deploy.".to_string());
     }
 
     // Cross-compile Go services to a static linux/amd64 binary (Go builds
     // cross-platform out of the box with CGO_ENABLED=0).
     for (service, rel, dir) in &go_targets {
-        let bin_name = if !service.binary.is_empty() { service.binary.clone() } else { service.name.clone() };
-        print_step(&format!("Cross-compiling Go {} for linux/amd64", service.name));
+        let bin_name = if !service.binary.is_empty() {
+            service.binary.clone()
+        } else {
+            service.name.clone()
+        };
+        print_step(&format!(
+            "Cross-compiling Go {} for linux/amd64",
+            service.name
+        ));
         let out_bin = std::env::temp_dir()
             .join(format!("eco-go-{}-{}", service.name, std::process::id()))
             .join(&bin_name);
@@ -3278,9 +4443,23 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 go_env.push((k.clone(), v.clone()));
             }
         }
-        run_command_env("go", &["build".to_string(), "-o".to_string(), out_bin.display().to_string(), ".".to_string()], dir, &go_env)?;
+        run_command_env(
+            "go",
+            &[
+                "build".to_string(),
+                "-o".to_string(),
+                out_bin.display().to_string(),
+                ".".to_string(),
+            ],
+            dir,
+            &go_env,
+        )?;
         if !out_bin.is_file() {
-            return Err(format!("Go build for {} did not produce {}", service.name, out_bin.display()));
+            return Err(format!(
+                "Go build for {} did not produce {}",
+                service.name,
+                out_bin.display()
+            ));
         }
         artifacts.push((service.name.clone(), bin_name, out_bin));
         let hash = compute_rust_input_hash(dir).unwrap_or_else(|_| "go".to_string());
@@ -3292,8 +4471,15 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // prebuilt linux binaries — nothing is installed or built on the server.
     let mut python_artifacts: Vec<(String, PathBuf)> = Vec::new();
     for (service, rel, dir) in &python_targets {
-        print_step(&format!("Vendoring Python deps for {} (manylinux wheels)", service.name));
-        let artifact_dir = std::env::temp_dir().join(format!("eco-python-{}-{}", service.name, std::process::id()));
+        print_step(&format!(
+            "Vendoring Python deps for {} (manylinux wheels)",
+            service.name
+        ));
+        let artifact_dir = std::env::temp_dir().join(format!(
+            "eco-python-{}-{}",
+            service.name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&artifact_dir);
         std::fs::create_dir_all(&artifact_dir).map_err(|e| e.to_string())?;
         copy_tree_excluding(
@@ -3332,9 +4518,20 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // executable on the dev machine and ship that binary (framework deps are
     // bundled into it — no .NET runtime on the server).
     for (service, rel, dir) in &dotnet_targets {
-        let bin_name = if !service.binary.is_empty() { service.binary.clone() } else { service.name.clone() };
-        print_step(&format!("Publishing dotnet {} (self-contained linux-x64)", service.name));
-        let out_dir = std::env::temp_dir().join(format!("eco-dotnet-{}-{}", service.name, std::process::id()));
+        let bin_name = if !service.binary.is_empty() {
+            service.binary.clone()
+        } else {
+            service.name.clone()
+        };
+        print_step(&format!(
+            "Publishing dotnet {} (self-contained linux-x64)",
+            service.name
+        ));
+        let out_dir = std::env::temp_dir().join(format!(
+            "eco-dotnet-{}-{}",
+            service.name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&out_dir);
         std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
         run_command_env(
@@ -3361,14 +4558,25 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
-                let ext = p.extension().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+                let ext = p
+                    .extension()
+                    .map(|x| x.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 ext.is_empty() && p.is_file()
             })
             .find(|p| {
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 !name.is_empty()
             })
-            .ok_or_else(|| format!("dotnet publish for {} did not produce a native executable", service.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "dotnet publish for {} did not produce a native executable",
+                    service.name
+                )
+            })?;
         artifacts.push((service.name.clone(), bin_name, exe));
         let hash = compute_rust_input_hash(dir).unwrap_or_else(|_| "dotnet".to_string());
         hash_lines.push(format!("{rel} {hash}"));
@@ -3378,9 +4586,25 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // jar, shipped to the CT where `java -jar` runs it.
     let mut spring_artifacts: Vec<(String, PathBuf)> = Vec::new();
     for (service, rel, dir) in &spring_targets {
-        let jar_name = if !service.binary.is_empty() { service.binary.clone() } else { service.name.clone() };
-        print_step(&format!("Building Spring Boot {} (mvn package)", service.name));
-        run_command_env("mvn", &["package".to_string(), "-DskipTests".to_string(), "-q".to_string()], dir, &build_env)?;
+        let jar_name = if !service.binary.is_empty() {
+            service.binary.clone()
+        } else {
+            service.name.clone()
+        };
+        print_step(&format!(
+            "Building Spring Boot {} (mvn package)",
+            service.name
+        ));
+        run_command_env(
+            "mvn",
+            &[
+                "package".to_string(),
+                "-DskipTests".to_string(),
+                "-q".to_string(),
+            ],
+            dir,
+            &build_env,
+        )?;
         // Find the fat jar (exclude *-original and *-plain).
         let target_dir = dir.join("target");
         let jar = std::fs::read_dir(&target_dir)
@@ -3389,15 +4613,23 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             .map(|e| e.path())
             .filter(|p| p.extension().map(|x| x == "jar").unwrap_or(false))
             .filter(|p| {
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 !name.contains("original") && !name.contains("plain") && name != ".jar"
             })
             .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
             .ok_or_else(|| format!("No fat jar produced by mvn package for {}", service.name))?;
-        let jar_artifacts_dir = std::env::temp_dir().join(format!("eco-spring-artifacts-{}-{}", service.name, std::process::id()));
+        let jar_artifacts_dir = std::env::temp_dir().join(format!(
+            "eco-spring-artifacts-{}-{}",
+            service.name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&jar_artifacts_dir);
         std::fs::create_dir_all(&jar_artifacts_dir).map_err(|e| e.to_string())?;
-        std::fs::copy(&jar, jar_artifacts_dir.join(format!("{jar_name}.jar"))).map_err(|e| format!("copy jar: {e}"))?;
+        std::fs::copy(&jar, jar_artifacts_dir.join(format!("{jar_name}.jar")))
+            .map_err(|e| format!("copy jar: {e}"))?;
         spring_artifacts.push((service.name.clone(), jar_artifacts_dir));
         let hash = compute_rust_input_hash(dir).unwrap_or_else(|_| "spring".to_string());
         hash_lines.push(format!("{rel} {hash}"));
@@ -3431,17 +4663,28 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         let hash = compute_frontend_input_hash(dir, &build_env)?;
         frontend_hash_lines.push(format!("{rel} {hash}"));
         let build_dir = format!("{}/{}", builder_build_root(), service.name);
-        let build_loc = if builder_is_host() { "on this machine (host builder)".to_string() } else { format!("on local builder ({})", builder_name()) };
+        let build_loc = if builder_is_host() {
+            "on this machine (host builder)".to_string()
+        } else {
+            format!("on local builder ({})", builder_name())
+        };
         let is_leptos = dir.join("index.html").is_file() && !dir.join("package.json").is_file();
-        let is_static = service.runtimes.iter().any(|r| r == "static") || (dir.join("index.html").is_file() && !dir.join("package.json").is_file() && !is_leptos);
+        let is_static = service.runtimes.iter().any(|r| r == "static")
+            || (dir.join("index.html").is_file()
+                && !dir.join("package.json").is_file()
+                && !is_leptos);
         // Next.js SSR frontends must ship a self-contained standalone server
         // (the agent refuses SSR artifacts that need npm install on the CT).
         // Force `output: standalone` via env: it flows into the build exports
         // AND the env-hash, so a switch to standalone invalidates the
         // hash-skip and forces a rebuild. copy_frontend_artifact_from_builder
         // assembles the flattened standalone layout from `.next/standalone/`.
-        if !is_leptos && !is_static && is_nextjs_frontend(dir)
-            && !build_env.iter().any(|(k, _)| k == "NEXT_PRIVATE_STANDALONE")
+        if !is_leptos
+            && !is_static
+            && is_nextjs_frontend(dir)
+            && !build_env
+                .iter()
+                .any(|(k, _)| k == "NEXT_PRIVATE_STANDALONE")
         {
             build_env.push(("NEXT_PRIVATE_STANDALONE".to_string(), "true".to_string()));
         }
@@ -3450,16 +4693,30 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             "Building {} {}: {}",
             service.name,
             build_loc,
-            if is_leptos { "trunk build --release (Leptos wasm)" } else if is_static { "shipping static dist" } else { "npm ci + npm run build" }
+            if is_leptos {
+                "trunk build --release (Leptos wasm)"
+            } else if is_static {
+                "shipping static dist"
+            } else {
+                "npm ci + npm run build"
+            }
         ));
         sync_dir_to_builder(dir, &build_dir)?;
         if is_static {
             // Static site: ship the source dir (index.html + assets) as the
             // dist/ so the CT serves it via python http.server.
-            let artifact_dir = std::env::temp_dir().join(format!("eco-frontend-artifact-{}-{}", service.name, std::process::id()));
+            let artifact_dir = std::env::temp_dir().join(format!(
+                "eco-frontend-artifact-{}-{}",
+                service.name,
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&artifact_dir);
             std::fs::create_dir_all(&artifact_dir).map_err(|e| e.to_string())?;
-            copy_tree_excluding(dir, &artifact_dir.join("dist"), &(skip_sensitive_artifact_entry as fn(&str) -> bool))?;
+            copy_tree_excluding(
+                dir,
+                &artifact_dir.join("dist"),
+                &(skip_sensitive_artifact_entry as fn(&str) -> bool),
+            )?;
             frontend_artifacts.push((service.name.clone(), artifact_dir));
             print_step(&format!("Built {} static artifact -> ship", service.name));
             continue;
@@ -3517,8 +4774,14 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // --rebuild-frontends / --force-frontend: ignore the hash-skip and
         // force a fresh build (and clear any stale hash markers so the next
         // deploy isn't confused by them).
-        let force_rebuild = options.get("rebuild-frontends").map(|v| v == "true").unwrap_or(false)
-            || options.get("force-frontend").map(|v| v == "true").unwrap_or(false);
+        let force_rebuild = options
+            .get("rebuild-frontends")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+            || options
+                .get("force-frontend")
+                .map(|v| v == "true")
+                .unwrap_or(false);
         let force_prefix = if force_rebuild {
             format!("echo \"forcing frontend rebuild (--rebuild-frontends)\"; rm -f .eco-frontend-hash .eco-frontend-envhash; {env_wipe}\n")
         } else {
@@ -3536,7 +4799,11 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             )
         };
         builder_exec_ok(&script)?;
-        let artifact_dir = std::env::temp_dir().join(format!("eco-frontend-artifact-{}-{}", service.name, std::process::id()));
+        let artifact_dir = std::env::temp_dir().join(format!(
+            "eco-frontend-artifact-{}-{}",
+            service.name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&artifact_dir);
         copy_frontend_artifact_from_builder(&build_dir, &artifact_dir, &service.name)?;
         frontend_artifacts.push((service.name.clone(), artifact_dir));
@@ -3546,7 +4813,8 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
     // Build the deploy payload: ecompose.yml + artifacts + hashes. Executable-only:
     // the server never sees source code. The manifest travels so configure.sh
     // can derive service topology without scanning a source tree.
-    let payload_dir = std::env::temp_dir().join(format!("eco-remote-payload-{}", std::process::id()));
+    let payload_dir =
+        std::env::temp_dir().join(format!("eco-remote-payload-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&payload_dir);
     std::fs::create_dir_all(&payload_dir).map_err(|e| e.to_string())?;
     let result = (|| -> Result<(), String> {
@@ -3558,7 +4826,8 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             // flat binary file when service name == package name.
             let service_bin_dir = artifacts_dir.join(service_name).join("bin");
             std::fs::create_dir_all(&service_bin_dir).map_err(|e| e.to_string())?;
-            std::fs::copy(binary, service_bin_dir.join(package)).map_err(|e| format!("copy {}: {e}", binary.display()))?;
+            std::fs::copy(binary, service_bin_dir.join(package))
+                .map_err(|e| format!("copy {}: {e}", binary.display()))?;
         }
         for (service_name, artifact_dir) in &frontend_artifacts {
             let dest = artifacts_dir.join(service_name);
@@ -3584,7 +4853,11 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
             }
             let migrations = dir.join("migrations");
             if migrations.is_dir() {
-                copy_tree_excluding(&migrations, &service_artifact.join("migrations"), &(skip_none as fn(&str) -> bool))?;
+                copy_tree_excluding(
+                    &migrations,
+                    &service_artifact.join("migrations"),
+                    &(skip_none as fn(&str) -> bool),
+                )?;
             }
             // Ship static web assets (static/, images/, public/, downloads/) so
             // a source frontend binary that serves them (Leptos ServeDir,
@@ -3598,9 +4871,18 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
                 }
             }
         }
-        std::fs::write(payload_dir.join("rust-hashes"), format!("{}\n", hash_lines.join("\n"))).map_err(|e| e.to_string())?;
-        std::fs::write(payload_dir.join("frontend-hashes"), format!("{}\n", frontend_hash_lines.join("\n"))).map_err(|e| e.to_string())?;
-        std::fs::write(payload_dir.join("ecompose.yml"), &deployment.content).map_err(|e| e.to_string())?;
+        std::fs::write(
+            payload_dir.join("rust-hashes"),
+            format!("{}\n", hash_lines.join("\n")),
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::write(
+            payload_dir.join("frontend-hashes"),
+            format!("{}\n", frontend_hash_lines.join("\n")),
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::write(payload_dir.join("ecompose.yml"), &deployment.content)
+            .map_err(|e| e.to_string())?;
         write_payload_manifest(&payload_dir, &deployment.project)?;
         let tar_path = payload_dir.join("payload.tar.gz");
         run_command_env(
@@ -3623,7 +4905,8 @@ pub fn run_up_remote(args: &[String]) -> Result<(), String> {
         // Payload size cap — the pricing hook. The shipped payload is the
         // built artifacts + the manifest only (no source).
         const MAX_PAYLOAD_MB: u64 = 300;
-        let tar_meta = std::fs::metadata(&tar_path).map_err(|e| format!("read payload size: {e}"))?;
+        let tar_meta =
+            std::fs::metadata(&tar_path).map_err(|e| format!("read payload size: {e}"))?;
         let mb = tar_meta.len() / (1024 * 1024);
         if tar_meta.len() > MAX_PAYLOAD_MB * 1024 * 1024 {
             return Err(format!(
@@ -3644,8 +4927,18 @@ The shipped artifacts exceed the limit; reduce what is being built/shipped."
             ));
             let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
             let remote_path = format!("/tmp/eco-remote-{project_segment}.tar.gz");
-            run_command("scp", &["-o".to_string(), "StrictHostKeyChecking=no".to_string(), tar_path.display().to_string(), format!("{ssh}:{remote_path}")], &util::current_dir())?;
-            let deploy_file_url = format!("{base}/v1/estates/{project_segment}/deploy-file{deploy_query}");
+            run_command(
+                "scp",
+                &[
+                    "-o".to_string(),
+                    "StrictHostKeyChecking=no".to_string(),
+                    tar_path.display().to_string(),
+                    format!("{ssh}:{remote_path}"),
+                ],
+                &util::current_dir(),
+            )?;
+            let deploy_file_url =
+                format!("{base}/v1/estates/{project_segment}/deploy-file{deploy_query}");
             let summary = agent_client_post(&deploy_file_url, &api_key, b"")?;
             util::println_stdout(&summary);
         } else {
@@ -3687,10 +4980,13 @@ The shipped artifacts exceed the limit; reduce what is being built/shipped."
                 }
                 print_step("deploy started — waiting for completion…");
                 let id_query = match &deploy_id {
-                    Some(id) => format!("{}id={id}", if deploy_query.is_empty() { "?" } else { "&" }),
+                    Some(id) => {
+                        format!("{}id={id}", if deploy_query.is_empty() { "?" } else { "&" })
+                    }
                     None => deploy_query.to_string(),
                 };
-                let status_url = format!("{base}/v1/estates/{project_segment}/deploy-status{id_query}");
+                let status_url =
+                    format!("{base}/v1/estates/{project_segment}/deploy-status{id_query}");
                 let mut final_status = "pending".to_string();
                 for _ in 0..200 {
                     std::thread::sleep(std::time::Duration::from_secs(3));
@@ -3706,11 +5002,20 @@ The shipped artifacts exceed the limit; reduce what is being built/shipped."
                     }
                 }
                 if final_status == "success" {
-                    util::println_stdout(&format!("Remote deploy of {} completed on CT {}.", deployment.project, deployment.ctid));
+                    util::println_stdout(&format!(
+                        "Remote deploy of {} completed on CT {}.",
+                        deployment.project, deployment.ctid
+                    ));
                 } else if final_status == "failed" {
-                    return Err(format!("Remote deploy of {} failed on CT {}.", deployment.project, deployment.ctid));
+                    return Err(format!(
+                        "Remote deploy of {} failed on CT {}.",
+                        deployment.project, deployment.ctid
+                    ));
                 } else {
-                    return Err(format!("Timed out waiting for the deploy of {} to finish.", deployment.project));
+                    return Err(format!(
+                        "Timed out waiting for the deploy of {} to finish.",
+                        deployment.project
+                    ));
                 }
             } else {
                 let summary = agent_client_post(
@@ -3762,7 +5067,8 @@ fn print_lxs_update_notice(content: &str, project_dir: &Path, skip: bool) {
             "  {}  \x1b[1;33m{} -> {}\x1b[0m   run `eco lxs update {}`",
             service, pinned, latest, name
         ));
-        let note = crate::commands::lxs::changelog_note(&name, to_v, from_v, state_registry.as_deref());
+        let note =
+            crate::commands::lxs::changelog_note(&name, to_v, from_v, state_registry.as_deref());
         if !note.is_empty() {
             for line in note.lines() {
                 util::println_stdout(&format!("     {}", line));
@@ -3774,10 +5080,14 @@ fn print_lxs_update_notice(content: &str, project_dir: &Path, skip: bool) {
 
 /// Whether the caller asked to skip the LXS update check (`--no-lxs-check`).
 fn lxs_check_disabled(options: &HashMap<String, String>) -> bool {
-    options.get("no-lxs-check").map(|v| v == "true").unwrap_or(false)
+    options
+        .get("no-lxs-check")
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }
 
-pub fn run_up(args: &[String]) -> Result<(), String> {    if args.first().map(|s| s.as_str()) == Some("dev") {
+pub fn run_up(args: &[String]) -> Result<(), String> {
+    if args.first().map(|s| s.as_str()) == Some("dev") {
         return run_up_dev(&args[1..]);
     }
     if args.iter().any(|a| a == "--remote") {
@@ -3796,12 +5106,21 @@ pub fn run_up(args: &[String]) -> Result<(), String> {    if args.first().map(|s
 /// <project>/<service-name>/bin/<name> plus a start.sh + .env.example from the
 /// contract, so configure.sh's static-service discovery (start.sh) picks it up
 /// and PM2 runs it exactly like a source service.
-fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path) -> Result<Vec<String>, String> {
-    let lxs_services: Vec<&ecompose::Service> = deployment.services.iter().filter(|s| !s.lxs.is_empty()).collect();
+fn install_lxs_services_local(
+    deployment: &ProjectDeployment,
+    estate_root: &Path,
+) -> Result<Vec<String>, String> {
+    let lxs_services: Vec<&ecompose::Service> = deployment
+        .services
+        .iter()
+        .filter(|s| !s.lxs.is_empty())
+        .collect();
     if lxs_services.is_empty() {
         return Ok(Vec::new());
     }
-    let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir).map(|s| s.registry).filter(|r| !r.is_empty());
+    let state_registry = crate::commands::lxs::read_estate_state(&deployment.project_dir)
+        .map(|s| s.registry)
+        .filter(|r| !r.is_empty());
     // Native arch for the dev machine (darwin/arm64 on Apple Silicon,
     // linux/amd64 on x86_64 Linux, linux/arm64 on aarch64 Linux). The registry
     // canonical arch names are linux/amd64, linux/arm64, darwin/arm64,
@@ -3818,14 +5137,19 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
     };
     let mut installed = Vec::new();
     for service in lxs_services {
-        let (manifest, version, local_bin) = crate::commands::lxs::fetch_lxs_to_cache(&service.lxs, &local_arch, state_registry.as_deref())?;
+        let (manifest, version, local_bin) = crate::commands::lxs::fetch_lxs_to_cache(
+            &service.lxs,
+            &local_arch,
+            state_registry.as_deref(),
+        )?;
         let name = manifest.name.clone();
         if name.is_empty() {
             return Err(format!("LXS {} has no name in its manifest", service.lxs));
         }
         let service_dir = estate_root.join(&service.name);
         let bin_dir = service_dir.join("bin");
-        std::fs::create_dir_all(&bin_dir).map_err(|e| format!("create {}: {e}", bin_dir.display()))?;
+        std::fs::create_dir_all(&bin_dir)
+            .map_err(|e| format!("create {}: {e}", bin_dir.display()))?;
         // The manifest's artifact may carry the short name (e.g. `auth`); we
         // install it under the artifact name so configgen/configure resolve it.
         let installed_name = service
@@ -3835,7 +5159,13 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
             .map(|s| s.to_string())
             .unwrap_or_else(|| name.clone());
         let dest_bin = bin_dir.join(&installed_name);
-        std::fs::copy(&local_bin, &dest_bin).map_err(|e| format!("copy {} -> {}: {e}", local_bin.display(), dest_bin.display()))?;
+        std::fs::copy(&local_bin, &dest_bin).map_err(|e| {
+            format!(
+                "copy {} -> {}: {e}",
+                local_bin.display(),
+                dest_bin.display()
+            )
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3853,11 +5183,15 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
             project = deployment.project,
             installed_name = installed_name,
         );
-        std::fs::write(service_dir.join("start.sh"), start_sh).map_err(|e| format!("write start.sh: {e}"))?;
+        std::fs::write(service_dir.join("start.sh"), start_sh)
+            .map_err(|e| format!("write start.sh: {e}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&service_dir.join("start.sh"), std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::set_permissions(
+                &service_dir.join("start.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            );
         }
         // .env.example from the contract so configgen can fill secrets.
         // v2 contracts render from `fields` metadata + the estate's
@@ -3889,8 +5223,12 @@ fn install_lxs_services_local(deployment: &ProjectDeployment, estate_root: &Path
             }
             _ => {}
         }
-        std::fs::write(service_dir.join(".env.example"), env_example).map_err(|e| format!("write .env.example: {e}"))?;
-        print_step(&format!("Installed local LXS {}@{} as {}", name, version, service.name));
+        std::fs::write(service_dir.join(".env.example"), env_example)
+            .map_err(|e| format!("write .env.example: {e}"))?;
+        print_step(&format!(
+            "Installed local LXS {}@{} as {}",
+            name, version, service.name
+        ));
         installed.push(service.name.clone());
     }
     Ok(installed)
@@ -3902,17 +5240,32 @@ mod tests {
 
     #[test]
     fn sensitive_artifact_filter_blocks_secrets_and_workspace_state() {
-        for name in [".env", ".env.production", ".git", ".eco", ".ssh", "debug.log", "node_modules"] {
-            assert!(skip_sensitive_artifact_entry(name), "expected {name} to be excluded");
+        for name in [
+            ".env",
+            ".env.production",
+            ".git",
+            ".eco",
+            ".ssh",
+            "debug.log",
+            "node_modules",
+        ] {
+            assert!(
+                skip_sensitive_artifact_entry(name),
+                "expected {name} to be excluded"
+            );
         }
         for name in ["index.html", "app.py", "requirements.txt", "public"] {
-            assert!(!skip_sensitive_artifact_entry(name), "expected {name} to be shippable");
+            assert!(
+                !skip_sensitive_artifact_entry(name),
+                "expected {name} to be shippable"
+            );
         }
     }
 
     #[test]
     fn payload_manifest_records_sha256_and_size() {
-        let root = std::env::temp_dir().join(format!("eco-payload-manifest-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("eco-payload-manifest-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("artifacts/web")).unwrap();
         std::fs::write(root.join("artifacts/web/index.html"), b"hello").unwrap();
@@ -3921,7 +5274,9 @@ mod tests {
         std::fs::write(root.join("frontend-hashes"), b"\n").unwrap();
 
         write_payload_manifest(&root, "sample").unwrap();
-        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("artifact-manifest.json")).unwrap()).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("artifact-manifest.json")).unwrap())
+                .unwrap();
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["project"], "sample");
         let entry = manifest["files"]
