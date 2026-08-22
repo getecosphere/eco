@@ -942,7 +942,10 @@ fn write_local_gateway_config(
                 .strip_prefix(&format!("{}-", deployment.project))
                 .map(str::to_string);
         }
-        if let Some(rest) = trimmed.strip_prefix("env: { SERVER_PORT: ") {
+        let port_value = trimmed
+            .strip_prefix("env: { SERVER_PORT: ")
+            .or_else(|| trimmed.strip_prefix("env: { PORT: "));
+        if let Some(rest) = port_value {
             if let (Some(name), Some(value)) = (current.as_ref(), rest.split('}').next()) {
                 if let Ok(port) = value.trim().trim_end_matches(',').parse::<u32>() {
                     ports.insert(name.clone(), port);
@@ -1341,6 +1344,11 @@ fn resolve_local_service_dir(
     estate_root: &Path,
     project_dir: &Path,
 ) -> PathBuf {
+    // Registry LXS do not have a source `path:`; local installation always
+    // materializes them in `<estate-root>/<service-name>`.
+    if !service.lxs.is_empty() {
+        return estate_root.join(&service.name);
+    }
     let p = project_dir.join(&service.path);
     if p.is_dir() {
         return p;
