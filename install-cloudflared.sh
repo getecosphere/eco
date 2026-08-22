@@ -48,12 +48,18 @@ install_cloudflared_binary() {
     fi
   fi
   chmod +x "$tmpfile"
-  if install -m 0755 "$tmpfile" /usr/local/bin/cloudflared 2>/dev/null; then :; else
-    $SUDO install -m 0755 "$tmpfile" /usr/local/bin/cloudflared
+  # Prefer /usr/local/bin, but fall back to ~/.local/bin (on PATH) so a
+  # non-root / detached (no terminal for sudo) install still works — the
+  # `eco serve` tunnel needs cloudflared without prompting for a password.
+  local bin_dir="/usr/local/bin"
+  if [[ ! -w "$bin_dir" ]]; then
+    bin_dir="$HOME/.local/bin"
   fi
+  mkdir -p "$bin_dir"
+  install -m 0755 "$tmpfile" "$bin_dir/cloudflared"
   rm -rf /tmp/cloudflared-install
   rm -f "$tmpfile"
-  ok "cloudflared installed."
+  ok "cloudflared installed to $bin_dir."
 }
 
 install_cloudflared_binary
