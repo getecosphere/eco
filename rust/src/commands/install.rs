@@ -16,9 +16,10 @@ ecompose.yml -- run once per machine/CT, shared by every estate on it.
 Usage:
   eco install minio
 
-  minio         Installs MinIO (prebuilt binary) and starts it running locally.
-                Prints the endpoint/credentials to paste directly into an
-                existing ecompose.yml's storage.minio block.
+  minio         Installs MinIO (prebuilt binary) and starts it locally.
+                Credentials are written to Eco's private client config and
+                injected from a storage.minio declaration; they are never
+                printed or pasted into ecompose.yml.
   onnxruntime   Installs the onnxruntime shared library used by RAG/embedding
                 services (rag domain). On Linux/CTs it is placed at
                 /opt/eco-tools/libonnxruntime.so; on macOS via Homebrew.
@@ -46,12 +47,20 @@ pub fn run_install(args: &[String]) -> Result<(), String> {
                 })?;
             let script_path = embedded::bundled_script_path(script_name)?;
             let cwd = util::current_dir();
-            let status = std::process::Command::new("bash")
+            let mut command = std::process::Command::new("bash");
+            command
                 .arg(&script_path)
                 .stdin(std::process::Stdio::inherit())
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
-                .current_dir(&cwd)
+                .current_dir(&cwd);
+            // `storage.minio` is an Eco-managed capability: the caller never
+            // needs to handle its credential values. Keep setup idempotent and
+            // non-printing even when invoked manually from the CLI.
+            if tool == "minio" {
+                command.arg("--ensure");
+            }
+            let status = command
                 .status()
                 .map_err(|e| format!("Cannot run {script_name}: {e}"))?;
             if status.success() {
