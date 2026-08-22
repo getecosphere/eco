@@ -30,8 +30,11 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 # ── System packages ────────────────────────────────────────────────────────
-$SUDO apt-get update -y
-$SUDO apt-get install -y build-essential pkg-config curl ca-certificates \
+# DEBIAN_FRONTEND is exported here, but sudo's env_reset strips it — pass it
+# explicitly through `sudo env ...` so the debconf "package configuration"
+# dialog never appears during provisioning.
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -y
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential pkg-config curl ca-certificates \
   git xz-utils unzip python3 python3-venv make libssl-dev sqlite3
 
 # ── Rust (stable + x86_64 musl cross target) — only when rust is needed ────
@@ -75,8 +78,8 @@ fi
 if need node; then
   if ! command -v node >/dev/null 2>&1; then
     log "Installing Node $NODE_MAJOR LTS"
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | $SUDO bash -
-    $SUDO apt-get install -y nodejs
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | $SUDO env DEBIAN_FRONTEND=noninteractive bash -
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
   fi
   log "node: $(node -v), npm: $(npm -v)"
 
