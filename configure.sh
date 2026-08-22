@@ -3238,6 +3238,17 @@ configure_envs() {
           # Only written when the host actually exports the variable -- avoids
           # blanking a value already set in the .env by a previous run.
           inherit_mail_credentials "$env_file"
+          # `eco serve` supplies a short-lived, hostname-scoped relay
+          # capability after reserving the public URL. It lets Auth deliver a
+          # recovery email without placing either the agent API key or Brevo
+          # credentials in the local estate.
+          if [[ -n "${ECO_AUTH_EMAIL_RELAY_URL:-}" && -n "${ECO_AUTH_EMAIL_RELAY_TOKEN:-}" ]]; then
+            set_env "$env_file" "EMAIL_RELAY_URL" "$ECO_AUTH_EMAIL_RELAY_URL"
+            set_env "$env_file" "EMAIL_RELAY_TOKEN" "$ECO_AUTH_EMAIL_RELAY_TOKEN"
+          fi
+          if [[ -n "${ECO_AUTH_EMAIL_PUBLIC_URL:-}" ]]; then
+            set_env "$env_file" "EMAIL_VERIFICATION_PUBLIC_URL" "$ECO_AUTH_EMAIL_PUBLIC_URL"
+          fi
           if [[ "$(get_env "$env_file" "EMAIL_VERIFICATION_REQUIRED")" =~ ^(1|true|yes|on)$ ]] && [[ -z "$(get_env "$env_file" "BREVO_API_KEY")" ]]; then
             echo -e "  ${YELLOW}⚠${RESET} $name — email verification is enabled; set BREVO_API_KEY and MAIL_FROM_EMAIL in its Eco-managed .env"
           fi

@@ -55,7 +55,8 @@ this build is client-only and talks to it over HTTP.
 }
 
 fn find_ecompose(start_dir: &PathBuf) -> Result<(PathBuf, String), String> {
-    let file = ecompose::resolve_ecompose_file("", start_dir).or_else(|_| ecompose::resolve_ecompose_file(".", start_dir))?;
+    let file = ecompose::resolve_ecompose_file("", start_dir)
+        .or_else(|_| ecompose::resolve_ecompose_file(".", start_dir))?;
     let content = ecompose::read_text_file(&file).unwrap_or_default();
     let project = ecompose::parse_project_name(&content);
     Ok((file, project))
@@ -64,7 +65,11 @@ fn find_ecompose(start_dir: &PathBuf) -> Result<(PathBuf, String), String> {
 fn default_port_from_expose(content: &str) -> Option<String> {
     let expose = ecompose::parse_expose(content);
     let port = expose.target_port();
-    if !port.is_empty() { Some(port) } else { None }
+    if !port.is_empty() {
+        Some(port)
+    } else {
+        None
+    }
 }
 
 fn api_post_json(
@@ -81,19 +86,29 @@ fn api_post_json(
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
             let text = r.into_string().unwrap_or_default();
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
-            let msg = parsed.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+            let msg = parsed
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or(&text)
+                .to_string();
             return Err(format!("HTTP {code}: {msg}"));
         }
         Err(ureq::Error::Transport(t)) => return Err(format!("network error: {t}")),
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
     if (200..300).contains(&status) {
         Ok(value)
     } else {
-        let msg = value.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+        let msg = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or(&text)
+            .to_string();
         Err(format!("HTTP {status}: {msg}"))
     }
 }
@@ -107,15 +122,21 @@ fn api_delete_json(url: &str, api_key: &str) -> Result<serde_json::Value, String
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
             let text = r.into_string().unwrap_or_default();
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
-            let msg = parsed.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+            let msg = parsed
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or(&text)
+                .to_string();
             return Err(format!("HTTP {code}: {msg}"));
         }
         Err(ureq::Error::Transport(t)) => return Err(format!("network error: {t}")),
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
     if (200..300).contains(&status) {
         Ok(value)
     } else {
@@ -132,15 +153,21 @@ fn api_get_json(url: &str, api_key: &str) -> Result<serde_json::Value, String> {
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
             let text = r.into_string().unwrap_or_default();
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
-            let msg = parsed.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+            let msg = parsed
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or(&text)
+                .to_string();
             return Err(format!("HTTP {code}: {msg}"));
         }
         Err(ureq::Error::Transport(t)) => return Err(format!("network error: {t}")),
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
     if (200..300).contains(&status) {
         Ok(value)
     } else {
@@ -151,7 +178,11 @@ fn api_get_json(url: &str, api_key: &str) -> Result<serde_json::Value, String> {
 fn run_list(api_url: &str, api_key: &str) -> Result<(), String> {
     let url = format!("{}/v1/serve", api_url.trim_end_matches('/'));
     let result = api_get_json(&url, api_key)?;
-    let serves = result.get("serves").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    let serves = result
+        .get("serves")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
     if serves.is_empty() {
         util::println_stdout("No active serve assignments.");
         return Ok(());
@@ -162,15 +193,21 @@ fn run_list(api_url: &str, api_key: &str) -> Result<(), String> {
         let hostname = s.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
         let owner = s.get("owner_email").and_then(|v| v.as_str()).unwrap_or("");
         let port = s.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-        util::println_stdout(&format!("  {sub:16} https://{hostname:<32} port={port:<6} owner={owner}"));
+        util::println_stdout(&format!(
+            "  {sub:16} https://{hostname:<32} port={port:<6} owner={owner}"
+        ));
     }
     Ok(())
 }
 
 fn ensure_cloudflared() -> Result<(), String> {
-    if util::run_capture("cloudflared", &["--version".to_string()], &util::current_dir())
-        .map(|c| c.code == 0)
-        .unwrap_or(false)
+    if util::run_capture(
+        "cloudflared",
+        &["--version".to_string()],
+        &util::current_dir(),
+    )
+    .map(|c| c.code == 0)
+    .unwrap_or(false)
     {
         return Ok(());
     }
@@ -179,7 +216,8 @@ fn ensure_cloudflared() -> Result<(), String> {
 }
 
 fn write_serve_block(ecompose_path: &PathBuf, subdomain: &str) -> Result<(), String> {
-    let content = std::fs::read_to_string(ecompose_path).map_err(|e| format!("read {}: {e}", ecompose_path.display()))?;
+    let content = std::fs::read_to_string(ecompose_path)
+        .map_err(|e| format!("read {}: {e}", ecompose_path.display()))?;
     let lines: Vec<&str> = content.lines().collect();
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
@@ -210,8 +248,12 @@ fn write_serve_block(ecompose_path: &PathBuf, subdomain: &str) -> Result<(), Str
         out.push(format!("  enabled: true"));
     }
     let written = format!("{}\n", out.join("\n"));
-    std::fs::write(ecompose_path, written).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
-    util::println_stdout(&format!("Recorded serve.subdomain={subdomain} in {}", ecompose_path.display()));
+    std::fs::write(ecompose_path, written)
+        .map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+    util::println_stdout(&format!(
+        "Recorded serve.subdomain={subdomain} in {}",
+        ecompose_path.display()
+    ));
     Ok(())
 }
 
@@ -278,19 +320,29 @@ pub fn run_serve(args: &[String]) -> Result<(), String> {
             }
             subdomain = sub;
         } else {
-            return Err("usage: eco serve <subdomain> [--port <port>]\nRun \"eco serve help\" for details.".to_string());
+            return Err(
+                "usage: eco serve <subdomain> [--port <port>]\nRun \"eco serve help\" for details."
+                    .to_string(),
+            );
         }
     }
 
     let (api_url, api_key) = resolve_api_credentials()?;
-    let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+    let api_url = if api_url.is_empty() {
+        "https://api.getecosphere.com".to_string()
+    } else {
+        api_url
+    };
     let base = api_url.trim_end_matches('/').to_string();
 
     if release_only {
         let url = format!("{base}/v1/serve/{subdomain}");
         match api_delete_json(&url, &api_key) {
             Ok(v) => {
-                let hostname = v.get("released").and_then(|r| r.as_str()).unwrap_or(&subdomain);
+                let hostname = v
+                    .get("released")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or(&subdomain);
                 util::println_stdout(&format!("Released https://{hostname}"));
                 Ok(())
             }
@@ -317,9 +369,16 @@ fn run_tunnel(
         String::new()
     };
     let explicit_port = if !port_flag.is_empty() {
-        Some(port_flag.parse::<u16>().map_err(|_| format!("invalid --port: {port_flag}"))?)
+        Some(
+            port_flag
+                .parse::<u16>()
+                .map_err(|_| format!("invalid --port: {port_flag}"))?,
+        )
     } else if let Some(p) = default_port_from_expose(&content) {
-        Some(p.parse::<u16>().map_err(|_| format!("invalid expose.target_port: {p}"))?)
+        Some(
+            p.parse::<u16>()
+                .map_err(|_| format!("invalid expose.target_port: {p}"))?,
+        )
     } else {
         None
     };
@@ -346,17 +405,32 @@ fn run_tunnel(
             ));
         }
         util::println_stdout(&format!("App is up on http://localhost:{port_num}"));
-        return run_tunnel_after_app(api_url, api_key, ecompose_path, project, subdomain, port_num);
+        return run_tunnel_after_app(
+            api_url,
+            api_key,
+            ecompose_path,
+            project,
+            subdomain,
+            port_num,
+        );
     }
 
     let port_num = explicit_port.unwrap_or(3000);
     util::println_stdout("Preparing your app for the world…");
-    run_tunnel_after_app(api_url, api_key, ecompose_path, project, subdomain, port_num)
+    run_tunnel_after_app(
+        api_url,
+        api_key,
+        ecompose_path,
+        project,
+        subdomain,
+        port_num,
+    )
 }
 
 // Read the actual dev port eco allocated for a project's app from PM2.
 fn discover_app_port(project: &str) -> Option<u16> {
-    let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir()) else {
+    let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir())
+    else {
         return None;
     };
     let Ok(list) = serde_json::from_str::<serde_json::Value>(&captured.stdout) else {
@@ -373,7 +447,11 @@ fn discover_app_port(project: &str) -> Option<u16> {
                     {
                         return Some(port);
                     }
-                    if let Some(port) = app.pointer("/pm2_env/env/PORT").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok()) {
+                    if let Some(port) = app
+                        .pointer("/pm2_env/env/PORT")
+                        .and_then(|p| p.as_u64())
+                        .and_then(|p| u16::try_from(p).ok())
+                    {
                         return Some(port);
                     }
                 }
@@ -408,7 +486,9 @@ fn run_tunnel_after_app(
     // Reserve through the host agent (conflict check + DNS + tunnel token +
     // metered daily quota).
     let origin = format!("http://localhost:{port_num}");
-    util::println_stdout(&format!("Reserving {subdomain}.getecosphere.app -> {origin}..."));
+    util::println_stdout(&format!(
+        "Reserving {subdomain}.getecosphere.app -> {origin}..."
+    ));
     let body = serde_json::json!({
         "subdomain": subdomain,
         "origin": origin,
@@ -428,21 +508,61 @@ fn run_tunnel_after_app(
                 .unwrap_or_default()
                 .into_iter()
                 .find(|l| l.get("subdomain").and_then(|s| s.as_str()) == Some(subdomain))
-                .ok_or_else(|| format!("subdomain \"{subdomain}\" is reserved by someone else; pick another name"))?;
+                .ok_or_else(|| {
+                    format!(
+                        "subdomain \"{subdomain}\" is reserved by someone else; pick another name"
+                    )
+                })?;
             existing
         }
         Err(e) => return Err(e),
     };
-    let hostname = reserved.get("hostname").and_then(|h| h.as_str()).unwrap_or("").to_string();
-    let tunnel_token = reserved.get("tunnel_token").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let hostname = reserved
+        .get("hostname")
+        .and_then(|h| h.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tunnel_token = reserved
+        .get("tunnel_token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let email_relay_token = reserved
+        .get("email_relay_token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
     if hostname.is_empty() || tunnel_token.is_empty() {
         return Err("agent did not return a hostname/tunnel token".to_string());
     }
-    let quota_mb = reserved.get("quota_mb").and_then(|q| q.as_u64()).unwrap_or(0);
-    let used_mb = reserved.get("used_mb").and_then(|q| q.as_u64()).unwrap_or(0);
+    let quota_mb = reserved
+        .get("quota_mb")
+        .and_then(|q| q.as_u64())
+        .unwrap_or(0);
+    let used_mb = reserved
+        .get("used_mb")
+        .and_then(|q| q.as_u64())
+        .unwrap_or(0);
 
     if !ecompose_path.as_os_str().is_empty() && !project.is_empty() {
         let _ = write_serve_block(ecompose_path, subdomain);
+    }
+
+    // The first `eco up dev` discovers the allocated port. Once the agent has
+    // reserved the public hostname it can mint a mail capability scoped to
+    // that hostname. Restart the local estate with that capability so Auth can
+    // send recovery mail without receiving an agent API key or Brevo secret.
+    if !project.is_empty() && !email_relay_token.is_empty() {
+        let public_url = format!("https://{hostname}");
+        restart_dev_app_with_email_relay(
+            project,
+            &format!("{api_url}/v1/auth-email"),
+            &email_relay_token,
+            &public_url,
+        );
+        if !wait_for_port(port_num, 180) {
+            return Err(format!("Your app did not restart on http://localhost:{port_num} with its email relay capability."));
+        }
     }
 
     ensure_cloudflared()?;
@@ -488,7 +608,11 @@ fn run_tunnel_after_app(
             if done.load(Ordering::Relaxed) {
                 break;
             }
-            let _ = api_post_json(&format!("{api_url}/v1/serve/{sub}/heartbeat"), &api_key, &serde_json::json!({}));
+            let _ = api_post_json(
+                &format!("{api_url}/v1/serve/{sub}/heartbeat"),
+                &api_key,
+                &serde_json::json!({}),
+            );
         });
     }
 
@@ -501,9 +625,18 @@ fn run_tunnel_after_app(
         .open(&log_path)
         .map_err(|e| format!("open serve log {}: {e}", log_path.display()))?;
     let status = Command::new("cloudflared")
-        .args(["tunnel", "run", "--token", &tunnel_token, "--url", &format!("http://127.0.0.1:{proxy_port}")])
+        .args([
+            "tunnel",
+            "run",
+            "--token",
+            &tunnel_token,
+            "--url",
+            &format!("http://127.0.0.1:{proxy_port}"),
+        ])
         .stdin(Stdio::inherit())
-        .stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?))
+        .stdout(Stdio::from(
+            log_file.try_clone().map_err(|e| e.to_string())?,
+        ))
         .stderr(Stdio::from(log_file))
         .status()
         .map_err(|e| format!("cloudflared failed to start: {e} (is it installed?)"))?;
@@ -544,14 +677,17 @@ fn prompt_line(prompt: &str) -> Result<String, String> {
     print!("{prompt}");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| format!("read input: {e}"))?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("read input: {e}"))?;
     Ok(line.trim().to_string())
 }
 
 // Stop every PM2 dev app for this project (named `<project>-<service>`), so a
 // re-run of `eco serve` starts a clean instance.
 fn stop_dev_apps(project: &str) {
-    let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir()) else {
+    let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir())
+    else {
         return;
     };
     let Ok(list) = serde_json::from_str::<serde_json::Value>(&captured.stdout) else {
@@ -561,7 +697,11 @@ fn stop_dev_apps(project: &str) {
         for app in apps {
             if let Some(name) = app.get("name").and_then(|n| n.as_str()) {
                 if name.starts_with(&format!("{project}-")) {
-                    let _ = util::run_capture("pm2", &["delete".to_string(), name.to_string()], &util::current_dir());
+                    let _ = util::run_capture(
+                        "pm2",
+                        &["delete".to_string(), name.to_string()],
+                        &util::current_dir(),
+                    );
                 }
             }
         }
@@ -573,6 +713,22 @@ fn stop_dev_apps(project: &str) {
 fn start_dev_app() {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("eco"));
     let _ = Command::new(exe).args(["up", "dev"]).spawn();
+}
+
+fn restart_dev_app_with_email_relay(
+    project: &str,
+    relay_url: &str,
+    relay_token: &str,
+    public_url: &str,
+) {
+    stop_dev_apps(project);
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("eco"));
+    let _ = Command::new(exe)
+        .args(["up", "dev"])
+        .env("ECO_AUTH_EMAIL_RELAY_URL", relay_url)
+        .env("ECO_AUTH_EMAIL_RELAY_TOKEN", relay_token)
+        .env("ECO_AUTH_EMAIL_PUBLIC_URL", public_url)
+        .spawn();
 }
 
 // Poll until the app's port accepts TCP connections (or the timeout passes).
@@ -619,7 +775,8 @@ fn minutes_until_utc_midnight() -> (u64, u64) {
 // the app, and every byte is counted in its direction. Ingress = bytes coming
 // in from visitors (cloudflared → app), Egress = bytes the app sends back.
 fn start_counting_proxy(app_port: u16) -> Result<(u16, TunnelMeter), String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind counting proxy: {e}"))?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind counting proxy: {e}"))?;
     let proxy_port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let ingress = Arc::new(AtomicU64::new(0));
     let egress = Arc::new(AtomicU64::new(0));
@@ -631,15 +788,25 @@ fn start_counting_proxy(app_port: u16) -> Result<(u16, TunnelMeter), String> {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(visitor) = stream else { break };
-            let Ok(upstream) = TcpStream::connect(("127.0.0.1", app_port)) else { continue };
+            let Ok(upstream) = TcpStream::connect(("127.0.0.1", app_port)) else {
+                continue;
+            };
             let _ = visitor.set_nodelay(true);
             let _ = upstream.set_nodelay(true);
-            let Ok(visitor_w) = visitor.try_clone() else { continue };
-            let Ok(upstream_w) = upstream.try_clone() else { continue };
+            let Ok(visitor_w) = visitor.try_clone() else {
+                continue;
+            };
+            let Ok(upstream_w) = upstream.try_clone() else {
+                continue;
+            };
             let ingress = ingress.clone();
             let egress = egress.clone();
-            std::thread::spawn(move || { let _ = pipe(visitor, upstream_w, &ingress); });
-            std::thread::spawn(move || { let _ = pipe(upstream, visitor_w, &egress); });
+            std::thread::spawn(move || {
+                let _ = pipe(visitor, upstream_w, &ingress);
+            });
+            std::thread::spawn(move || {
+                let _ = pipe(upstream, visitor_w, &egress);
+            });
         }
     });
     Ok((proxy_port, meter))
