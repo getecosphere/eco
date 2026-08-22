@@ -74,6 +74,71 @@ pub struct LxsField {
     pub example: String,
 }
 
+/// Declarative installation recipe for an LXS.  A contract describes the
+/// process; this describes the *composition* it needs in an estate.  Keeping
+/// this next to the binary contract means `eco lxs add` can wire the same
+/// grants, gateway routes and safe defaults every time instead of asking an
+/// agent or developer to retype them from a README.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsCompose {
+    #[serde(default)]
+    pub service: LxsComposeService,
+    #[serde(default)]
+    pub auth: LxsComposeAuth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsComposeService {
+    /// Empty uses Eco's conventional `<name>-backend` / `<name>-ui` name.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub port: u32,
+    #[serde(default)]
+    pub grants: LxsComposeGrants,
+    #[serde(default)]
+    pub config: HashMap<String, String>,
+    #[serde(default)]
+    pub access: LxsComposeAccess,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsComposeGrants {
+    #[serde(default)]
+    pub secrets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsComposeAccess {
+    #[serde(default)]
+    pub routes: Vec<LxsComposeRoute>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsComposeRoute {
+    pub path: String,
+    pub level: String,
+    #[serde(default)]
+    pub strip: String,
+    #[serde(default)]
+    pub rewrite: String,
+    #[serde(default)]
+    pub cookie: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsComposeAuth {
+    #[serde(default)]
+    pub email_verification: LxsComposeEmailVerification,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LxsComposeEmailVerification {
+    /// None means this LXS has no opinion about the estate's identity policy.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 /// Publish-time lint for the contract v2 env schema. Runs only when `fields`
 /// is present (v2 contracts). See eco-server/docs/lxs-config-schema-v2.md.
 pub fn validate_env_fields(env: &LxsEnv) -> Result<(), String> {
@@ -272,6 +337,8 @@ pub struct LxsManifest {
     pub release: Vec<String>,
     #[serde(default)]
     pub docs: Vec<String>,
+    #[serde(default)]
+    pub compose: LxsCompose,
 }
 
 pub(crate) fn registry_root() -> Result<PathBuf, String> {
@@ -2572,21 +2639,249 @@ fn upsert_service_ref(
     Ok(true)
 }
 
-fn add_lxs_service_to_ecompose(service: &str, lxs_ref: &str) -> Result<(), String> {
+fn yaml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn conventional_service_name(name: &str) -> String {
+    if name.ends_with("-ui") || name.ends_with("-frontend") {
+        name.to_string()
+    } else {
+        format!("{name}-backend")
+    }
+}
+
+fn compose_service_name(manifest: &LxsManifest) -> String {
+    let configured = manifest.compose.service.name.trim();
+    if configured.is_empty() {
+        conventional_service_name(&manifest.name)
+    } else {
+        configured.to_string()
+    }
+}
+
+fn compose_service_block(service: &str, lxs_ref: &str, recipe: &LxsComposeService) -> String {
+    let mut block = format!("\n  {service}:\n    lxs: {lxs_ref}\n");
+    if recipe.port > 0 {
+        block.push_str(&format!("    port: {}\n", recipe.port));
+    }
+    if !recipe.grants.secrets.is_empty() {
+        block.push_str(&format!(
+            "    grants: {{ secrets: [{}] }}\n",
+            recipe.grants.secrets.join(", ")
+        ));
+    }
+    if !recipe.config.is_empty() {
+        block.push_str("    config:\n");
+        let mut entries: Vec<_> = recipe.config.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, value) in entries {
+            block.push_str(&format!("      {key}: {}\n", yaml_quote(value)));
+        }
+    }
+    if !recipe.access.routes.is_empty() {
+        block.push_str("    access:\n      routes:\n");
+        for route in &recipe.access.routes {
+            block.push_str(&format!(
+                "        - path: {}\n          level: {}\n",
+                route.path, route.level
+            ));
+            if !route.strip.is_empty() {
+                block.push_str(&format!("          strip: {}\n", route.strip));
+            }
+            if !route.rewrite.is_empty() {
+                block.push_str(&format!("          rewrite: {}\n", route.rewrite));
+            }
+            if !route.cookie.is_empty() {
+                block.push_str(&format!("          cookie: {}\n", route.cookie));
+            }
+        }
+    }
+    block
+}
+
+fn main_estate_name(content: &str) -> String {
+    let main = crate::ecompose::parse_main(content);
+    if !main.is_empty() {
+        return main;
+    }
+    crate::ecompose::parse_estates(content)
+        .into_iter()
+        .next()
+        .map(|estate| estate.name)
+        .unwrap_or_default()
+}
+
+/// A service that is not selected by the main estate never starts.  `lxs add`
+/// therefore composes both the service definition and its membership, keeping
+/// a freshly added binary immediately usable in local and remote mode.
+fn add_service_to_main_estate(manifest_path: &Path, service: &str) -> Result<(), String> {
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let main = main_estate_name(&content);
+    if main.is_empty()
+        || crate::ecompose::parse_estates(&content)
+            .iter()
+            .all(|e| e.name != main)
+    {
+        return Ok(());
+    }
+    let lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let estate_header = format!("  {main}:");
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.trim_end() == estate_header)
+    else {
+        return Ok(());
+    };
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(idx, line)| {
+            let trimmed = line.trim_end();
+            (trimmed.len() >= 2
+                && trimmed.starts_with("  ")
+                && !trimmed.starts_with("    ")
+                && trimmed.ends_with(':'))
+            .then_some(idx)
+        })
+        .unwrap_or(lines.len());
+    let services_idx = (start + 1..end).find(|idx| lines[*idx].trim_end() == "    services:");
+    let Some(services_idx) = services_idx else {
+        return Ok(());
+    };
+    let list_end = (services_idx + 1..end)
+        .find(|idx| {
+            let line = lines[*idx].as_str();
+            !line.trim().is_empty()
+                && line.starts_with("    ")
+                && !line.starts_with("      ")
+                && line.trim_end().ends_with(':')
+        })
+        .unwrap_or(end);
+    let already_present = lines[services_idx + 1..list_end]
+        .iter()
+        .any(|line| line.trim() == format!("- {service}"));
+    if already_present {
+        return Ok(());
+    }
+    let mut out = lines;
+    out.insert(list_end, format!("      - {service}"));
+    std::fs::write(manifest_path, format!("{}\n", out.join("\n")))
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))
+}
+
+/// Write the identity policy only when the estate has not stated one itself.
+/// `--force` is used for an intentional security migration, never by the
+/// ordinary `lxs add` path.
+fn apply_auth_email_verification_default(
+    manifest_path: &Path,
+    enabled: Option<bool>,
+    force: bool,
+) -> Result<(), String> {
+    let Some(enabled) = enabled else {
+        return Ok(());
+    };
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let auth_start = lines.iter().position(|line| line.trim_end() == "auth:");
+    let value = if enabled { "true" } else { "false" };
+    match auth_start {
+        None => {
+            let insert_at = lines
+                .iter()
+                .position(|line| line.trim_end() == "estates:")
+                .unwrap_or(lines.len());
+            lines.splice(
+                insert_at..insert_at,
+                [
+                    "auth:".to_string(),
+                    "  email_verification:".to_string(),
+                    format!("    enabled: {value}"),
+                    "".to_string(),
+                ],
+            );
+        }
+        Some(start) => {
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(start + 1)
+                .find_map(|(idx, line)| {
+                    (!line.trim().is_empty() && !line.starts_with(' ') && !line.starts_with('\t'))
+                        .then_some(idx)
+                })
+                .unwrap_or(lines.len());
+            let verification_start =
+                (start + 1..end).find(|idx| lines[*idx].trim_end() == "  email_verification:");
+            match verification_start {
+                Some(vstart) => {
+                    let vend = (vstart + 1..end)
+                        .find(|idx| {
+                            let line = lines[*idx].as_str();
+                            !line.trim().is_empty()
+                                && line.starts_with("  ")
+                                && !line.starts_with("    ")
+                                && line.trim_end().ends_with(':')
+                        })
+                        .unwrap_or(end);
+                    let enabled_line = (vstart + 1..vend)
+                        .find(|idx| lines[*idx].trim_start().starts_with("enabled:"));
+                    match enabled_line {
+                        Some(index) if force => lines[index] = format!("    enabled: {value}"),
+                        Some(_) => {}
+                        None => lines.insert(vstart + 1, format!("    enabled: {value}")),
+                    }
+                }
+                None => lines.insert(
+                    start + 1,
+                    format!("  email_verification:\n    enabled: {value}"),
+                ),
+            }
+        }
+    }
+    std::fs::write(manifest_path, format!("{}\n", lines.join("\n")))
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))
+}
+
+fn materialize_lxs_compose(
+    manifest_path: &Path,
+    manifest: &LxsManifest,
+    lxs_ref: &str,
+    force_identity_defaults: bool,
+) -> Result<(), String> {
+    let service = compose_service_name(manifest);
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let exists = content
+        .lines()
+        .any(|line| line.trim_end() == format!("  {service}:"));
+    if exists {
+        upsert_service_ref(manifest_path, &service, "lxs", lxs_ref)?;
+    } else {
+        let block = compose_service_block(&service, lxs_ref, &manifest.compose.service);
+        insert_service_into_ecompose(manifest_path, &block)?;
+    }
+    add_service_to_main_estate(manifest_path, &service)?;
+    apply_auth_email_verification_default(
+        manifest_path,
+        manifest.compose.auth.email_verification.enabled,
+        force_identity_defaults,
+    )?;
+    Ok(())
+}
+
+fn add_lxs_service_to_ecompose(manifest: &LxsManifest, lxs_ref: &str) -> Result<(), String> {
     let cwd = util::current_dir();
     let manifest_path = find_estate_ecompose(&cwd)?;
-    let existed = upsert_service_ref(&manifest_path, service, "lxs", lxs_ref)?;
-    if existed {
-        println!(
-            "[eco lxs] Updated {service} ({lxs_ref}) in {}",
-            manifest_path.display()
-        );
-    } else {
-        println!(
-            "[eco lxs] Added {service} ({lxs_ref}) to {}",
-            manifest_path.display()
-        );
-    }
+    let service = compose_service_name(manifest);
+    materialize_lxs_compose(&manifest_path, manifest, lxs_ref, false)?;
+    println!(
+        "[eco lxs] Composed {service} ({lxs_ref}) in {}",
+        manifest_path.display()
+    );
     Ok(())
 }
 
@@ -2942,21 +3237,13 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
         Some(v) => format!("{name}@{v}"),
         None => name.clone(),
     };
-    let (_, version, dest) = fetch_lxs_to_cache(&effective_ref, &arch, effective_address)?;
+    let (manifest, version, dest) = fetch_lxs_to_cache(&effective_ref, &arch, effective_address)?;
     println!(
         "[eco lxs] Added {name}@{version} ({arch}) -> {} [verified]",
         dest.display()
     );
 
-    // Naming: an LXS is a backend by default (`<name>-backend`). A frontend
-    // LXS (name ends in `-ui`/`-frontend`) keeps its own name so the gateway
-    // can route /signin /signup to it and the frontend fallback skips it.
-    let service = if name.ends_with("-ui") || name.ends_with("-frontend") {
-        name.clone()
-    } else {
-        format!("{name}-backend")
-    };
-    add_lxs_service_to_ecompose(&service, &format!("{name}@{version}"))?;
+    add_lxs_service_to_ecompose(&manifest, &format!("{name}@{version}"))?;
     ensure_estate_state(&estate_root, address.as_deref().unwrap_or(""))?;
     Ok(())
 }
@@ -2987,9 +3274,56 @@ fn run_lxs_add_source() -> Result<(), String> {
         .strip_prefix(&estate_root)
         .map_err(|_| format!("{} is outside the estate root {} — a source LXS must live inside the estate (or be cloned as a sibling).", source_dir.display(), estate_root.display()))?;
     let rel_str = rel.to_string_lossy().replace('\\', "/");
-    let service = format!("{name}-backend");
+    let service = compose_service_name(&manifest);
     add_source_service_to_ecompose(&service, &rel_str)?;
     println!("[eco lxs] Registered {name} as a source LXS at {rel_str} for this estate.");
+    Ok(())
+}
+
+/// Re-apply an LXS's declared composition recipe. Useful for estates created
+/// before the `compose:` contract existed. Normal use is non-destructive;
+/// `--force` is reserved for an explicit policy migration.
+fn run_lxs_setup(args: &[String]) -> Result<(), String> {
+    let mut force = false;
+    let mut reference = String::new();
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs setup option: {other}"))
+            }
+            other if reference.is_empty() => reference = other.to_string(),
+            other => return Err(format!("Unexpected eco lxs setup argument: {other}")),
+        }
+    }
+    if reference.is_empty() {
+        return Err("usage: eco lxs setup <name> [--force]".to_string());
+    }
+    let cwd = util::current_dir();
+    let manifest_path = find_estate_ecompose(&cwd)?;
+    let estate_root = manifest_path.parent().unwrap_or(&cwd);
+    let state_registry = read_estate_state(estate_root)
+        .map(|s| s.registry)
+        .filter(|v| !v.is_empty());
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let pinned = composed_lxs(&content)
+        .into_iter()
+        .find(|(_, name, _)| name == &reference)
+        .map(|(_, _, value)| value)
+        .unwrap_or_else(|| reference.clone());
+    let (lxs_manifest, version) = fetch_lxs_manifest(&pinned, state_registry.as_deref())?;
+    materialize_lxs_compose(
+        &manifest_path,
+        &lxs_manifest,
+        &format!("{}@{}", lxs_manifest.name, version),
+        force,
+    )?;
+    println!(
+        "[eco lxs] Applied {} composition preset to {}",
+        lxs_manifest.name,
+        manifest_path.display()
+    );
     Ok(())
 }
 
@@ -3007,6 +3341,7 @@ pub fn run_lxs(args: &[String]) -> Result<(), String> {
         "pull" => run_lxs_pull(&args[1..]),
         "verify" => run_lxs_verify(&args[1..]),
         "add" => run_lxs_add(&args[1..]),
+        "setup" => run_lxs_setup(&args[1..]),
         "update" => run_lxs_update(&args[1..]),
         "outdated" => run_lxs_outdated(&args[1..]),
         "remove" | "rm" => run_lxs_remove(&args[1..]),
@@ -3076,7 +3411,7 @@ fn run_lxs_new(args: &[String]) -> Result<(), String> {
 
     // lxs.yml — the contract
     let lxs = format!(
-        "name: {name}\ndomain: {name}\nversion: 0.1.0\ncategory: Infrastructure\npublisher: getecosphere\nstatus: unverified\nlicense: mit\nsummary: \"{name} — describe your capability\"\n\ntargets:\n  - linux/amd64\n  - linux/arm64\n  - darwin/arm64\n  - darwin/amd64\n  - windows/amd64\n\nartifacts: {{}}\n\ncontract:\n  version: 1\n  api: \"{name} REST API\"\n  env:\n    required:\n      - SERVER_PORT\n    optional: []\n  db: \"none\"\n  network:\n    inbound: [http]\n    outbound: []\n  resources:\n    memory: \"128m\"\n    disk: \"256m\"\n    startup_seconds: 5\n\nruntime:\n  base: self-contained-static\n  libc: musl\n  dependencies: []\n\nprovenance:\n  source: \"\"\n  commit: \"\"\n  built_by: \"\"\n  built_at: \"\"\n  target: x86_64-unknown-linux-musl\n\nrelease: []\n"
+        "name: {name}\ndomain: {name}\nversion: 0.1.0\ncategory: Infrastructure\npublisher: getecosphere\nstatus: unverified\nlicense: mit\nsummary: \"{name} — describe your capability\"\n\ntargets:\n  - linux/amd64\n  - linux/arm64\n  - darwin/arm64\n  - darwin/amd64\n  - windows/amd64\n\nartifacts: {{}}\n\ncontract:\n  version: 1\n  api: \"{name} REST API\"\n  env:\n    required:\n      - SERVER_PORT\n    optional: []\n  db: \"none\"\n  network:\n    inbound: [http]\n    outbound: []\n  resources:\n    memory: \"128m\"\n    disk: \"256m\"\n    startup_seconds: 5\n\n# `eco lxs add` writes this recipe into ecompose.yml. Declare every route\n# here so the generated Gateway stays deny-by-default.\ncompose:\n  service:\n    name: {name}-backend\n    access:\n      routes: []\n\nruntime:\n  base: self-contained-static\n  libc: musl\n  dependencies: []\n\nprovenance:\n  source: \"\"\n  commit: \"\"\n  built_by: \"\"\n  built_at: \"\"\n  target: x86_64-unknown-linux-musl\n\nrelease: []\n"
     );
     std::fs::write(dir.join("lxs.yml"), lxs).map_err(|e| e.to_string())?;
 
@@ -3331,5 +3666,54 @@ mod tests {
         bad.insert("NOT_DECLARED".to_string(), "x".to_string());
         let err = build_lxs_env_example(&env, "auth-backend", &bad).unwrap_err();
         assert!(err.contains("NOT_DECLARED is not declared"));
+    }
+
+    #[test]
+    fn compose_recipe_materializes_service_membership_and_identity_default() {
+        let root = std::env::temp_dir().join(format!("eco-compose-recipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("ecompose.yml");
+        std::fs::write(
+            &file,
+            "project: sample\nmain: sample\nestates:\n  sample:\n    services:\n      - app\nservices:\n  app:\n    path: .\n",
+        )
+        .unwrap();
+        let manifest = LxsManifest {
+            name: "auth".to_string(),
+            compose: LxsCompose {
+                service: LxsComposeService {
+                    name: "auth-backend".to_string(),
+                    port: 4200,
+                    grants: LxsComposeGrants {
+                        secrets: vec!["JWT_SECRET".to_string()],
+                    },
+                    access: LxsComposeAccess {
+                        routes: vec![LxsComposeRoute {
+                            path: "/auth-api/auth/login".to_string(),
+                            level: "public".to_string(),
+                            strip: "/auth-api".to_string(),
+                            rewrite: "/api".to_string(),
+                            cookie: String::new(),
+                        }],
+                    },
+                    ..Default::default()
+                },
+                auth: LxsComposeAuth {
+                    email_verification: LxsComposeEmailVerification {
+                        enabled: Some(true),
+                    },
+                },
+            },
+            ..Default::default()
+        };
+        materialize_lxs_compose(&file, &manifest, "auth@3.4.0", false).unwrap();
+        let out = std::fs::read_to_string(&file).unwrap();
+        assert!(out.contains("auth:\n  email_verification:\n    enabled: true"));
+        assert!(out.contains("      - auth-backend"));
+        assert!(out.contains("  auth-backend:\n    lxs: auth@3.4.0\n    port: 4200"));
+        assert!(out.contains("grants: { secrets: [JWT_SECRET] }"));
+        assert!(out.contains("strip: /auth-api"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }
