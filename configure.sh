@@ -1620,6 +1620,35 @@ resolve_peer_base_urls() {
   done < <(grep -oE '^[A-Z][A-Z0-9_]*(_BASE_URL|_API_URL)=' "$env_file" | sed 's/=$//' | sort -u)
 }
 
+# Resolves browser-reachable peer URLs for backend services. This is distinct
+# from *_BASE_URL: a backend calls peers over localhost, while values such as
+# STORAGE_PUBLIC_URL are persisted in user data and must point through the
+# estate gateway. Only explicitly declared keys are touched.
+resolve_peer_public_urls() {
+  local env_file="$1" self_name="$2"
+  [[ -f "$env_file" ]] || return 0
+
+  local key prefix target_name target_port public_origin gateway_port
+  while IFS= read -r key; do
+    [[ -z "$key" ]] && continue
+    prefix="${key%_PUBLIC_URL}"
+    target_name="$(peer_target_backend_for_prefix "$prefix")"
+    [[ "$target_name" == "$self_name" ]] && continue
+    target_port="$(lookup_backend_port "$target_name")"
+    if [[ -z "$target_port" ]]; then
+      echo -e "  ${YELLOW}⚠${RESET}  $self_name wants ${key} but no ${target_name} service was discovered — leaving unset"
+      continue
+    fi
+    if is_prod_mode; then
+      public_origin="$(resolve_public_app_origin || true)"
+      [[ -n "$public_origin" ]] && set_env "$env_file" "$key" "${public_origin}$(browser_api_path_for_backend "$target_name")"
+    else
+      gateway_port="$(resolve_gateway_port || true)"
+      [[ -n "$gateway_port" ]] && set_env "$env_file" "$key" "http://localhost:${gateway_port}$(browser_api_path_for_backend "$target_name")"
+    fi
+  done < <(grep -oE '^[A-Z][A-Z0-9_]*_PUBLIC_URL=' "$env_file" | sed 's/=$//' | sort -u)
+}
+
 # Same idea as resolve_peer_base_urls, but for Next.js frontends composing
 # multiple domain backends directly (browser-facing calls, so the keys need
 # the NEXT_PUBLIC_ prefix and can't just reuse the backend-to-backend
@@ -3240,6 +3269,7 @@ configure_envs() {
         # `<prefix>-backend`. Backend-to-backend URLs always stay internal
         # (localhost), in dev and prod alike, per eco's own doctrine.
         resolve_peer_base_urls "$env_file" "$name"
+        resolve_peer_public_urls "$env_file" "$name"
         echo -e "  ${GREEN}✓${RESET} $name"
         ;;
       go)
@@ -3264,6 +3294,7 @@ configure_envs() {
           set_env "$env_file" "AUTH_BASE_URL" "$auth_base_url"
         fi
         resolve_peer_base_urls "$env_file" "$name"
+        resolve_peer_public_urls "$env_file" "$name"
         echo -e "  ${GREEN}✓${RESET} $name"
         ;;
       nextjs)
@@ -3320,6 +3351,7 @@ configure_envs() {
           set_env "$env_file" "AUTH_BASE_URL" "$auth_base_url"
         fi
         resolve_peer_base_urls "$env_file" "$name"
+        resolve_peer_public_urls "$env_file" "$name"
         echo -e "  ${GREEN}✓${RESET} $name"
         ;;
       vite|astro|nuxt|node)
