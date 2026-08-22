@@ -887,6 +887,9 @@ install_token_debian() {
         log "Installing PM2 globally via npm..."
         ensure_npm_user_prefix
         $SUDO npm install -g pm2
+        # Respawn the daemon so its version matches the freshly installed CLI
+        # (an old in-memory daemon breaks `pm2 jlist` JSON output).
+        pm2 kill >/dev/null 2>&1 || true
       fi
       ;;
     postgresql@15)
@@ -1115,6 +1118,9 @@ install_token_macos() {
         log "Installing PM2 globally via npm..."
         ensure_npm_user_prefix
         npm install -g pm2
+        # Respawn the daemon so its version matches the freshly installed CLI
+        # (an old in-memory daemon breaks `pm2 jlist` JSON output).
+        pm2 kill >/dev/null 2>&1 || true
       fi
       ;;
     postgresql@15)
