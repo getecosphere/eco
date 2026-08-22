@@ -39,6 +39,11 @@ warn() { echo -e "${YELLOW}$*${RESET}" >&2; }
 fail() { echo -e "\033[0;31m$*${RESET}" >&2; exit 1; }
 
 if [[ "${EUID}" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
+# A developer normally has no write permission to /usr/local/bin and may not
+# have passwordless sudo. Keep the user-local install discoverable for this
+# run and all later Eco commands without requiring elevated privileges.
+LOCAL_BIN="${HOME}/.local/bin"
+export PATH="${LOCAL_BIN}:${PATH}"
 
 detect_deploy_mode() {
   if [[ -n "${ECO_DEPLOY_MODE:-}" ]]; then printf '%s' "$ECO_DEPLOY_MODE"; return; fi
@@ -89,7 +94,15 @@ install_minio_binary() {
   log "Installing MinIO (${os}-${arch})..."
   curl --proto '=https' --tlsv1.2 -sSfL "$url" -o "$tmpfile"
   chmod +x "$tmpfile"
-  if install -m 0755 "$tmpfile" /usr/local/bin/minio 2>/dev/null; then :; else $SUDO install -m 0755 "$tmpfile" /usr/local/bin/minio; fi
+  if install -m 0755 "$tmpfile" /usr/local/bin/minio 2>/dev/null; then
+    :
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo install -m 0755 "$tmpfile" /usr/local/bin/minio
+  else
+    mkdir -p "$LOCAL_BIN"
+    install -m 0755 "$tmpfile" "$LOCAL_BIN/minio"
+    ok "Installed MinIO in ${LOCAL_BIN} (no sudo required)."
+  fi
   rm -f "$tmpfile"
 }
 
