@@ -730,7 +730,7 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
     let source = source.unwrap_or_else(util::current_dir);
 
     // Node/Astro UI LXS: bun-compile a standalone Astro SSR app into a
-    // single self-contained linux-x64 binary (no node_modules on the host).
+    // self-contained binary for each declared target (no node_modules on the host).
     if find_crate_dir(&source).is_none() {
         if let Some(node_dir) = find_node_app_dir(&source) {
             println!(
@@ -739,12 +739,7 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
             );
             let mut artifacts: HashMap<String, String> = HashMap::new();
             for arch in &archs {
-                if arch != "linux/amd64" {
-                    return Err(format!(
-                        "unsupported LXS target: {arch} (Astro/Node UI LXS currently build to linux/amd64 via bun-compile)"
-                    ));
-                }
-                let binary = build_node_app_for_target(&node_dir)?;
+                let binary = build_node_app_for_target(&node_dir, arch)?;
                 artifacts.insert(arch.clone(), binary.display().to_string());
             }
             let artifacts_json =
@@ -801,22 +796,33 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Build a standalone Astro SSR app into a single self-contained linux-x64
-/// binary via bun-compile. Runs `npm ci && npm run build` (Astro adapter-node
+/// Build a standalone Astro SSR app into a self-contained platform binary via
+/// bun-compile. Runs `npm ci && npm run build` (Astro adapter-node
 /// -> dist/server/entry.mjs + dist/client), then bun-compiles the server
 /// entry, embedding client assets alongside the binary.
-fn build_node_app_for_target(node_dir: &Path) -> Result<PathBuf, String> {
+fn build_node_app_for_target(node_dir: &Path, arch: &str) -> Result<PathBuf, String> {
     if !util::command_on_path("bun") {
         return Err("bun is required to build an Astro/Node UI LXS but was not found on PATH. Install bun: `brew install oven-sh/bun/bun`.".to_string());
     }
     // Isolated build root so the source stays pristine (node_modules never
     // lands in the repo); reuse a per-package cache for speed.
     let pkg_name = node_package_name(&node_dir)?;
+    let bun_target = match arch {
+        "linux/amd64" => "bun-linux-x64",
+        "linux/arm64" => "bun-linux-arm64",
+        "darwin/arm64" => "bun-darwin-arm64",
+        "darwin/amd64" => "bun-darwin-x64",
+        other => return Err(format!(
+            "unsupported LXS target: {other} (Astro/Node UI supports linux/amd64, linux/arm64, darwin/arm64, darwin/amd64)"
+        )),
+    };
+    let target_label = arch.replace('/', "-");
     let build_root = Path::new(&util::home_dir())
         .join(".cache")
         .join("eco")
         .join("lxs-build")
-        .join(&pkg_name);
+        .join(&pkg_name)
+        .join(target_label);
     let member_dir = build_root.join("app");
     let _ = std::fs::remove_dir_all(&member_dir);
     std::fs::create_dir_all(&member_dir).map_err(|e| e.to_string())?;
@@ -853,7 +859,7 @@ fn build_node_app_for_target(node_dir: &Path) -> Result<PathBuf, String> {
         &[
             "build",
             "--compile",
-            "--target=bun-linux-x64",
+            &format!("--target={bun_target}"),
             &rel,
             "--outfile",
             &out.display().to_string(),
