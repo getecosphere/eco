@@ -309,20 +309,20 @@ fn run_tunnel(
     subdomain: &str,
     port_flag: &str,
 ) -> Result<(), String> {
-    // Determine the local port: explicit flag > ecompose expose.target_port > 3000.
+    // Determine the local port: explicit flag > ecompose expose.target_port;
+    // otherwise discover the port eco allocated for the running app from PM2.
     let content = if !ecompose_path.as_os_str().is_empty() {
         std::fs::read_to_string(ecompose_path).unwrap_or_default()
     } else {
         String::new()
     };
-    let port = if !port_flag.is_empty() {
-        port_flag.to_string()
+    let explicit_port = if !port_flag.is_empty() {
+        Some(port_flag.parse::<u16>().map_err(|_| format!("invalid --port: {port_flag}"))?)
     } else if let Some(p) = default_port_from_expose(&content) {
-        p
+        Some(p.parse::<u16>().map_err(|_| format!("invalid expose.target_port: {p}"))?)
     } else {
-        "3000".to_string()
+        None
     };
-    let port_num: u16 = port.parse().map_err(|_| format!("invalid --port: {port}"))?;
 
     // Run the app locally (this is serve's core job): stop any running dev
     // instance for this project, start `eco up dev`, and wait for the target
@@ -332,16 +332,64 @@ fn run_tunnel(
         util::println_stdout("Running your app locally…");
         stop_dev_apps(project);
         start_dev_app();
+        // When the port isn't explicit (no --port / expose.target_port), read
+        // the port eco actually allocated for the app from PM2 (e.g. 20000 for
+        // a Next.js dev server) instead of assuming 3000.
+        let port_num = match explicit_port {
+            Some(p) => p,
+            None => discover_app_port(project, 3000),
+        };
         if !wait_for_port(port_num, 180) {
             return Err(format!(
                 "Your app did not start listening on http://localhost:{port_num} within 3 minutes. Check the `eco up dev` output."
             ));
         }
         util::println_stdout(&format!("App is up on http://localhost:{port_num}"));
-    } else {
-        util::println_stdout("Preparing your app for the world…");
+        return run_tunnel_after_app(api_url, api_key, ecompose_path, project, subdomain, port_num);
     }
 
+    let port_num = explicit_port.unwrap_or(3000);
+    util::println_stdout("Preparing your app for the world…");
+    run_tunnel_after_app(api_url, api_key, ecompose_path, project, subdomain, port_num)
+}
+
+// Read the actual dev port eco allocated for a project's app from PM2.
+fn discover_app_port(project: &str, fallback: u16) -> u16 {
+    let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir()) else {
+        return fallback;
+    };
+    let Ok(list) = serde_json::from_str::<serde_json::Value>(&captured.stdout) else {
+        return fallback;
+    };
+    if let Some(apps) = list.as_array() {
+        for app in apps {
+            if let Some(name) = app.get("name").and_then(|n| n.as_str()) {
+                if name.starts_with(&format!("{project}-")) {
+                    if let Some(port) = app
+                        .pointer("/pm2_env/env/PORT")
+                        .and_then(|p| p.as_str())
+                        .and_then(|s| s.parse::<u16>().ok())
+                    {
+                        return port;
+                    }
+                    if let Some(port) = app.pointer("/pm2_env/env/PORT").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok()) {
+                        return port;
+                    }
+                }
+            }
+        }
+    }
+    fallback
+}
+
+fn run_tunnel_after_app(
+    api_url: &str,
+    api_key: &str,
+    ecompose_path: &PathBuf,
+    project: &str,
+    subdomain: &str,
+    port_num: u16,
+) -> Result<(), String> {
     // Reserve through the host agent (conflict check + DNS + tunnel token +
     // metered daily quota).
     let origin = format!("http://localhost:{port_num}");
