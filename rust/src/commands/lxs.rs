@@ -767,7 +767,7 @@ fn nearest_cargo_lock(start: &Path) -> Option<PathBuf> {
 }
 
 fn run_lxs_build(args: &[String]) -> Result<(), String> {
-    let mut archs: Vec<String> = vec!["linux/amd64".to_string()];
+    let mut archs: Vec<String> = Vec::new();
     let mut source: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
@@ -795,6 +795,18 @@ fn run_lxs_build(args: &[String]) -> Result<(), String> {
         }
     }
     let source = source.unwrap_or_else(util::current_dir);
+    // A manifest is the LXS contract, including the platforms its consumer
+    // estates may run on. Honour it by default so `eco up dev` never silently
+    // keeps an old binary just because a Darwin artifact was omitted.
+    if archs.is_empty() {
+        let manifest_path = source.join("lxs.yml");
+        if manifest_path.is_file() {
+            archs = load_manifest(&manifest_path)?.targets;
+        }
+        if archs.is_empty() {
+            archs.push("linux/amd64".to_string());
+        }
+    }
 
     // Node/Astro UI LXS: bun-compile a standalone Astro SSR app into a
     // self-contained binary for each declared target (no node_modules on the host).
