@@ -3360,7 +3360,25 @@ configure_envs() {
         if [[ "$name" == "auth-backend" || "$name" == *-auth-backend ]]; then
           # Published Auth runs through start.sh locally, so it reaches this
           # `static` branch rather than the Rust-source branch above. Keep the
-          # password-recovery delivery contract identical for both forms.
+          # verification and password-recovery contract identical for both
+          # source and published forms.
+          local auth_public_url="http://${dev_host}:${port}/api"
+          if is_prod_mode && [[ -n "$public_auth_base_url" ]]; then
+            auth_public_url="$public_auth_base_url"
+          fi
+          set_env "$env_file" "AUTH_PUBLIC_URL" "$auth_public_url"
+          if [[ -n "$auth_email_verification_enabled" ]]; then
+            set_env "$env_file" "EMAIL_VERIFICATION_REQUIRED" "$auth_email_verification_enabled"
+          fi
+          if [[ -n "$auth_email_verification_ttl" ]]; then
+            set_env "$env_file" "EMAIL_VERIFICATION_TTL_HOURS" "$auth_email_verification_ttl"
+          fi
+          if [[ -n "$auth_mail_from_email" ]]; then
+            set_env "$env_file" "MAIL_FROM_EMAIL" "$auth_mail_from_email"
+          fi
+          if [[ -n "$auth_mail_from_name" ]]; then
+            set_env "$env_file" "MAIL_FROM_NAME" "$auth_mail_from_name"
+          fi
           inherit_mail_credentials "$env_file"
           if [[ -n "${ECO_AUTH_EMAIL_RELAY_URL:-}" && -n "${ECO_AUTH_EMAIL_RELAY_TOKEN:-}" ]]; then
             set_env "$env_file" "EMAIL_RELAY_URL" "$ECO_AUTH_EMAIL_RELAY_URL"
