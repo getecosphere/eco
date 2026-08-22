@@ -11,7 +11,7 @@
 // subcommand, dispatch is by the first positional: a bare subdomain (or
 // `list`/`stop`) is the dev tunnel; agent flags (`--port`, `--host`,
 // `gen-key`) keep the host-side server behavior.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -368,7 +368,8 @@ fn run_tunnel(
     } else {
         String::new()
     };
-    let explicit_port = if !port_flag.is_empty() {
+    let port_was_forced = !port_flag.is_empty();
+    let explicit_port = if port_was_forced {
         Some(
             port_flag
                 .parse::<u16>()
@@ -395,9 +396,17 @@ fn run_tunnel(
         // the port eco actually allocated for the app from PM2 (e.g. 20000 for
         // a Next.js dev server) instead of assuming 3000. eco up dev starts
         // asynchronously, so poll until the app registers its PORT.
-        let port_num = match explicit_port {
+        let app_port = match explicit_port {
             Some(p) => p,
             None => wait_for_app_port(project, 3000, 180),
+        };
+        // Gateway is the estate's public front door. It serves the frontend
+        // and every routed LXS API, while a frontend-only tunnel makes paths
+        // such as `/auth-api/*` return 404 outside localhost.
+        let port_num = if port_was_forced {
+            app_port
+        } else {
+            wait_for_gateway_port(project, ecompose_path.parent(), app_port, 60)
         };
         if !wait_for_port(port_num, 180) {
             return Err(format!(
@@ -427,8 +436,8 @@ fn run_tunnel(
     )
 }
 
-// Read the actual dev port eco allocated for a project's app from PM2.
-fn discover_app_port(project: &str) -> Option<u16> {
+// Read the actual dev port eco allocated for a named PM2 service.
+fn discover_pm2_port(service_name: &str) -> Option<u16> {
     let Ok(captured) = util::run_capture("pm2", &["jlist".to_string()], &util::current_dir())
     else {
         return None;
@@ -439,7 +448,7 @@ fn discover_app_port(project: &str) -> Option<u16> {
     if let Some(apps) = list.as_array() {
         for app in apps {
             if let Some(name) = app.get("name").and_then(|n| n.as_str()) {
-                if name.starts_with(&format!("{project}-")) {
+                if name == service_name {
                     if let Some(port) = app
                         .pointer("/pm2_env/env/PORT")
                         .and_then(|p| p.as_str())
@@ -459,6 +468,54 @@ fn discover_app_port(project: &str) -> Option<u16> {
         }
     }
     None
+}
+
+// Read the actual dev port eco allocated for a project's frontend from PM2.
+fn discover_app_port(project: &str) -> Option<u16> {
+    [
+        format!("{project}-leadme"),
+        format!("{project}-frontend"),
+        project.to_string(),
+    ]
+    .iter()
+    .find_map(|name| discover_pm2_port(name))
+}
+
+fn port_from_env_file(path: &Path) -> Option<u16> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        if key == "SERVER_PORT" || key == "PORT" {
+            value.trim().parse::<u16>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn discover_gateway_port(project: &str, estate_root: Option<&Path>) -> Option<u16> {
+    // Published LXS services run from a start.sh wrapper. PM2 does not carry
+    // their SERVER_PORT, but Eco has already generated it in gateway/.env.
+    estate_root
+        .and_then(|root| port_from_env_file(&root.join("gateway").join(".env")))
+        .or_else(|| discover_pm2_port(&format!("{project}-gateway")))
+}
+
+fn wait_for_gateway_port(
+    project: &str,
+    estate_root: Option<&Path>,
+    fallback: u16,
+    timeout_secs: u64,
+) -> u16 {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if let Some(port) = discover_gateway_port(project, estate_root) {
+            return port;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    fallback
 }
 
 // Poll PM2 until the project's app registers with a PORT (eco up dev starts

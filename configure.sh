@@ -3357,6 +3357,19 @@ configure_envs() {
         # backends: give them the same env fills as Rust backends — the auth
         # backend URL and any declared <PREFIX>_BASE_URL/<PREFIX>_API_URL peer
         # dependencies.
+        if [[ "$name" == "auth-backend" || "$name" == *-auth-backend ]]; then
+          # Published Auth runs through start.sh locally, so it reaches this
+          # `static` branch rather than the Rust-source branch above. Keep the
+          # password-recovery delivery contract identical for both forms.
+          inherit_mail_credentials "$env_file"
+          if [[ -n "${ECO_AUTH_EMAIL_RELAY_URL:-}" && -n "${ECO_AUTH_EMAIL_RELAY_TOKEN:-}" ]]; then
+            set_env "$env_file" "EMAIL_RELAY_URL" "$ECO_AUTH_EMAIL_RELAY_URL"
+            set_env "$env_file" "EMAIL_RELAY_TOKEN" "$ECO_AUTH_EMAIL_RELAY_TOKEN"
+          fi
+          if [[ -n "${ECO_AUTH_EMAIL_PUBLIC_URL:-}" ]]; then
+            set_env "$env_file" "EMAIL_VERIFICATION_PUBLIC_URL" "$ECO_AUTH_EMAIL_PUBLIC_URL"
+          fi
+        fi
         if [[ -n "$auth_port" && "$name" != "auth-backend" && "$name" != *-auth-backend ]]; then
           local auth_base_url="http://${dev_host}:${auth_port}/api"
           set_env "$env_file" "AUTH_BASE_URL" "$auth_base_url"
