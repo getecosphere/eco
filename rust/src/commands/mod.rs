@@ -14,4 +14,5 @@ pub mod registry_cmd;
 pub mod gitops;
 pub mod serve;
 pub mod config_dash;
+pub mod db;
 pub mod log;
