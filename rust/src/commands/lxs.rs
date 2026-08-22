@@ -2846,6 +2846,77 @@ fn apply_auth_email_verification_default(
         .map_err(|e| format!("write {}: {e}", manifest_path.display()))
 }
 
+/// Merge explicit, non-secret composition defaults into an existing service.
+/// A normal `lxs add/setup` never overwrites a choice already in ecompose;
+/// `--force` is deliberately required for a policy migration.
+fn apply_compose_config_defaults(
+    manifest_path: &Path,
+    service: &str,
+    defaults: &HashMap<String, String>,
+    force: bool,
+) -> Result<(), String> {
+    if defaults.is_empty() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let header = format!("  {service}:");
+    let start = lines
+        .iter()
+        .position(|line| line.trim_end() == header)
+        .ok_or_else(|| format!("service {service} not found in {}", manifest_path.display()))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find_map(|(idx, line)| {
+            let t = line.trim_end();
+            (t.len() >= 2 && t.starts_with("  ") && !t.starts_with("    ") && t.ends_with(':'))
+                .then_some(idx)
+        })
+        .unwrap_or(lines.len());
+    let config_start = (start + 1..end).find(|idx| lines[*idx].trim_end() == "    config:");
+    let mut entries: Vec<_> = defaults.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    match config_start {
+        None => {
+            let mut block = vec!["    config:".to_string()];
+            for (key, value) in entries {
+                block.push(format!("      {key}: {}", yaml_quote(value)));
+            }
+            lines.splice(start + 1..start + 1, block);
+        }
+        Some(config_start) => {
+            let config_end = (config_start + 1..end)
+                .find(|idx| {
+                    let line = lines[*idx].as_str();
+                    !line.trim().is_empty()
+                        && line.starts_with("    ")
+                        && !line.starts_with("      ")
+                        && line.trim_end().ends_with(':')
+                })
+                .unwrap_or(end);
+            let mut insert_at = config_end;
+            for (key, value) in entries {
+                let prefix = format!("{key}:");
+                if let Some(index) = (config_start + 1..config_end)
+                    .find(|idx| lines[*idx].trim_start().starts_with(&prefix))
+                {
+                    if force {
+                        lines[index] = format!("      {key}: {}", yaml_quote(value));
+                    }
+                } else {
+                    lines.insert(insert_at, format!("      {key}: {}", yaml_quote(value)));
+                    insert_at += 1;
+                }
+            }
+        }
+    }
+    std::fs::write(manifest_path, format!("{}\n", lines.join("\n")))
+        .map_err(|e| format!("write {}: {e}", manifest_path.display()))
+}
+
 fn materialize_lxs_compose(
     manifest_path: &Path,
     manifest: &LxsManifest,
@@ -2860,6 +2931,12 @@ fn materialize_lxs_compose(
         .any(|line| line.trim_end() == format!("  {service}:"));
     if exists {
         upsert_service_ref(manifest_path, &service, "lxs", lxs_ref)?;
+        apply_compose_config_defaults(
+            manifest_path,
+            &service,
+            &manifest.compose.service.config,
+            force_identity_defaults,
+        )?;
     } else {
         let block = compose_service_block(&service, lxs_ref, &manifest.compose.service);
         insert_service_into_ecompose(manifest_path, &block)?;
