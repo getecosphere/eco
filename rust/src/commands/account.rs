@@ -274,7 +274,13 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
     let rest = &args[1..];
     let api_url = {
         let url = resolve_api_url();
-        if url.is_empty() { DEFAULT_API_URL.to_string() } else { url }
+        if !url.is_empty() {
+            url
+        } else if let Some(auth) = read_stored_auth() {
+            auth.api_url
+        } else {
+            DEFAULT_API_URL.to_string()
+        }
     };
     match subcommand {
         "signup" => {
@@ -309,7 +315,11 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
             // Plan ids: free | tidur ($2) | selalu-on ($5) | growth ($19) | dedicated ($630)
             match rest.first().map(|s| s.as_str()) {
                 Some("list") => {
-                    let value = api_get(&api_url, "", "/v1/account/plans")?;
+                    let (_, api_key) = match resolve_api_credentials() {
+                        Ok(k) => k,
+                        Err(_) => (String::new(), String::new()),
+                    };
+                    let value = api_get(&api_url, &api_key, "/v1/account/plans")?;
                     let plans = value.get("plans").and_then(|p| p.as_array());
                     if let Some(plans) = plans {
                         println!("Eco plans (pricing-concept v2):");
