@@ -93,6 +93,56 @@ fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, S
     }
 }
 
+fn api_get(api_url: &str, api_key: &str, path: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{api_url}{path}");
+    let response = match ureq::get(&url).set("User-Agent", "eco-cli").set("Authorization", &format!("Bearer {api_key}"))
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let text = r.into_string().unwrap_or_default();
+            return Err(format!("HTTP {code}: {}", text.chars().take(200).collect::<String>()));
+        }
+        Err(ureq::Error::Transport(t)) => return Err(format!("network error: {t}")),
+    };
+    let status = response.status();
+    let text = response.into_string().unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    if (200..300).contains(&status) {
+        Ok(value)
+    } else {
+        let msg = value.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+        Err(msg)
+    }
+}
+
+/// POST with an Authorization header (account or agent key) for the
+/// account-authenticated endpoints (subscribe / admin plan set).
+fn post_json_auth(url: &str, api_key: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let response = match ureq::post(url).set("User-Agent", "eco-cli").set("Content-Type", "application/json")
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .timeout(std::time::Duration::from_secs(30))
+        .send_string(&serde_json::to_string(body).unwrap())
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let text = r.into_string().unwrap_or_default();
+            return Err(format!("HTTP {code}: {}", text.chars().take(200).collect::<String>()));
+        }
+        Err(ureq::Error::Transport(t)) => return Err(format!("network error: {t}")),
+    };
+    let status = response.status();
+    let text = response.into_string().unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    if (200..300).contains(&status) {
+        Ok(value)
+    } else {
+        let msg = value.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+        Err(msg)
+    }
+}
+
 fn do_signup(api_url: &str, email: &str, password: &str) -> Result<(), String> {
     let url = format!("{api_url}/v1/account/signup");
     let result = post_json(&url, &serde_json::json!({"email": email, "password": password}))?;
@@ -252,28 +302,80 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "plan" => {
-            // Admin op: eco plan set <email> <plan> (free|starter|scale|growth|pro).
-            // Uses the caller's API key; only an agent/admin key is accepted by
-            // the server.
-            if rest.first().map(|s| s.as_str()) == Some("set") && rest.len() == 3 {
-                let email = rest[1].clone();
-                let plan = rest[2].clone();
-                let result = post_json(
-                    &format!("{api_url}/v1/account/plan"),
-                    &serde_json::json!({ "email": email.clone(), "plan": plan.clone() }),
-                )?;
-                let _ = result;
-                println!("Plan for {email} set to {plan}.");
-                Ok(())
-            } else {
-                Err("usage: eco plan set <email> <plan>  (free | starter | scale | growth | pro)".to_string())
+            // eco plan — account plan management.
+            //   eco plan list                       show the plan catalog
+            //   eco plan subscribe <plan>           simulated self-serve payment → plan applied
+            //   eco plan set <email> <plan>         admin op (agent key only)
+            // Plan ids: free | tidur ($2) | selalu-on ($5) | growth ($19) | dedicated ($630)
+            match rest.first().map(|s| s.as_str()) {
+                Some("list") => {
+                    let value = api_get(&api_url, "", "/v1/account/plans")?;
+                    let plans = value.get("plans").and_then(|p| p.as_array());
+                    if let Some(plans) = plans {
+                        println!("Eco plans (pricing-concept v2):");
+                        for p in plans {
+                            println!(
+                                "  {:<10} {:>10}/mo   apps={}  mongo={}  postgres={}  storage={}GB",
+                                p.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                                format!("${}", p.get("price_usd").and_then(|v| v.as_u64()).unwrap_or(0)),
+                                p.get("apps").and_then(|v| v.as_u64()).unwrap_or(0),
+                                p.get("mongo").and_then(|v| v.as_u64()).unwrap_or(0),
+                                p.get("postgres").and_then(|v| v.as_u64()).unwrap_or(0),
+                                p.get("storage_gb").and_then(|v| v.as_u64()).unwrap_or(0),
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                Some("subscribe") => {
+                    let plan = rest.get(1).cloned().unwrap_or_default();
+                    if plan.is_empty() {
+                        return Err("usage: eco plan subscribe <free|tidur|selalu-on|growth|dedicated>".to_string());
+                    }
+                    let (_, api_key) = resolve_api_credentials()?;
+                    let result = post_json_auth(
+                        &format!("{api_url}/v1/account/subscribe"),
+                        &api_key,
+                        &serde_json::json!({ "plan": plan }),
+                    )?;
+                    println!(
+                        "{}",
+                        result.get("message").and_then(|m| m.as_str()).unwrap_or("subscribed")
+                    );
+                    Ok(())
+                }
+                Some("set") => {
+                    if rest.len() == 3 {
+                        let email = rest[1].clone();
+                        let plan = rest[2].clone();
+                        let (_, api_key) = resolve_api_credentials()?;
+                        let _ = post_json_auth(
+                            &format!("{api_url}/v1/account/plan"),
+                            &api_key,
+                            &serde_json::json!({ "email": email.clone(), "plan": plan.clone() }),
+                        )?;
+                        println!("Plan for {email} set to {plan}.");
+                        Ok(())
+                    } else {
+                        Err("usage: eco plan set <email> <plan>".to_string())
+                    }
+                }
+                _ => Err("usage: eco plan list | eco plan subscribe <plan> | eco plan set <email> <plan>".to_string()),
             }
         }
         "whoami" => match read_stored_auth() {
             Some(auth) => {
                 println!("email: {}", auth.email);
                 println!("api_url: {}", auth.api_url);
-                println!("tier: free");
+                // Ask the agent for the real tier instead of hardcoding "free".
+                match api_get(&auth.api_url, &auth.api_key, "/v1/account/me") {
+                    Ok(me) => {
+                        let tier = me.get("tier").and_then(|t| t.as_str()).unwrap_or("free");
+                        println!("tier:  {tier}");
+                        let _ = me.get("email");
+                    }
+                    Err(_) => println!("tier:  (offline — run with the agent reachable)"),
+                }
                 Ok(())
             }
             None => {
@@ -282,7 +384,7 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
             }
         },
         _ => {
-            println!("eco account\n\nUsage:\n  eco signup <email>        create a free account + API key\n  eco login                 sign in via your browser\n  eco login <email>         sign in with email + password\n  eco logout                remove the saved key\n  eco whoami                show the current account");
+            println!("eco account\n\nUsage:\n  eco signup <email>        create a free account + API key\n  eco login                 sign in via your browser\n  eco login <email>         sign in with email + password\n  eco logout                remove the saved key\n  eco whoami                show the current account (real tier)\n  eco plan list             show the plan catalog\n  eco plan subscribe <plan> simulate subscribing to a paid plan");
             Ok(())
         }
     }
