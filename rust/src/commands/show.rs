@@ -42,7 +42,9 @@ fn find_ecompose_file(start_dir: &Path) -> Result<PathBuf, String> {
 /// module.exports = { apps: [ { name: "..", env: { PORT: N, ... } }, ... ] }.
 /// We scan object blocks and pull the first `name:` and any PORT/SERVER_PORT
 /// integer inside that block's env.
-pub fn read_ports_from_ecosystem(ecosystem_path: &Path) -> std::collections::HashMap<String, String> {
+pub fn read_ports_from_ecosystem(
+    ecosystem_path: &Path,
+) -> std::collections::HashMap<String, String> {
     let mut ports: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let content = match std::fs::read_to_string(ecosystem_path) {
         Ok(c) => c,
@@ -63,7 +65,7 @@ fn split_blocks(content: &str) -> Vec<(String, String)> {
     let chars: Vec<char> = content.chars().collect();
     let mut i = 0usize;
     let n = chars.len();
-    // find "apps: [" 
+    // find "apps: ["
     let mut in_apps = false;
     while i < n {
         if !in_apps {
@@ -109,7 +111,10 @@ fn extract_name(block: &str) -> Option<String> {
     let idx = block.find("name:")?;
     let rest = &block[idx + 5..];
     let rest = rest.trim_start();
-    let rest = rest.strip_prefix('"').or_else(|| rest.strip_prefix('\'')).unwrap_or(rest);
+    let rest = rest
+        .strip_prefix('"')
+        .or_else(|| rest.strip_prefix('\''))
+        .unwrap_or(rest);
     let mut end = 0;
     for (i, ch) in rest.char_indices() {
         if ch == '"' || ch == '\'' || ch == ',' {
@@ -182,7 +187,10 @@ pub fn run_show(_args: &[String]) -> Result<(), String> {
     let services = ecompose::parse_services(&content);
     let expose = ecompose::parse_expose(&content);
 
-    let ecosystem_path = file_path.parent().unwrap_or(Path::new(".")).join("ecosystem.config.js");
+    let ecosystem_path = file_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("ecosystem.config.js");
     let ports = read_ports_from_ecosystem(&ecosystem_path);
 
     let out = &mut String::new();
@@ -217,7 +225,9 @@ pub fn run_show(_args: &[String]) -> Result<(), String> {
         let _ = writeln!(out);
     }
 
-    if !ct.get("id").unwrap_or(&String::new()).is_empty() || !ct.get("hostname").unwrap_or(&String::new()).is_empty() {
+    if !ct.get("id").unwrap_or(&String::new()).is_empty()
+        || !ct.get("hostname").unwrap_or(&String::new()).is_empty()
+    {
         let _ = writeln!(out, "  {}", util::bold("Container"));
         if let Some(id) = ct.get("id") {
             if !id.is_empty() {
@@ -260,9 +270,18 @@ pub fn run_show(_args: &[String]) -> Result<(), String> {
             let app_name = format!("{project_name}-{}", svc.name);
             let port = ports.get(&app_name);
             let _ = writeln!(out, "\n    {}", util::bold(&svc.name));
-            let path_display = if svc.path.is_empty() { util::dim("—") } else { svc.path.clone() };
+            let path_display = if svc.path.is_empty() {
+                util::dim("—")
+            } else {
+                svc.path.clone()
+            };
             let _ = writeln!(out, "      {}      {}", util::cyan("path"), path_display);
-            let _ = writeln!(out, "      {}  {}", util::cyan("runtimes"), runtime_label(&svc.runtimes));
+            let _ = writeln!(
+                out,
+                "      {}  {}",
+                util::cyan("runtimes"),
+                runtime_label(&svc.runtimes)
+            );
             if let Some(p) = port {
                 let _ = writeln!(out, "      {}      {}", util::cyan("port"), p);
             }
@@ -270,7 +289,9 @@ pub fn run_show(_args: &[String]) -> Result<(), String> {
         let _ = writeln!(out);
     }
 
-    if util::to_bool(expose.get("enabled").map(|s| s.as_str()).unwrap_or("")) || !expose.hostname().is_empty() {
+    if util::to_bool(expose.get("enabled").map(|s| s.as_str()).unwrap_or(""))
+        || !expose.hostname().is_empty()
+    {
         let _ = writeln!(out, "  {}", util::bold("Expose"));
         if !expose.hostname().is_empty() {
             let _ = writeln!(out, "    {}  {}", util::cyan("hostname"), expose.hostname());

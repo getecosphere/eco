@@ -11,7 +11,9 @@ pub struct ChecklistItem {
 }
 
 /// Dependency maps: name -> list of dependency names.
-pub fn build_repo_dependency_maps(repos: &[crate::repos::RepoEntry]) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
+pub fn build_repo_dependency_maps(
+    repos: &[crate::repos::RepoEntry],
+) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
     let mut requires: HashMap<String, Vec<String>> = HashMap::new();
     let mut required_by: HashMap<String, Vec<String>> = HashMap::new();
     for repo in repos {
@@ -20,14 +22,20 @@ pub fn build_repo_dependency_maps(repos: &[crate::repos::RepoEntry]) -> (HashMap
     }
     for repo in repos {
         for dep in repo.requires.iter() {
-            required_by.entry(dep.clone()).or_default().push(repo.name.clone());
+            required_by
+                .entry(dep.clone())
+                .or_default()
+                .push(repo.name.clone());
         }
     }
     (requires, required_by)
 }
 
 /// Collect transitive dependencies of repoName.
-pub fn collect_dependencies(repo_name: &str, requires_by: &HashMap<String, Vec<String>>) -> HashSet<String> {
+pub fn collect_dependencies(
+    repo_name: &str,
+    requires_by: &HashMap<String, Vec<String>>,
+) -> HashSet<String> {
     let mut into = HashSet::new();
     collect_dependencies_rec(repo_name, requires_by, &mut into);
     into
@@ -46,7 +54,10 @@ fn collect_dependencies_rec(
 }
 
 /// Repos that cannot be deselected because a selected dependent requires them.
-pub fn compute_locked_repos(selected: &HashSet<String>, required_by: &HashMap<String, Vec<String>>) -> HashSet<String> {
+pub fn compute_locked_repos(
+    selected: &HashSet<String>,
+    required_by: &HashMap<String, Vec<String>>,
+) -> HashSet<String> {
     let mut locked = HashSet::new();
     for repo in selected {
         if let Some(dependents) = required_by.get(repo) {
@@ -73,11 +84,28 @@ fn render_checklist(
     selected: &HashSet<String>,
     locked: &HashSet<String>,
 ) -> String {
-    let mut lines = vec![String::new(), title.to_string(), hint.to_string(), String::new()];
+    let mut lines = vec![
+        String::new(),
+        title.to_string(),
+        hint.to_string(),
+        String::new(),
+    ];
     for (index, item) in items.iter().enumerate() {
-        let pointer = if index == cursor { "❯".to_string() } else { " ".to_string() };
-        let mark = if selected.contains(&item.id) { "x" } else { " " };
-        let suffix = if locked.contains(&item.id) { " [required]".to_string() } else { String::new() };
+        let pointer = if index == cursor {
+            "❯".to_string()
+        } else {
+            " ".to_string()
+        };
+        let mark = if selected.contains(&item.id) {
+            "x"
+        } else {
+            " "
+        };
+        let suffix = if locked.contains(&item.id) {
+            " [required]".to_string()
+        } else {
+            String::new()
+        };
         lines.push(format!(" {pointer} [{mark}] {}{suffix}", item.label));
     }
     lines.join("\n")
@@ -110,7 +138,11 @@ pub fn run_checklist(
             }
             let text = render_checklist(title, hint, items, cursor, selected, &locked);
             let mut out = io::stdout();
-            crossterm::execute!(out, cursor::MoveTo(0, 0), terminal::Clear(ClearType::FromCursorDown))?;
+            crossterm::execute!(
+                out,
+                cursor::MoveTo(0, 0),
+                terminal::Clear(ClearType::FromCursorDown)
+            )?;
             write!(out, "{text}")?;
             if !error.is_empty() {
                 write!(out, "\n\n{error}")?;
@@ -120,8 +152,7 @@ pub fn run_checklist(
 
         paint(cursor, &selected, &error).map_err(|e| e.to_string())?;
         loop {
-            let event = event::poll(Duration::from_millis(200))
-                .map_err(|e| e.to_string())?;
+            let event = event::poll(Duration::from_millis(200)).map_err(|e| e.to_string())?;
             if !event {
                 continue;
             }
@@ -129,11 +160,19 @@ pub fn run_checklist(
             match ev {
                 Event::Key(key) => match key.code {
                     KeyCode::Up => {
-                        cursor = if cursor == 0 { items.len() - 1 } else { cursor - 1 };
+                        cursor = if cursor == 0 {
+                            items.len() - 1
+                        } else {
+                            cursor - 1
+                        };
                         error.clear();
                     }
                     KeyCode::Down => {
-                        cursor = if cursor == items.len() - 1 { 0 } else { cursor + 1 };
+                        cursor = if cursor == items.len() - 1 {
+                            0
+                        } else {
+                            cursor + 1
+                        };
                         error.clear();
                     }
                     KeyCode::Char(' ') | KeyCode::Char('x') | KeyCode::Char('X') => {
@@ -206,7 +245,10 @@ pub fn run_checklist(
 pub fn confirm_with_single_key(message: &str, default_yes: bool) -> Result<bool, String> {
     ensure_interactive()?;
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-    print!("{message} {hint} (Enter = {}): ", if default_yes { "yes" } else { "no" });
+    print!(
+        "{message} {hint} (Enter = {}): ",
+        if default_yes { "yes" } else { "no" }
+    );
     io::stdout().flush().ok();
 
     terminal::enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
@@ -239,7 +281,10 @@ pub fn prompt_line(question: &str) -> Result<String, String> {
     io::stdout().flush().ok();
     let stdin = io::stdin();
     let mut line = String::new();
-    stdin.lock().read_line(&mut line).map_err(|e| e.to_string())?;
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     Ok(line.trim().to_string())
 }
 

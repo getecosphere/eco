@@ -25,7 +25,13 @@ fn scan_target(dir: &Path, targets: &mut Vec<String>) {
             // Only treat as Rust target if a sibling Cargo.toml/Cargo.lock exists
             // in the same directory (the parent of target/, not inside it).
             let has_cargo = std::fs::read_dir(dir)
-                .map(|mut e| e.any(|x| x.as_ref().is_ok_and(|x| x.file_name() == "Cargo.toml" || x.file_name() == "Cargo.lock")))
+                .map(|mut e| {
+                    e.any(|x| {
+                        x.as_ref().is_ok_and(|x| {
+                            x.file_name() == "Cargo.toml" || x.file_name() == "Cargo.lock"
+                        })
+                    })
+                })
                 .unwrap_or(false);
             if has_cargo {
                 targets.push(path.display().to_string());
@@ -71,9 +77,17 @@ fn find_estate_root_rust(cwd: &Path) -> Result<String, String> {
             .collect();
         if names.iter().any(|n| n == "ecompose.yml") {
             let parent_entries = std::fs::read_dir(dir.parent().unwrap_or(&dir))
-                .map(|e| e.flatten().map(|x| x.file_name().to_string_lossy().to_string()).collect::<Vec<_>>())
+                .map(|e| {
+                    e.flatten()
+                        .map(|x| x.file_name().to_string_lossy().to_string())
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
-            let parent_has_multiple_repos = parent_entries.iter().filter(|e| !e.starts_with('.')).count() > 3;
+            let parent_has_multiple_repos = parent_entries
+                .iter()
+                .filter(|e| !e.starts_with('.'))
+                .count()
+                > 3;
             estate_root = if parent_has_multiple_repos {
                 dir.parent().unwrap_or(&dir).to_path_buf()
             } else {
@@ -88,7 +102,10 @@ fn find_estate_root_rust(cwd: &Path) -> Result<String, String> {
             let sub = dir.join(name);
             if sub.is_dir() {
                 if let Ok(sub_entries) = std::fs::read_dir(&sub) {
-                    if sub_entries.flatten().any(|e| e.file_name().to_string_lossy().as_ref() == "ecompose.yml") {
+                    if sub_entries
+                        .flatten()
+                        .any(|e| e.file_name().to_string_lossy().as_ref() == "ecompose.yml")
+                    {
                         estate_root = dir.clone();
                         found = true;
                         sub_found = true;
@@ -108,7 +125,9 @@ fn find_estate_root_rust(cwd: &Path) -> Result<String, String> {
         dir = parent;
     }
     if !found {
-        return Err("Could not find ecompose.yml. Run from inside an eco project directory.".to_string());
+        return Err(
+            "Could not find ecompose.yml. Run from inside an eco project directory.".to_string(),
+        );
     }
     Ok(estate_root.display().to_string())
 }
@@ -144,14 +163,20 @@ pub fn run_rust(args: &[String]) -> Result<(), String> {
 
             for dir in &target_dirs {
                 let rel = dir.trim_start_matches(&format!("{estate_root}/"));
-                util::println_stdout(&format!("  {}rm -rf {rel}", if dry_run { "[dry-run] " } else { "" }));
+                util::println_stdout(&format!(
+                    "  {}rm -rf {rel}",
+                    if dry_run { "[dry-run] " } else { "" }
+                ));
                 if !dry_run {
                     let _ = std::fs::remove_dir_all(dir);
                 }
             }
             for file in &hash_files {
                 let rel = file.trim_start_matches(&format!("{estate_root}/"));
-                util::println_stdout(&format!("  {}rm {rel}", if dry_run { "[dry-run] " } else { "" }));
+                util::println_stdout(&format!(
+                    "  {}rm {rel}",
+                    if dry_run { "[dry-run] " } else { "" }
+                ));
                 if !dry_run {
                     let _ = std::fs::remove_file(file);
                 }
@@ -162,6 +187,8 @@ pub fn run_rust(args: &[String]) -> Result<(), String> {
             ));
             Ok(())
         }
-        other => Err(format!("Unknown rust subcommand: {other}\n\nRun \"eco rust help\" for usage.")),
+        other => Err(format!(
+            "Unknown rust subcommand: {other}\n\nRun \"eco rust help\" for usage."
+        )),
     }
 }

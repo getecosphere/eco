@@ -16,7 +16,11 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
     // overwritten). eco does not run `git init` — version control is the
     // user's choice.
     let no_detect = args.iter().any(|a| a == "--no-detect");
-    let dir_arg = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| ".".to_string());
+    let dir_arg = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
     let dir = Path::new(&dir_arg);
     if dir.exists() && !dir.is_dir() {
         return Err(format!("{} is not a directory", dir.display()));
@@ -33,7 +37,11 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
                 .and_then(|c| c.file_name().map(|s| s.to_string_lossy().to_string()))
         })
         .unwrap_or_else(|| "project".to_string());
-    let project = if project.is_empty() { "project".to_string() } else { project };
+    let project = if project.is_empty() {
+        "project".to_string()
+    } else {
+        project
+    };
 
     let ecompose_path = dir.join("ecompose.yml");
     if !ecompose_path.is_file() {
@@ -45,7 +53,12 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
                 ecompose.push_str("\nservices:\n");
                 ecompose.push_str(&block);
                 ecompose.push('\n');
-                println!("Detected {} service: {} ({})", service.name, service.path, service.runtimes.join(", "));
+                println!(
+                    "Detected {} service: {} ({})",
+                    service.name,
+                    service.path,
+                    service.runtimes.join(", ")
+                );
             } else {
                 ecompose.push_str("\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n");
                 println!("No services detected (looked for Cargo.toml/go.mod/pom.xml/package.json/manage.py/app.py/*.csproj). Edit ecompose.yml by hand, or run `eco lxs add <name>@<version>` to compose a registry LXS.\n");
@@ -53,11 +66,15 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
         } else {
             ecompose.push_str("\n# services:\n#   <name>-backend:\n#     lxs: <name>@<version>   # a registry LXS\n#     # path: <relative-dir>     # a source LXS in this project\n");
         }
-        std::fs::write(&ecompose_path, ecompose).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+        std::fs::write(&ecompose_path, ecompose)
+            .map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
     } else {
         // Validate the existing manifest instead of overwriting it.
-        let content = std::fs::read_to_string(&ecompose_path).map_err(|e| format!("read {}: {e}", ecompose_path.display()))?;
-        let project_line = content.lines().any(|l| l.trim_start().starts_with("project:"));
+        let content = std::fs::read_to_string(&ecompose_path)
+            .map_err(|e| format!("read {}: {e}", ecompose_path.display()))?;
+        let project_line = content
+            .lines()
+            .any(|l| l.trim_start().starts_with("project:"));
         if !project_line {
             return Err(format!(
                 "{} exists but has no `project:` line — fix the manifest and run `eco init` again.",
@@ -65,11 +82,16 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
             ));
         }
         match crate::ecompose::read_ecompose(&ecompose_path.display().to_string(), dir) {
-            Ok(_) => println!("{} exists and parses cleanly — leaving it untouched.", ecompose_path.display()),
-            Err(e) => return Err(format!(
+            Ok(_) => println!(
+                "{} exists and parses cleanly — leaving it untouched.",
+                ecompose_path.display()
+            ),
+            Err(e) => {
+                return Err(format!(
                 "{} exists but failed to parse:\n  {e}\nFix the manifest and run `eco init` again.",
                 ecompose_path.display()
-            )),
+            ))
+            }
         }
     }
 
@@ -78,7 +100,11 @@ pub fn run_init(args: &[String]) -> Result<(), String> {
 
     let gitignore = dir.join(".gitignore");
     if !gitignore.is_file() {
-        std::fs::write(&gitignore, ".eco/\ntarget/\nnode_modules/\ndist/\n.next/\n.env\n").map_err(|e| format!("write .gitignore: {e}"))?;
+        std::fs::write(
+            &gitignore,
+            ".eco/\ntarget/\nnode_modules/\ndist/\n.next/\n.env\n",
+        )
+        .map_err(|e| format!("write .gitignore: {e}"))?;
     }
 
     println!("Initialized project {project} in {}/", dir.display());
@@ -117,7 +143,10 @@ pub fn run_tree(args: &[String]) -> Result<(), String> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!("tree exited with code {}", status.code().unwrap_or(-1)))
+        Err(format!(
+            "tree exited with code {}",
+            status.code().unwrap_or(-1)
+        ))
     }
 }
 
@@ -130,7 +159,9 @@ fn update_asset_for_platform() -> Result<String, String> {
         ("linux", "x86_64") => Ok("eco-x86_64-unknown-linux-musl".to_string()),
         ("linux", "aarch64") => Ok("eco-aarch64-unknown-linux-musl".to_string()),
         ("windows", "x86_64") => Ok("eco-x86_64-pc-windows-gnu.exe".to_string()),
-        _ => Err(format!("eco update has no prebuilt asset for {os}/{arch} yet")),
+        _ => Err(format!(
+            "eco update has no prebuilt asset for {os}/{arch} yet"
+        )),
     }
 }
 
@@ -141,7 +172,11 @@ fn tag_from_release_url(url: &str) -> Option<String> {
     let idx = url.find(marker)?;
     let rest = &url[idx + marker.len()..];
     let tag = rest.split('/').next().unwrap_or("").to_string();
-    if tag.is_empty() { None } else { Some(tag) }
+    if tag.is_empty() {
+        None
+    } else {
+        Some(tag)
+    }
 }
 
 // The latest release tag (e.g. "v0.3.2") for getecosphere/eco. Primary source is
@@ -168,7 +203,8 @@ fn latest_release_tag() -> Result<Option<String>, String> {
 
     // Fallback: the download redirect for this platform embeds the latest tag.
     let asset = update_asset_for_platform()?;
-    let redirect_url = format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
+    let redirect_url =
+        format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
     let agent = ureq::AgentBuilder::new().redirects(0).build();
     match agent.get(&redirect_url).set("User-Agent", "eco-cli").call() {
         Ok(resp) => {
@@ -222,8 +258,13 @@ pub fn run_update(_args: &[String]) -> Result<(), String> {
             util::println_stdout(&format!("Already in latest version: eco {current}"));
             return Ok(());
         }
-        Some(tag) => util::println_stdout(&format!("Updating eco {current} → {} ({asset})", tag.trim_start_matches('v'))),
-        None => util::println_stdout(&format!("Updating eco {current} to the latest release ({asset})")),
+        Some(tag) => util::println_stdout(&format!(
+            "Updating eco {current} → {} ({asset})",
+            tag.trim_start_matches('v')
+        )),
+        None => util::println_stdout(&format!(
+            "Updating eco {current} to the latest release ({asset})"
+        )),
     }
 
     let url = format!("https://github.com/getecosphere/eco/releases/latest/download/{asset}");
@@ -236,12 +277,17 @@ pub fn run_update(_args: &[String]) -> Result<(), String> {
             Ok(resp) => {
                 use std::io::Read;
                 let mut buf = Vec::new();
-                resp.into_reader().read_to_end(&mut buf).map_err(|e| format!("read {url}: {e}"))?;
+                resp.into_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(|e| format!("read {url}: {e}"))?;
                 buf
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                return Err(format!("update failed (HTTP {code}): {}", body.chars().take(160).collect::<String>()));
+                return Err(format!(
+                    "update failed (HTTP {code}): {}",
+                    body.chars().take(160).collect::<String>()
+                ));
             }
             Err(ureq::Error::Transport(t)) => return Err(format!("update network error: {t}")),
         }
@@ -249,7 +295,12 @@ pub fn run_update(_args: &[String]) -> Result<(), String> {
 
     // Write to a sibling temp + rename over the running binary (rename is safe
     // on Unix/Windows while the process runs — the old inode stays alive).
-    let tmp = exe.with_extension(format!("{}.new", exe.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()));
+    let tmp = exe.with_extension(format!(
+        "{}.new",
+        exe.extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default()
+    ));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     #[cfg(unix)]
     {
@@ -259,8 +310,14 @@ pub fn run_update(_args: &[String]) -> Result<(), String> {
     }
     std::fs::rename(&tmp, &exe).map_err(|e| format!("replace {}: {e}", exe.display()))?;
     match &latest {
-        Some(tag) => util::println_stdout(&format!("eco updated to {} — version {}. Restart any running eco to use it.", tag.trim_start_matches('v'), tag.trim_start_matches('v'))),
-        None => util::println_stdout("eco updated — restart any running eco to use the new version."),
+        Some(tag) => util::println_stdout(&format!(
+            "eco updated to {} — version {}. Restart any running eco to use it.",
+            tag.trim_start_matches('v'),
+            tag.trim_start_matches('v')
+        )),
+        None => {
+            util::println_stdout("eco updated — restart any running eco to use the new version.")
+        }
     }
     Ok(())
 }
@@ -273,8 +330,20 @@ pub fn run_dev(args: &[String]) -> Result<(), String> {
                 return Err("eco dev flushdns: only supported on macOS".to_string());
             }
             util::println_stdout("Flushing DNS cache...");
-            util::run_command("sudo", &["dscacheutil".to_string(), "-flushcache".to_string()], &util::current_dir())?;
-            util::run_command("sudo", &["killall".to_string(), "-HUP".to_string(), "mDNSResponder".to_string()], &util::current_dir())?;
+            util::run_command(
+                "sudo",
+                &["dscacheutil".to_string(), "-flushcache".to_string()],
+                &util::current_dir(),
+            )?;
+            util::run_command(
+                "sudo",
+                &[
+                    "killall".to_string(),
+                    "-HUP".to_string(),
+                    "mDNSResponder".to_string(),
+                ],
+                &util::current_dir(),
+            )?;
             util::println_stdout("DNS cache flushed.");
             Ok(())
         }

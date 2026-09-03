@@ -28,7 +28,8 @@ fn github_request(
         .set("User-Agent", user_agent)
         .set("X-GitHub-Api-Version", "2022-11-28");
     let req = if let Some(b) = body {
-        req.set("Content-Type", "application/json").send_string(&serde_json::to_string(b).unwrap())
+        req.set("Content-Type", "application/json")
+            .send_string(&serde_json::to_string(b).unwrap())
     } else {
         req.call()
     };
@@ -39,8 +40,11 @@ fn github_request(
                 return Ok(None);
             }
             let text = response.into_string().unwrap_or_default();
-            let payload: Option<serde_json::Value> =
-                if text.trim().is_empty() { None } else { serde_json::from_str(&text).ok() };
+            let payload: Option<serde_json::Value> = if text.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(&text).ok()
+            };
             Ok(payload)
         }
         Err(ureq::Error::Status(code, response)) => {
@@ -83,15 +87,33 @@ pub fn inspect_github_repositories(
 
     let mut infos = Vec::new();
     for name in names {
-        let repo =
-            github_request(&format!("/repos/{login}/{name}"), &token, "GET", None, true, github_agent())?;
+        let repo = github_request(
+            &format!("/repos/{login}/{name}"),
+            &token,
+            "GET",
+            None,
+            true,
+            github_agent(),
+        )?;
         match repo {
             Some(v) => infos.push(GithubRepoInfo {
                 name: name.clone(),
                 exists: true,
-                clone_url: v.get("clone_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                ssh_url: v.get("ssh_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                html_url: v.get("html_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+                clone_url: v
+                    .get("clone_url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                ssh_url: v
+                    .get("ssh_url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                html_url: v
+                    .get("html_url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             }),
             None => infos.push(GithubRepoInfo {
                 name: name.clone(),
@@ -117,7 +139,9 @@ pub struct GithubRepoInfo {
 pub fn create_github_repository(name: &str) -> Result<GithubRepoInfo, String> {
     let token = util::env_var_or("ECO_GITHUB_API_KEY", "");
     if token.is_empty() {
-        return Err("ECO_GITHUB_API_KEY is required to create and push project repositories.".to_string());
+        return Err(
+            "ECO_GITHUB_API_KEY is required to create and push project repositories.".to_string(),
+        );
     }
     let body = serde_json::json!({
         "name": name,
@@ -125,25 +149,45 @@ pub fn create_github_repository(name: &str) -> Result<GithubRepoInfo, String> {
         "auto_init": false,
         "description": format!("eco-managed repository for {name}")
     });
-    let created = github_request("/user/repos", &token, "POST", Some(&body), false, github_agent())?;
+    let created = github_request(
+        "/user/repos",
+        &token,
+        "POST",
+        Some(&body),
+        false,
+        github_agent(),
+    )?;
     let created = created.ok_or_else(|| "GitHub did not return a repository.".to_string())?;
     Ok(GithubRepoInfo {
         name: name.to_string(),
         exists: true,
-        clone_url: created.get("clone_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-        ssh_url: created.get("ssh_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-        html_url: created.get("html_url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+        clone_url: created
+            .get("clone_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ssh_url: created
+            .get("ssh_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
+        html_url: created
+            .get("html_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
 pub fn authenticated_github_url(repository: &GithubRepoInfo) -> String {
     let token = util::env_var_or("ECO_GITHUB_API_KEY", "");
-    repository
-        .clone_url
-        .replacen("https://", &format!("https://x-access-token:{}@", url_encode(&token)), 1)
+    repository.clone_url.replacen(
+        "https://",
+        &format!("https://x-access-token:{}@", url_encode(&token)),
+        1,
+    )
 }
 
 pub fn url_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
-

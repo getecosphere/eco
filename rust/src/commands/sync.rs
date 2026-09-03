@@ -13,8 +13,19 @@ fn declared_engine(service: &ecompose::Service) -> String {
 }
 
 fn mongo_database_name(uri: &str) -> String {
-    let without_query = uri.split('?').next().unwrap_or(uri).split('#').next().unwrap_or(uri);
-    let database = without_query.rsplit('/').next().unwrap_or("").trim().to_string();
+    let without_query = uri
+        .split('?')
+        .next()
+        .unwrap_or(uri)
+        .split('#')
+        .next()
+        .unwrap_or(uri);
+    let database = without_query
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     // minimal percent-decode for common encodings
     database
         .replace("%20", " ")
@@ -53,7 +64,12 @@ fn postgres_connection(env_contents: &str) -> PgConnection {
     let username = util::read_env_value_opt(env_contents, "DATABASE_USERNAME")
         .unwrap_or_else(|| "postgres".to_string());
     let password = util::read_env_value(env_contents, "DATABASE_PASSWORD");
-    PgConnection { database, username, password, url }
+    PgConnection {
+        database,
+        username,
+        password,
+        url,
+    }
 }
 
 struct SyncTarget {
@@ -103,7 +119,9 @@ fn database_targets(
                     .unwrap_or_default();
             }
             if configured_uri.is_empty() {
-                let env_example = std::fs::read_to_string(estate_root.join(&service.path).join(".env.example")).unwrap_or_default();
+                let env_example =
+                    std::fs::read_to_string(estate_root.join(&service.path).join(".env.example"))
+                        .unwrap_or_default();
                 configured_uri = util::read_env_value_opt(&env_example, "MONGODB_URI")
                     .or_else(|| util::read_env_value_opt(&env_example, "MONGO_URI"))
                     .unwrap_or_default();
@@ -129,7 +147,9 @@ fn database_targets(
         let conn = if !remote_env.is_empty() {
             postgres_connection(&remote_env)
         } else {
-            let env_example = std::fs::read_to_string(estate_root.join(&service.path).join(".env.example")).unwrap_or_default();
+            let env_example =
+                std::fs::read_to_string(estate_root.join(&service.path).join(".env.example"))
+                    .unwrap_or_default();
             let mut conn = postgres_connection(&env_example);
             if conn.database.is_empty() {
                 conn.database = format!("{}_{project}", service.name.replace('-', "_"));
@@ -153,7 +173,11 @@ fn database_targets(
 }
 
 fn relative_service_dir(service_path: &str, project: &str) -> String {
-    let mut segments: Vec<String> = service_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let mut segments: Vec<String> = service_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
     if !segments.is_empty() && segments[0] == project {
         segments.remove(0);
     }
@@ -217,7 +241,10 @@ pub fn run_sync_staging(args: &[String]) -> Result<(), String> {
 }
 
 pub fn run_sync(args: &[String]) -> Result<(), String> {
-    if matches!(args.first().map(|s| s.as_str()), Some("help") | Some("--help") | Some("-h")) {
+    if matches!(
+        args.first().map(|s| s.as_str()),
+        Some("help") | Some("--help") | Some("-h")
+    ) {
         sync_help();
         return Ok(());
     }
@@ -238,7 +265,10 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
             i += 1;
             continue;
         }
-        let value = args.get(i + 1).cloned().ok_or_else(|| format!("Missing value for option --{key}"))?;
+        let value = args
+            .get(i + 1)
+            .cloned()
+            .ok_or_else(|| format!("Missing value for option --{key}"))?;
         if value.starts_with("--") {
             return Err(format!("Missing value for option --{key}"));
         }
@@ -246,7 +276,10 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         i += 2;
     }
     if !positionals.is_empty() {
-        return Err(format!("Unexpected positional argument(s): {}", positionals.join(" ")));
+        return Err(format!(
+            "Unexpected positional argument(s): {}",
+            positionals.join(" ")
+        ));
     }
 
     let deployment = ecompose::read_ecompose(".", &util::current_dir())?;
@@ -256,9 +289,15 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         .cloned()
         .or_else(|| ct_meta.get("id").cloned())
         .unwrap_or_else(|| "101".to_string());
-    let ssh_host = options.get("host").cloned().unwrap_or_else(|| "prox".to_string());
+    let ssh_host = options
+        .get("host")
+        .cloned()
+        .unwrap_or_else(|| "prox".to_string());
     let dry_run = options.get("dry-run").map(|v| v == "true").unwrap_or(false);
-    let skip_ssh_check = options.get("skip-ssh-check").map(|v| v == "true").unwrap_or(false);
+    let skip_ssh_check = options
+        .get("skip-ssh-check")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     let to_staging = options.get("staging").map(|v| v == "true").unwrap_or(false);
     let project = ecompose::parse_project_name(&deployment.content);
     let ct_project_root = format!("/opt/projects/{project}");
@@ -268,7 +307,10 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         let env_path = format!("{ct_project_root}/{rel}/.env");
         let test = util::run_capture(
             "ssh",
-            &[ssh_host.clone(), format!("pct exec {ctid} -- test -f {env_path}")],
+            &[
+                ssh_host.clone(),
+                format!("pct exec {ctid} -- test -f {env_path}"),
+            ],
             &util::current_dir(),
         )
         .ok()?;
@@ -277,7 +319,10 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         }
         let cat = util::run_capture(
             "ssh",
-            &[ssh_host.clone(), format!("pct exec {ctid} -- cat {env_path}")],
+            &[
+                ssh_host.clone(),
+                format!("pct exec {ctid} -- cat {env_path}"),
+            ],
             &util::current_dir(),
         )
         .ok()?;
@@ -310,7 +355,9 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
             return Err("--staging requested but ecompose.yml has no staging.ct declared. Add a staging: block (staging.ct: 1000).".to_string());
         }
         if staging_ctid == ctid {
-            return Err(format!("--staging destination CT {staging_ctid} must differ from the prod ct.id."));
+            return Err(format!(
+                "--staging destination CT {staging_ctid} must differ from the prod ct.id."
+            ));
         }
     }
 
@@ -324,14 +371,21 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         if needs_mongo_restore && !util::command_on_path("mongorestore") {
             return Err("mongorestore is not installed locally. Install MongoDB Database Tools (brew install mongodb-database-tools).".to_string());
         }
-        if needs_pg_restore && !util::command_on_path("pg_restore") && libpq_bin_dir("pg_restore").is_empty() {
+        if needs_pg_restore
+            && !util::command_on_path("pg_restore")
+            && libpq_bin_dir("pg_restore").is_empty()
+        {
             return Err("pg_restore is not installed locally. Install PostgreSQL client tools (brew install libpq).".to_string());
         }
     }
 
     if !skip_ssh_check {
         util::print_stdout(&format!("Checking SSH to {ssh_host}… "));
-        let result = util::run_capture("ssh", &[ssh_host.clone(), "echo".to_string(), "ok".to_string()], &util::current_dir());
+        let result = util::run_capture(
+            "ssh",
+            &[ssh_host.clone(), "echo".to_string(), "ok".to_string()],
+            &util::current_dir(),
+        );
         match result {
             Ok(r) if r.code == 0 => util::println_stdout("ok"),
             _ => return Err(format!("Cannot reach {ssh_host} via SSH. Check the hostname or use --skip-ssh-check to skip.")),
@@ -341,7 +395,14 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
     if !dry_run {
         let mut dump_tools = std::collections::BTreeSet::new();
         for t in &targets {
-            dump_tools.insert(if t.engine == "mongo" { "mongodump" } else { "pg_dump" }.to_string());
+            dump_tools.insert(
+                if t.engine == "mongo" {
+                    "mongodump"
+                } else {
+                    "pg_dump"
+                }
+                .to_string(),
+            );
         }
         for tool in &dump_tools {
             let check = util::run_capture(
@@ -352,7 +413,11 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
             if check.map(|r| r.code == 0).unwrap_or(false) {
                 continue;
             }
-            let pkg = if tool == "mongodump" { "mongodb-database-tools" } else { "postgresql-client" };
+            let pkg = if tool == "mongodump" {
+                "mongodb-database-tools"
+            } else {
+                "postgresql-client"
+            };
             return Err(format!(
                 "{tool} is not installed in CT {ctid}. Run \"apt-get install -y {pkg}\" in the CT first."
             ));
@@ -360,18 +425,32 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         if to_staging {
             let mut restore_tools = std::collections::BTreeSet::new();
             for t in &targets {
-                restore_tools.insert(if t.engine == "mongo" { "mongorestore" } else { "pg_restore" }.to_string());
+                restore_tools.insert(
+                    if t.engine == "mongo" {
+                        "mongorestore"
+                    } else {
+                        "pg_restore"
+                    }
+                    .to_string(),
+                );
             }
             for tool in &restore_tools {
                 let check = util::run_capture(
                     "ssh",
-                    &[ssh_host.clone(), format!("pct exec {staging_ctid} -- which {tool}")],
+                    &[
+                        ssh_host.clone(),
+                        format!("pct exec {staging_ctid} -- which {tool}"),
+                    ],
                     &util::current_dir(),
                 );
                 if check.map(|r| r.code == 0).unwrap_or(false) {
                     continue;
                 }
-                let pkg = if tool == "mongorestore" { "mongodb-database-tools" } else { "postgresql-client" };
+                let pkg = if tool == "mongorestore" {
+                    "mongodb-database-tools"
+                } else {
+                    "postgresql-client"
+                };
                 return Err(format!(
                     "{tool} is not installed in staging CT {staging_ctid}. Run \"apt-get install -y {pkg}\" in the CT first."
                 ));
@@ -403,9 +482,7 @@ pub fn run_sync(args: &[String]) -> Result<(), String> {
         let full_pipeline = build_pipeline(target, &ssh_host, &ctid, to_staging, &staging_ctid);
         util::print_stdout(&format!(
             "  {} ({}) [{}]",
-            target.service.name,
-            target.database,
-            target.engine
+            target.service.name, target.database, target.engine
         ));
 
         if dry_run {
@@ -451,7 +528,13 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value))
 }
 
-fn build_pipeline(target: &SyncTarget, ssh_host: &str, ctid: &str, to_staging: bool, staging_ctid: &str) -> String {
+fn build_pipeline(
+    target: &SyncTarget,
+    ssh_host: &str,
+    ctid: &str,
+    to_staging: bool,
+    staging_ctid: &str,
+) -> String {
     if target.engine == "mongo" {
         if to_staging {
             format!(

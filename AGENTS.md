@@ -297,7 +297,7 @@ Registry repo layout:
 
 ## Learning more
 
-- Public docs: https://doc.getecosphere.com (source: `getecosphere/eco_docs`)
+- Public docs: https://docs.getecosphere.com (source: `getecosphere/eco_docs`)
 - LXS Registry: https://github.com/getecosphere/lxs-registry
 - Reference estates: https://github.com/getecosphere/stuff8
 - Proof writeup (9 frameworks composing one auth binary): `docs/proof-metrics.md`

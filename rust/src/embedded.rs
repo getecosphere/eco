@@ -47,10 +47,14 @@ pub fn ensure_bundled() -> Result<PathBuf, String> {
     let root = bundled_root();
     let marker = root.join(".eco-version");
     let version = env!("CARGO_PKG_VERSION");
-    let needs_write = std::fs::read_to_string(&marker).map(|v| v.trim() != version).unwrap_or(true)
-        || BUNDLED
-            .iter()
-            .any(|(name, content)| std::fs::read(root.join(name)).map(|b| b != content.as_bytes()).unwrap_or(true));
+    let needs_write = std::fs::read_to_string(&marker)
+        .map(|v| v.trim() != version)
+        .unwrap_or(true)
+        || BUNDLED.iter().any(|(name, content)| {
+            std::fs::read(root.join(name))
+                .map(|b| b != content.as_bytes())
+                .unwrap_or(true)
+        });
 
     if !needs_write {
         // Verify every file exists; if any is missing, rewrite the whole set.
@@ -100,7 +104,8 @@ pub fn materialize_bundled_scripts(dest: &str) -> Result<(), String> {
     let dir = Path::new(dest);
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     for (name, content) in BUNDLED {
-        std::fs::write(dir.join(name), content).map_err(|e| format!("write {}: {e}", dir.join(name).display()))?;
+        std::fs::write(dir.join(name), content)
+            .map_err(|e| format!("write {}: {e}", dir.join(name).display()))?;
     }
     Ok(())
 }
@@ -129,7 +134,11 @@ pub fn run_bundled_script(
 
     let workspace_root = crate::workspace::find_workspace_root(&original_cwd)?;
     let estate_root = crate::workspace::find_estate_root(&original_cwd)?;
-    let ecology_root = if scope == "estate" { estate_root } else { workspace_root };
+    let ecology_root = if scope == "estate" {
+        estate_root
+    } else {
+        workspace_root
+    };
 
     let mut cmd = Command::new("bash");
     cmd.arg(&script_path);
@@ -146,7 +155,9 @@ pub fn run_bundled_script(
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    let status = cmd.status().map_err(|e| format!("Cannot run {script_name}: {e}"))?;
+    let status = cmd
+        .status()
+        .map_err(|e| format!("Cannot run {script_name}: {e}"))?;
     if !status.success() {
         return Err(crate::util::describe_status(script_name, &status));
     }

@@ -23,8 +23,11 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
 
 pub fn find_estate_root(start_dir: &Path) -> Result<PathBuf, String> {
     let workspace_root = find_workspace_root(start_dir)?;
-    let resolved_start = std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
-    let relative = resolved_start.strip_prefix(&workspace_root).unwrap_or(&resolved_start);
+    let resolved_start =
+        std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
+    let relative = resolved_start
+        .strip_prefix(&workspace_root)
+        .unwrap_or(&resolved_start);
     if relative.as_os_str().is_empty() {
         return Ok(workspace_root);
     }

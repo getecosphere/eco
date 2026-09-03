@@ -154,7 +154,6 @@ pub fn decrypt_secret(key: &[u8], encoded: &str) -> Result<String, String> {
     String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))
 }
 
-
 fn text_val(s: &str) -> rusqlite::types::Value {
     rusqlite::types::Value::from(s.to_string())
 }
@@ -162,7 +161,11 @@ fn text_val(s: &str) -> rusqlite::types::Value {
 fn port_in_use(port: u32) -> bool {
     let cwd = util::current_dir();
     if util::platform() == "linux" {
-        if let Ok(r) = util::run_capture("ss", &["-ltnH".to_string(), format!("sport = :{port}")], &cwd) {
+        if let Ok(r) = util::run_capture(
+            "ss",
+            &["-ltnH".to_string(), format!("sport = :{port}")],
+            &cwd,
+        ) {
             return !r.stdout.trim().is_empty();
         }
         return false;
@@ -170,7 +173,11 @@ fn port_in_use(port: u32) -> bool {
     // macOS: lsof; only true when a LISTEN socket is actually reported
     if let Ok(r) = util::run_capture(
         "lsof",
-        &["-nP".to_string(), format!("-iTCP:{port}"), "-sTCP:LISTEN".to_string()],
+        &[
+            "-nP".to_string(),
+            format!("-iTCP:{port}"),
+            "-sTCP:LISTEN".to_string(),
+        ],
         &cwd,
     ) {
         return r.code == 0 && !r.stdout.trim().is_empty();
@@ -284,7 +291,8 @@ fn rows_as_objects(
     let column_names: Vec<String> = (0..col_count)
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
-    let mut rows = stmt.query(rusqlite::params_from_iter(params.iter().cloned()))
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(params.iter().cloned()))
         .map_err(|e| format!("query: {e}"))?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("step: {e}"))? {
@@ -295,9 +303,15 @@ fn rows_as_objects(
             let json_value = match value {
                 rusqlite::types::ValueRef::Null => serde_json::Value::Null,
                 rusqlite::types::ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
-                rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
-                rusqlite::types::ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).to_string()),
-                rusqlite::types::ValueRef::Blob(b) => serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b)),
+                rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                rusqlite::types::ValueRef::Text(t) => {
+                    serde_json::Value::String(String::from_utf8_lossy(t).to_string())
+                }
+                rusqlite::types::ValueRef::Blob(b) => {
+                    serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+                }
             };
             obj.insert(name, json_value);
         }
@@ -333,8 +347,14 @@ fn range_for(db: &Connection, scope: &str, ty: &str) -> Result<(u32, u32), Strin
         return Ok(found);
     }
     Ok((
-        rows[0].get("min_port").and_then(|v| v.as_i64()).unwrap_or(20000) as u32,
-        rows[0].get("max_port").and_then(|v| v.as_i64()).unwrap_or(27999) as u32,
+        rows[0]
+            .get("min_port")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(20000) as u32,
+        rows[0]
+            .get("max_port")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(27999) as u32,
     ))
 }
 
@@ -476,9 +496,15 @@ pub fn get_or_allocate_port(
             ],
         )?;
         if !existing.is_empty() {
-            let port = existing[0].get("port").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+            let port = existing[0]
+                .get("port")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u32;
             persist(&db, &registry_path)?;
-            return Ok(PortResult { port, created: false });
+            return Ok(PortResult {
+                port,
+                created: false,
+            });
         }
 
         let used = used_ports(&db, scope)?;
@@ -488,7 +514,11 @@ pub fn get_or_allocate_port(
         if let Some(pref) = preferred {
             if !pref.is_empty() && pref.chars().all(|c| c.is_ascii_digit()) {
                 let wanted = pref.parse::<u32>().unwrap_or(0);
-                if wanted >= min_port && wanted <= max_port && !used.contains(&wanted) && !port_in_use(wanted) {
+                if wanted >= min_port
+                    && wanted <= max_port
+                    && !used.contains(&wanted)
+                    && !port_in_use(wanted)
+                {
                     port = Some(wanted);
                 }
             }
@@ -518,7 +548,10 @@ pub fn get_or_allocate_port(
         )
         .map_err(|e| format!("insert port: {e}"))?;
         persist(&db, &registry_path)?;
-        Ok(PortResult { port, created: true })
+        Ok(PortResult {
+            port,
+            created: true,
+        })
     })
 }
 
@@ -540,7 +573,9 @@ pub fn lookup_port(
             text_val(ty),
         ],
     )?;
-    Ok(rows.first().and_then(|r| r.get("port").and_then(|v| v.as_i64()).map(|p| p as u32)))
+    Ok(rows
+        .first()
+        .and_then(|r| r.get("port").and_then(|v| v.as_i64()).map(|p| p as u32)))
 }
 
 pub fn project_has_registry_rows(
@@ -586,8 +621,13 @@ pub fn seed_port(
             &[text_val(scope), rusqlite::types::Value::from(port as i64)],
         )?;
         if !reserved.is_empty() {
-            let label = reserved[0].get("label").and_then(|v| v.as_str()).unwrap_or("reserved");
-            return Err(format!("Port {port} is reserved ({label}) and cannot be adopted."));
+            let label = reserved[0]
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reserved");
+            return Err(format!(
+                "Port {port} is reserved ({label}) and cannot be adopted."
+            ));
         }
 
         let conflict = rows_as_objects(
@@ -596,13 +636,24 @@ pub fn seed_port(
             &[text_val(scope), rusqlite::types::Value::from(port as i64)],
         )?;
         if !conflict.is_empty() {
-            let c_project = conflict[0].get("project").and_then(|v| v.as_str()).unwrap_or("");
-            let c_service = conflict[0].get("service").and_then(|v| v.as_str()).unwrap_or("");
+            let c_project = conflict[0]
+                .get("project")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let c_service = conflict[0]
+                .get("service")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if c_project == project && c_service == service {
                 persist(&db, &registry_path)?;
-                return Ok(PortResult { port, created: false });
+                return Ok(PortResult {
+                    port,
+                    created: false,
+                });
             }
-            return Err(format!("Port {port} is already allocated to {c_project}/{c_service}."));
+            return Err(format!(
+                "Port {port} is already allocated to {c_project}/{c_service}."
+            ));
         }
 
         let existing = rows_as_objects(
@@ -616,9 +667,15 @@ pub fn seed_port(
             ],
         )?;
         if !existing.is_empty() {
-            let port = existing[0].get("port").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+            let port = existing[0]
+                .get("port")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u32;
             persist(&db, &registry_path)?;
-            return Ok(PortResult { port, created: false });
+            return Ok(PortResult {
+                port,
+                created: false,
+            });
         }
 
         db.execute(
@@ -627,7 +684,10 @@ pub fn seed_port(
         )
         .map_err(|e| format!("insert port: {e}"))?;
         persist(&db, &registry_path)?;
-        Ok(PortResult { port, created: true })
+        Ok(PortResult {
+            port,
+            created: true,
+        })
     })
 }
 
@@ -652,8 +712,13 @@ pub fn pin_port(
             &[text_val(scope), rusqlite::types::Value::from(port as i64)],
         )?;
         if !reserved.is_empty() {
-            let label = reserved[0].get("label").and_then(|v| v.as_str()).unwrap_or("reserved");
-            return Err(format!("Port {port} is reserved ({label}) and cannot be assigned."));
+            let label = reserved[0]
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reserved");
+            return Err(format!(
+                "Port {port} is reserved ({label}) and cannot be assigned."
+            ));
         }
         if port < 1 || port > 65535 {
             return Err(format!("Port {port} is not a valid TCP port."));
@@ -668,9 +733,17 @@ pub fn pin_port(
             &[text_val(scope), rusqlite::types::Value::from(port as i64)],
         )?;
         if !conflict.is_empty() {
-            let c_project = conflict[0].get("project").and_then(|v| v.as_str()).unwrap_or("");
-            let c_service = conflict[0].get("service").and_then(|v| v.as_str()).unwrap_or("");
-            return Err(format!("Port {port} is already allocated to {c_project}/{c_service}."));
+            let c_project = conflict[0]
+                .get("project")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let c_service = conflict[0]
+                .get("service")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return Err(format!(
+                "Port {port} is already allocated to {c_project}/{c_service}."
+            ));
         }
 
         let existing = rows_as_objects(
@@ -684,14 +757,20 @@ pub fn pin_port(
             ],
         )?;
         if !existing.is_empty() {
-            let existing_port = existing[0].get("port").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+            let existing_port = existing[0]
+                .get("port")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u32;
             if existing_port != port {
                 return Err(format!(
                     "{project}/{service} already holds port {existing_port}; release it first to change it."
                 ));
             }
             persist(&db, &registry_path)?;
-            return Ok(PortResult { port, created: false });
+            return Ok(PortResult {
+                port,
+                created: false,
+            });
         }
 
         db.execute(
@@ -700,7 +779,10 @@ pub fn pin_port(
         )
         .map_err(|e| format!("insert port: {e}"))?;
         persist(&db, &registry_path)?;
-        Ok(PortResult { port, created: true })
+        Ok(PortResult {
+            port,
+            created: true,
+        })
     })
 }
 
@@ -763,7 +845,9 @@ pub fn rename_project(
             &[text_val(scope), text_val(to)],
         )?;
         if !existing.is_empty() {
-            return Err(format!("Project {to} already owns registry rows; refuse to merge {from} into it."));
+            return Err(format!(
+                "Project {to} already owns registry rows; refuse to merge {from} into it."
+            ));
         }
         db.execute(
             "UPDATE ports SET project = ?1 WHERE scope = ?2 AND project = ?3",
@@ -798,10 +882,7 @@ pub fn list_ports(
     rows_as_objects(&db, sql, &params)
 }
 
-pub fn list_reserved(
-    registry_path: &Path,
-    scope: &str,
-) -> Result<Vec<serde_json::Value>, String> {
+pub fn list_reserved(registry_path: &Path, scope: &str) -> Result<Vec<serde_json::Value>, String> {
     let db = open_db(registry_path)?;
     ensure_reserved(&db, scope)?;
     rows_as_objects(
@@ -833,7 +914,9 @@ pub fn list_dbs(
             if let Some(cipher) = row.get("secret_cipher").and_then(|v| v.as_str()) {
                 if !cipher.is_empty() {
                     if let Ok(plain) = decrypt_secret(&key, cipher) {
-                        row.as_object_mut().unwrap().insert("password".to_string(), serde_json::Value::String(plain));
+                        row.as_object_mut()
+                            .unwrap()
+                            .insert("password".to_string(), serde_json::Value::String(plain));
                     }
                 }
             }
@@ -914,10 +997,29 @@ pub fn record_db(
 /// Read the whole registry regardless of scope (used by dashboard).
 pub fn read_registry_all(
     registry_path: &Path,
-) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>, Vec<serde_json::Value>), String> {
+) -> Result<
+    (
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+    ),
+    String,
+> {
     let db = open_db(registry_path)?;
-    let ports = rows_as_objects(&db, "SELECT * FROM ports ORDER BY scope, project, port", &[])?;
-    let dbs = rows_as_objects(&db, "SELECT * FROM dbs ORDER BY scope, project, service", &[])?;
-    let reserved = rows_as_objects(&db, "SELECT * FROM reserved_ports ORDER BY scope, port", &[])?;
+    let ports = rows_as_objects(
+        &db,
+        "SELECT * FROM ports ORDER BY scope, project, port",
+        &[],
+    )?;
+    let dbs = rows_as_objects(
+        &db,
+        "SELECT * FROM dbs ORDER BY scope, project, service",
+        &[],
+    )?;
+    let reserved = rows_as_objects(
+        &db,
+        "SELECT * FROM reserved_ports ORDER BY scope, port",
+        &[],
+    )?;
     Ok((ports, dbs, reserved))
 }

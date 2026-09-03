@@ -27,7 +27,9 @@ pub fn read_stored_auth() -> Option<StoredAuth> {
     if !path.is_file() {
         return None;
     }
-    std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok())
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 fn write_stored_auth(auth: &StoredAuth) -> Result<(), String> {
@@ -46,11 +48,16 @@ fn write_stored_auth(auth: &StoredAuth) -> Result<(), String> {
 }
 
 fn resolve_api_url() -> String {
-    crate::util::env_var_or("ECO_API_URL", "").trim().trim_end_matches('/').to_string()
+    crate::util::env_var_or("ECO_API_URL", "")
+        .trim()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn resolve_api_key() -> String {
-    crate::util::env_var_or("ECO_API_KEY", "").trim().to_string()
+    crate::util::env_var_or("ECO_API_KEY", "")
+        .trim()
+        .to_string()
 }
 
 /// Returns (api_url, api_key): explicit env wins, else the stored login.
@@ -71,36 +78,57 @@ pub fn resolve_api_credentials() -> Result<(String, String), String> {
 }
 
 fn post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let response = match ureq::post(url).set("User-Agent", "eco-cli").set("Content-Type", "application/json")
+    let response = match ureq::post(url)
+        .set("User-Agent", "eco-cli")
+        .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(30))
         .send_string(&serde_json::to_string(body).unwrap())
     {
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
             let text = r.into_string().unwrap_or_default();
-            return Err(format!("HTTP {code}: {}", text.chars().take(200).collect::<String>()));
+            return Err(format!(
+                "HTTP {code}: {}",
+                text.chars().take(200).collect::<String>()
+            ));
         }
         Err(ureq::Error::Transport(t)) => return Err(format!("network error: {t}")),
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
     if (200..300).contains(&status) {
         Ok(value)
     } else {
-        let msg = value.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string();
+        let msg = value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or(&text)
+            .to_string();
         Err(msg)
     }
 }
 
 fn do_signup(api_url: &str, email: &str, password: &str) -> Result<(), String> {
     let url = format!("{api_url}/v1/account/signup");
-    let result = post_json(&url, &serde_json::json!({"email": email, "password": password}))?;
-    let api_key = result.get("api_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+    let result = post_json(
+        &url,
+        &serde_json::json!({"email": email, "password": password}),
+    )?;
+    let api_key = result
+        .get("api_key")
+        .and_then(|k| k.as_str())
+        .unwrap_or("")
+        .to_string();
     if api_key.is_empty() {
         return Err("signup did not return an API key".to_string());
     }
-    write_stored_auth(&StoredAuth { api_url: api_url.to_string(), api_key: api_key.clone(), email: email.to_string() })?;
+    write_stored_auth(&StoredAuth {
+        api_url: api_url.to_string(),
+        api_key: api_key.clone(),
+        email: email.to_string(),
+    })?;
     println!("Account created for {email} (free tier).");
     println!("API key saved to ~/.eco/auth.json. Run `eco up --remote` in your estate to deploy.");
     Ok(())
@@ -111,7 +139,9 @@ fn readline(prompt: &str) -> Result<String, String> {
     print!("{prompt}");
     std::io::stdout().flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     Ok(line.trim().to_string())
 }
 
@@ -124,15 +154,21 @@ fn read_secret(prompt: &str) -> Result<String, String> {
     let mut line = String::new();
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("sh").args(["-c", "stty -echo"]).status();
+        let _ = std::process::Command::new("sh")
+            .args(["-c", "stty -echo"])
+            .status();
         let read_result = std::io::stdin().read_line(&mut line);
-        let _ = std::process::Command::new("sh").args(["-c", "stty echo"]).status();
+        let _ = std::process::Command::new("sh")
+            .args(["-c", "stty echo"])
+            .status();
         println!();
         read_result.map_err(|e| e.to_string())?;
     }
     #[cfg(not(unix))]
     {
-        std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
     }
     Ok(line.trim().to_string())
 }
@@ -142,7 +178,8 @@ fn read_secret(prompt: &str) -> Result<String, String> {
 // printing the URL for the user to open manually.
 fn command_available(name: &str) -> bool {
     let path = std::env::var("PATH").unwrap_or_default();
-    path.split(':').any(|dir| !dir.is_empty() && std::path::Path::new(dir).join(name).is_file())
+    path.split(':')
+        .any(|dir| !dir.is_empty() && std::path::Path::new(dir).join(name).is_file())
 }
 
 fn open_browser(url: &str) -> bool {
@@ -151,16 +188,27 @@ fn open_browser(url: &str) -> bool {
     } else if cfg!(target_os = "linux") {
         for candidate in ["xdg-open", "sensible-browser", "x-www-browser"] {
             if command_available(candidate) {
-                return std::process::Command::new(candidate).arg(url).spawn().map(|_| true).unwrap_or(false);
+                return std::process::Command::new(candidate)
+                    .arg(url)
+                    .spawn()
+                    .map(|_| true)
+                    .unwrap_or(false);
             }
         }
         return false;
     } else if cfg!(target_os = "windows") {
-        ("rundll32", vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()])
+        (
+            "rundll32",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        )
     } else {
         return false;
     };
-    std::process::Command::new(program).args(&args).spawn().map(|_| true).unwrap_or(false)
+    std::process::Command::new(program)
+        .args(&args)
+        .spawn()
+        .map(|_| true)
+        .unwrap_or(false)
 }
 
 // Browser-based device login: create a pending session, open the sign-in page
@@ -169,10 +217,20 @@ fn open_browser(url: &str) -> bool {
 fn do_device_login(api_url: &str) -> Result<(), String> {
     let create_url = format!("{api_url}/v1/account/device-login");
     let created = post_json(&create_url, &serde_json::json!({}))?;
-    let session_id = created.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let code = created.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let session_id = created
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let code = created
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if session_id.is_empty() || code.is_empty() {
-        return Err("could not start a login session — is the account service reachable?".to_string());
+        return Err(
+            "could not start a login session — is the account service reachable?".to_string(),
+        );
     }
 
     let login_url = format!("{api_url}/v1/account/device-login/{code}");
@@ -190,14 +248,28 @@ fn do_device_login(api_url: &str) -> Result<(), String> {
         match post_json(&status_url, &serde_json::json!({"session_id": session_id})) {
             Ok(status) => match status.get("status").and_then(|s| s.as_str()).unwrap_or("") {
                 "success" => {
-                    let email = status.get("email").and_then(|e| e.as_str()).unwrap_or("").to_string();
-                    let api_key = status.get("api_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
-                    write_stored_auth(&StoredAuth { api_url: api_url.to_string(), api_key, email: email.clone() })?;
+                    let email = status
+                        .get("email")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let api_key = status
+                        .get("api_key")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    write_stored_auth(&StoredAuth {
+                        api_url: api_url.to_string(),
+                        api_key,
+                        email: email.clone(),
+                    })?;
                     println!("\nLogged in as {email}. `eco up --remote` will now deploy.");
                     return Ok(());
                 }
                 "expired" => {
-                    return Err("The login link expired. Run `eco login` to start a new one.".to_string());
+                    return Err(
+                        "The login link expired. Run `eco login` to start a new one.".to_string(),
+                    );
                 }
                 _ => {}
             },
@@ -209,12 +281,23 @@ fn do_device_login(api_url: &str) -> Result<(), String> {
 
 fn do_login(api_url: &str, email: &str, password: &str) -> Result<(), String> {
     let url = format!("{api_url}/v1/account/login");
-    let result = post_json(&url, &serde_json::json!({"email": email, "password": password}))?;
-    let api_key = result.get("api_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
+    let result = post_json(
+        &url,
+        &serde_json::json!({"email": email, "password": password}),
+    )?;
+    let api_key = result
+        .get("api_key")
+        .and_then(|k| k.as_str())
+        .unwrap_or("")
+        .to_string();
     if api_key.is_empty() {
         return Err("login did not return an API key".to_string());
     }
-    write_stored_auth(&StoredAuth { api_url: api_url.to_string(), api_key, email: email.to_string() })?;
+    write_stored_auth(&StoredAuth {
+        api_url: api_url.to_string(),
+        api_key,
+        email: email.to_string(),
+    })?;
     println!("Logged in as {email}. API key saved — `eco up --remote` will now deploy.");
     Ok(())
 }
@@ -224,11 +307,18 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
     let rest = &args[1..];
     let api_url = {
         let url = resolve_api_url();
-        if url.is_empty() { DEFAULT_API_URL.to_string() } else { url }
+        if url.is_empty() {
+            DEFAULT_API_URL.to_string()
+        } else {
+            url
+        }
     };
     match subcommand {
         "signup" => {
-            let email = rest.first().cloned().unwrap_or_else(|| readline("Email: ").unwrap_or_default());
+            let email = rest
+                .first()
+                .cloned()
+                .unwrap_or_else(|| readline("Email: ").unwrap_or_default());
             if email.is_empty() {
                 return Err("usage: eco signup <email>".to_string());
             }
@@ -266,7 +356,10 @@ pub fn run_account(args: &[String]) -> Result<(), String> {
                 println!("Plan for {email} set to {plan}.");
                 Ok(())
             } else {
-                Err("usage: eco plan set <email> <plan>  (free | starter | scale | growth | pro)".to_string())
+                Err(
+                    "usage: eco plan set <email> <plan>  (free | starter | scale | growth | pro)"
+                        .to_string(),
+                )
             }
         }
         "whoami" => match read_stored_auth() {

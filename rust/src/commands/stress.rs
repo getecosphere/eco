@@ -74,7 +74,10 @@ fn parse_options(args: &[String]) -> Result<(StressOptions, Vec<String>), String
             continue;
         }
         let key = arg[2..].to_string();
-        let value = args.get(i + 1).cloned().ok_or_else(|| format!("Missing value for option {arg}"))?;
+        let value = args
+            .get(i + 1)
+            .cloned()
+            .ok_or_else(|| format!("Missing value for option {arg}"))?;
         if value.starts_with("--") {
             return Err(format!("Missing value for option {arg}"));
         }
@@ -162,19 +165,30 @@ export function handleSummary(data) {{
 
 fn download_file(url: &str, dest: &str) -> Result<(), String> {
     let req = ureq::get(url);
-    let response = req.call().map_err(|e| format!("Download failed: {e} from {url}"))?;
+    let response = req
+        .call()
+        .map_err(|e| format!("Download failed: {e} from {url}"))?;
     let mut bytes = Vec::new();
     use std::io::Read;
     let mut reader = response.into_reader();
-    reader.read_to_end(&mut bytes).map_err(|e| format!("read download: {e}"))?;
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read download: {e}"))?;
     std::fs::write(dest, bytes).map_err(|e| format!("write download: {e}"))
 }
 
 fn run_capture_quiet(command: &str, args: &[String], cwd: &Path) -> Result<String, String> {
     let result = util::run_capture(command, args, cwd)?;
     if result.code != 0 {
-        let detail = if !result.stderr.trim().is_empty() { result.stderr.trim() } else { result.stdout.trim() };
-        return Err(format!("{command} exited with code {}: {detail}", result.code));
+        let detail = if !result.stderr.trim().is_empty() {
+            result.stderr.trim()
+        } else {
+            result.stdout.trim()
+        };
+        return Err(format!(
+            "{command} exited with code {}: {detail}",
+            result.code
+        ));
     }
     Ok(result.stdout.trim().to_string())
 }
@@ -182,7 +196,9 @@ fn run_capture_quiet(command: &str, args: &[String], cwd: &Path) -> Result<Strin
 fn ensure_k6() -> Result<String, String> {
     let bin_path = k6_bin_path();
     if std::path::Path::new(&bin_path).exists() {
-        if let Ok(version) = run_capture_quiet(&bin_path, &["version".to_string()], &util::current_dir()) {
+        if let Ok(version) =
+            run_capture_quiet(&bin_path, &["version".to_string()], &util::current_dir())
+        {
             eprintln!("k6 found: {version}");
             return Ok(bin_path);
         }
@@ -203,7 +219,11 @@ fn ensure_k6() -> Result<String, String> {
         })?;
     let url = &download.url;
     let extract = &download.extract;
-    let ext = if url.ends_with(".zip") { ".zip" } else { ".tar.gz" };
+    let ext = if url.ends_with(".zip") {
+        ".zip"
+    } else {
+        ".tar.gz"
+    };
     let archive_path = format!("{}/k6-{K6_VERSION}{ext}", tools_dir());
     std::fs::create_dir_all(tools_dir()).map_err(|e| e.to_string())?;
 
@@ -215,9 +235,27 @@ fn ensure_k6() -> Result<String, String> {
 
     let cwd = util::current_dir();
     let extract_result = if ext == ".zip" {
-        run_capture_quiet("unzip", &["-o".to_string(), archive_path.clone(), "-d".to_string(), tools_dir()], &cwd)
+        run_capture_quiet(
+            "unzip",
+            &[
+                "-o".to_string(),
+                archive_path.clone(),
+                "-d".to_string(),
+                tools_dir(),
+            ],
+            &cwd,
+        )
     } else {
-        run_capture_quiet("tar", &["-xzf".to_string(), archive_path.clone(), "-C".to_string(), tools_dir()], &cwd)
+        run_capture_quiet(
+            "tar",
+            &[
+                "-xzf".to_string(),
+                archive_path.clone(),
+                "-C".to_string(),
+                tools_dir(),
+            ],
+            &cwd,
+        )
     };
     if let Err(e) = extract_result {
         let _ = std::fs::remove_file(&archive_path);
@@ -226,7 +264,9 @@ fn ensure_k6() -> Result<String, String> {
 
     let inner_path = format!("{}/{extract}", tools_dir());
     if !std::path::Path::new(&inner_path).exists() {
-        return Err(format!("k6 binary not found at expected path after extraction: {inner_path}"));
+        return Err(format!(
+            "k6 binary not found at expected path after extraction: {inner_path}"
+        ));
     }
     run_capture_quiet("mv", &[inner_path.clone(), bin_path.clone()], &cwd)?;
     util::make_executable(std::path::Path::new(&bin_path));
@@ -239,7 +279,10 @@ fn ensure_k6() -> Result<String, String> {
 
 pub fn run_stress(args: &[String]) -> Result<(), String> {
     let (options, positionals) = parse_options(args)?;
-    let input = positionals.first().cloned().unwrap_or_else(|| ".".to_string());
+    let input = positionals
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
 
     let hostname;
     let mut file_path = String::new();
@@ -254,7 +297,8 @@ pub fn run_stress(args: &[String]) -> Result<(), String> {
 
     if hostname.is_empty() {
         return Err(
-            "No hostname found. Set expose.hostname in ecompose.yml or pass --hostname.".to_string()
+            "No hostname found. Set expose.hostname in ecompose.yml or pass --hostname."
+                .to_string(),
         );
     }
 
@@ -275,11 +319,19 @@ pub fn run_stress(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    eprintln!("Stress-testing {target_url}\n  VUs: {}  ramp-up: {}  duration: {}\n", options.vus, options.ramp_up, options.duration);
+    eprintln!(
+        "Stress-testing {target_url}\n  VUs: {}  ramp-up: {}  duration: {}\n",
+        options.vus, options.ramp_up, options.duration
+    );
 
     let k6 = ensure_k6()?;
     let script_path = format!("{}/stress-test.js", tools_dir());
-    let script = k6_script(&target_url, &options.vus, &options.duration, &options.ramp_up);
+    let script = k6_script(
+        &target_url,
+        &options.vus,
+        &options.duration,
+        &options.ramp_up,
+    );
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
 
     eprintln!("Running k6...\n");
@@ -291,7 +343,10 @@ pub fn run_stress(args: &[String]) -> Result<(), String> {
         .status()
         .map_err(|e| format!("k6: {e}"))?;
     if !status.success() {
-        return Err(format!("k6 exited with code {}", status.code().unwrap_or(-1)));
+        return Err(format!(
+            "k6 exited with code {}",
+            status.code().unwrap_or(-1)
+        ));
     }
     Ok(())
 }

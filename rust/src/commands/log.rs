@@ -17,7 +17,11 @@ const GRAFANA_PORT: &str = "3000";
 const LOKI_PORT: &str = "3100";
 
 fn log_dir() -> PathBuf {
-    util::env_var_or("LOG_DATA_DIR", &format!("{}/.eco/logging", util::home_dir())).into()
+    util::env_var_or(
+        "LOG_DATA_DIR",
+        &format!("{}/.eco/logging", util::home_dir()),
+    )
+    .into()
 }
 
 fn pid_dir() -> PathBuf {
@@ -143,7 +147,10 @@ fn start_loop(name: &str, cmd: &[String], stdout: Option<&Path>) -> Result<(), S
     }
     let logfile = log_dir().join(format!("{name}.log"));
     let mut child = Command::new("sh");
-    child.arg("-c").arg(loop_command(cmd, stdout.map(|p| p.to_string_lossy().into_owned())));
+    child.arg("-c").arg(loop_command(
+        cmd,
+        stdout.map(|p| p.to_string_lossy().into_owned()),
+    ));
     if let Some(f) = stdout {
         let target = if f.exists() {
             f.to_string_lossy().into_owned()
@@ -168,7 +175,10 @@ fn start_loop(name: &str, cmd: &[String], stdout: Option<&Path>) -> Result<(), S
 fn loop_command(cmd: &[String], fifo: Option<String>) -> String {
     let joined = cmd.join(" ");
     match fifo {
-        Some(f) => format!("while true; do {joined} 1>>{f} 2>>{} ; sleep 2; done", log_dir().join("generator.log").display()),
+        Some(f) => format!(
+            "while true; do {joined} 1>>{f} 2>>{} ; sleep 2; done",
+            log_dir().join("generator.log").display()
+        ),
         None => format!("while true; do {joined} ; sleep 2; done"),
     }
 }
@@ -212,7 +222,9 @@ fn run_dev(args: &[String]) -> Result<(), String> {
         let gen_cmd = vec!["sh".to_string(), "-c".to_string(), gen.to_string()];
         start_loop("generator", &gen_cmd, Some(&fifo))?;
     }
-    println!("[eco log] Grafana: http://127.0.0.1:{GRAFANA_PORT}  (anonymous; Live Logs dashboard)");
+    println!(
+        "[eco log] Grafana: http://127.0.0.1:{GRAFANA_PORT}  (anonymous; Live Logs dashboard)"
+    );
     println!("[eco log] Loki:    http://127.0.0.1:{LOKI_PORT}");
     println!(
         "[eco log] FIFO:    {}  — write dev logs here to enter the pipeline",
@@ -256,7 +268,10 @@ pub fn ensure_dev_log_stack() -> Result<(), String> {
     let agent_cmd = vec![
         "env".to_string(),
         "MODE=agent".to_string(),
-        format!("STREAM={}", util::env_var_or("ECO_LOG_STREAM", "assessment")),
+        format!(
+            "STREAM={}",
+            util::env_var_or("ECO_LOG_STREAM", "assessment")
+        ),
         format!("LOG_SOURCE=tail:{}", fifo.display()),
         format!("LOKI_URL=http://127.0.0.1:{LOKI_PORT}"),
         bin,
@@ -295,10 +310,7 @@ pub fn run_log(args: &[String]) -> Result<(), String> {
                 "victoria-logs-v".to_string(),
                 format!("{}/bin/grafana", log_dir().display()),
             ] {
-                let _ = Command::new("pkill")
-                    .args(["-9", "-f"])
-                    .arg(&pat)
-                    .status();
+                let _ = Command::new("pkill").args(["-9", "-f"]).arg(&pat).status();
             }
             println!("[eco log] stack stopped");
             Ok(())

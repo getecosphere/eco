@@ -67,6 +67,7 @@ pub fn run_install(args: &[String]) -> Result<(), String> {
                 Ok(())
             } else {
                 Err(crate::util::describe_status(script_name, &status))
-            }        }
+            }
+        }
     }
 }

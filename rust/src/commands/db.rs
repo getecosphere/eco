@@ -22,7 +22,11 @@ fn db_help() {
     );
 }
 
-fn api_post_json(url: &str, api_key: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn api_post_json(
+    url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let response = match ureq::post(url)
         .set("Authorization", &format!("Bearer {api_key}"))
         .set("Content-Type", "application/json")
@@ -35,11 +39,16 @@ fn api_post_json(url: &str, api_key: &str, body: &serde_json::Value) -> Result<s
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    let v: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
     if (200..300).contains(&status) {
         Ok(v)
     } else {
-        Err(v.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string())
+        Err(v
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or(&text)
+            .to_string())
     }
 }
 
@@ -55,17 +64,23 @@ fn api_get_json(url: &str, api_key: &str) -> Result<serde_json::Value, String> {
     };
     let status = response.status();
     let text = response.into_string().unwrap_or_default();
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
+    let v: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"raw": text}));
     if (200..300).contains(&status) {
         Ok(v)
     } else {
-        Err(v.get("error").and_then(|e| e.as_str()).unwrap_or(&text).to_string())
+        Err(v
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or(&text)
+            .to_string())
     }
 }
 
 fn find_ecompose() -> Result<(PathBuf, String, String), String> {
     let cwd = util::current_dir();
-    let file = ecompose::resolve_ecompose_file("", &cwd).or_else(|_| ecompose::resolve_ecompose_file(".", &cwd))?;
+    let file = ecompose::resolve_ecompose_file("", &cwd)
+        .or_else(|_| ecompose::resolve_ecompose_file(".", &cwd))?;
     let content = ecompose::read_text_file(&file).unwrap_or_default();
     let project = ecompose::parse_project_name(&content);
     if project.is_empty() {
@@ -156,7 +171,11 @@ fn mark_source_services(content: &str, db_type: &str, uri_key: &str) -> String {
                     // the other DB's key when switching mongo <-> postgres)
                     if i < lines.len() && lines[i].trim_start().starts_with("secrets:") {
                         let body = lines[i].trim_start().trim_start_matches("secrets:");
-                        let other = if uri_key == "MONGODB_URI" { "DATABASE_URL" } else { "MONGODB_URI" };
+                        let other = if uri_key == "MONGODB_URI" {
+                            "DATABASE_URL"
+                        } else {
+                            "MONGODB_URI"
+                        };
                         if let Some(list) = body.trim().trim_start_matches('[').strip_suffix(']') {
                             let mut items: Vec<&str> = list
                                 .split(',')
@@ -200,11 +219,23 @@ pub fn run_storage(args: &[String]) -> Result<(), String> {
         }
         "list" => {
             let (api_url, api_key) = resolve_api_credentials()?;
-            let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+            let api_url = if api_url.is_empty() {
+                "https://api.getecosphere.com".to_string()
+            } else {
+                api_url
+            };
             let base = api_url.trim_end_matches('/').to_string();
             let v = api_get_json(&format!("{base}/v1/storage"), &api_key)?;
-            println!("Plan: {}", v.get("plan").and_then(|p| p.as_str()).unwrap_or("free"));
-            println!("  storage quota: {} GB", v.get("storage_quota_gb").and_then(|x| x.as_u64()).unwrap_or(0));
+            println!(
+                "Plan: {}",
+                v.get("plan").and_then(|p| p.as_str()).unwrap_or("free")
+            );
+            println!(
+                "  storage quota: {} GB",
+                v.get("storage_quota_gb")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0)
+            );
             if let Some(buckets) = v.get("buckets").and_then(|b| b.as_array()) {
                 if buckets.is_empty() {
                     println!("  (no buckets yet — `eco storage add`)");
@@ -222,19 +253,43 @@ pub fn run_storage(args: &[String]) -> Result<(), String> {
         "add" => {
             let (ecompose_path, project, content) = find_ecompose()?;
             let (api_url, api_key) = resolve_api_credentials()?;
-            let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+            let api_url = if api_url.is_empty() {
+                "https://api.getecosphere.com".to_string()
+            } else {
+                api_url
+            };
             let base = api_url.trim_end_matches('/').to_string();
-            let v = api_post_json(&format!("{base}/v1/storage"), &api_key, &serde_json::json!({"project": project}))?;
-            let bucket = v.get("bucket").and_then(|b| b.as_str()).unwrap_or("").to_string();
+            let v = api_post_json(
+                &format!("{base}/v1/storage"),
+                &api_key,
+                &serde_json::json!({"project": project}),
+            )?;
+            let bucket = v
+                .get("bucket")
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_string();
             if bucket.is_empty() {
                 return Err("storage allocation did not return a bucket".to_string());
             }
             // Grant the S3_* env to every source service so the app can upload.
-            const S3_GRANTS: [&str; 5] = ["S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"];
+            const S3_GRANTS: [&str; 5] = [
+                "S3_ENDPOINT",
+                "S3_REGION",
+                "S3_BUCKET",
+                "S3_ACCESS_KEY",
+                "S3_SECRET_KEY",
+            ];
             let updated = grant_source_services(&content, &S3_GRANTS);
-            std::fs::write(&ecompose_path, updated).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
-            util::println_stdout(&format!("Managed storage bucket `{bucket}` allocated for {project}"));
-            util::println_stdout(&format!("S3_* grants added to source services in {}", ecompose_path.display()));
+            std::fs::write(&ecompose_path, updated)
+                .map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+            util::println_stdout(&format!(
+                "Managed storage bucket `{bucket}` allocated for {project}"
+            ));
+            util::println_stdout(&format!(
+                "S3_* grants added to source services in {}",
+                ecompose_path.display()
+            ));
             util::println_stdout("Next: `eco up dev` (local) or `eco up --remote` — the bucket is provisioned on deploy.");
             Ok(())
         }
@@ -279,7 +334,11 @@ fn grant_source_services(content: &str, keys: &[&str]) -> String {
                     if i < lines.len() && lines[i].trim_start().starts_with("secrets:") {
                         let body = lines[i].trim_start().trim_start_matches("secrets:");
                         if let Some(list) = body.trim().trim_start_matches('[').strip_suffix(']') {
-                            existing = list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                            existing = list
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
                         }
                         i += 1;
                     }
@@ -314,12 +373,22 @@ pub fn run_db(args: &[String]) -> Result<(), String> {
         }
         "list" => {
             let (api_url, api_key) = resolve_api_credentials()?;
-            let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+            let api_url = if api_url.is_empty() {
+                "https://api.getecosphere.com".to_string()
+            } else {
+                api_url
+            };
             let base = api_url.trim_end_matches('/').to_string();
             let v = api_get_json(&format!("{base}/v1/db"), &api_key)?;
             let plan = v.get("plan").and_then(|p| p.as_str()).unwrap_or("free");
             println!("Plan: {plan}");
-            println!("  managed mongo quota: {}   postgres quota: {}", v.get("mongo_quota").and_then(|x| x.as_u64()).unwrap_or(0), v.get("postgres_quota").and_then(|x| x.as_u64()).unwrap_or(0));
+            println!(
+                "  managed mongo quota: {}   postgres quota: {}",
+                v.get("mongo_quota").and_then(|x| x.as_u64()).unwrap_or(0),
+                v.get("postgres_quota")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0)
+            );
             if let Some(dbs) = v.get("databases").and_then(|d| d.as_array()) {
                 if dbs.is_empty() {
                     println!("  (no managed databases yet — `eco db add mongo|postgres`)");
@@ -341,23 +410,44 @@ pub fn run_db(args: &[String]) -> Result<(), String> {
             }
             let (ecompose_path, project, content) = find_ecompose()?;
             let (api_url, api_key) = resolve_api_credentials()?;
-            let api_url = if api_url.is_empty() { "https://api.getecosphere.com".to_string() } else { api_url };
+            let api_url = if api_url.is_empty() {
+                "https://api.getecosphere.com".to_string()
+            } else {
+                api_url
+            };
             let base = api_url.trim_end_matches('/').to_string();
 
             // Record with the agent first (quota + one-core-DB enforcement).
-            let uri_key = if db_type == "mongo" { "MONGODB_URI" } else { "DATABASE_URL" };
-            match api_post_json(&format!("{base}/v1/db"), &api_key, &serde_json::json!({"project": project, "db_type": db_type})) {
+            let uri_key = if db_type == "mongo" {
+                "MONGODB_URI"
+            } else {
+                "DATABASE_URL"
+            };
+            match api_post_json(
+                &format!("{base}/v1/db"),
+                &api_key,
+                &serde_json::json!({"project": project, "db_type": db_type}),
+            ) {
                 Ok(v) => {
-                    util::println_stdout(&format!("Managed {db_type} recorded for {project} ({})", v.get("plan").and_then(|p| p.as_str()).unwrap_or("free")));
+                    util::println_stdout(&format!(
+                        "Managed {db_type} recorded for {project} ({})",
+                        v.get("plan").and_then(|p| p.as_str()).unwrap_or("free")
+                    ));
                 }
                 Err(e) => return Err(e),
             }
 
             // Declare it in ecompose.yml (never by hand).
-            let updated = mark_source_services(&upsert_data_block(&content, &db_type), &db_type, uri_key);
-            std::fs::write(&ecompose_path, updated).map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
+            let updated =
+                mark_source_services(&upsert_data_block(&content, &db_type), &db_type, uri_key);
+            std::fs::write(&ecompose_path, updated)
+                .map_err(|e| format!("write {}: {e}", ecompose_path.display()))?;
 
-            util::println_stdout(&format!("Declared data: {} in {}", db_type, ecompose_path.display()));
+            util::println_stdout(&format!(
+                "Declared data: {} in {}",
+                db_type,
+                ecompose_path.display()
+            ));
             util::println_stdout(&format!("Next: `eco up dev` (local) or `eco up --remote` — the database + user are provisioned on deploy."));
             Ok(())
         }

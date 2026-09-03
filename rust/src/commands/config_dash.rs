@@ -27,8 +27,8 @@ use std::sync::Mutex;
 
 use tiny_http::{Header, Response, Server};
 
-use crate::{ecompose, util};
 use crate::commands::lxs::{self, LxsField, LxsManifest};
+use crate::{ecompose, util};
 
 /// Ecosphere favicons (same as the getecosphere.com estate frontend), embedded
 /// so the dashboard is self-contained. PNG — the estate's favicon.svg is
@@ -1030,8 +1030,16 @@ fn estate_favicon(dir: &Path) -> Option<(Vec<u8>, &'static str)> {
         if let Ok(entries) = std::fs::read_dir(&cur) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-                if name == "node_modules" || name == "build" || name == "target" || name == ".svelte-kit" || name == ".git" {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                if name == "node_modules"
+                    || name == "build"
+                    || name == "target"
+                    || name == ".svelte-kit"
+                    || name == ".git"
+                {
                     continue;
                 }
                 if p.is_dir() {
@@ -1060,7 +1068,10 @@ fn estate_favicon(dir: &Path) -> Option<(Vec<u8>, &'static str)> {
 /// Resolve a registry address for the dashboard: estate state wins, then the
 /// local mirror (ECO_LXS_REGISTRY or the default path), then the GitHub default.
 fn registry_address(estate_root: &Path) -> Option<String> {
-    if let Some(reg) = lxs::read_estate_state(estate_root).map(|s| s.registry).filter(|r| !r.is_empty()) {
+    if let Some(reg) = lxs::read_estate_state(estate_root)
+        .map(|s| s.registry)
+        .filter(|r| !r.is_empty())
+    {
         return Some(reg);
     }
     if let Ok(reg) = std::env::var("ECO_LXS_REGISTRY") {
@@ -1071,7 +1082,10 @@ fn registry_address(estate_root: &Path) -> Option<String> {
     None
 }
 
-fn load_lxs_manifest(service: &ecompose::Service, address: Option<&str>) -> Result<Option<LxsManifest>, String> {
+fn load_lxs_manifest(
+    service: &ecompose::Service,
+    address: Option<&str>,
+) -> Result<Option<LxsManifest>, String> {
     let (manifest, _version) = lxs::fetch_lxs_manifest(&service.lxs, address)?;
     Ok(Some(manifest))
 }
@@ -1104,7 +1118,10 @@ fn fields_for(manifest: &LxsManifest) -> Vec<(String, LxsField)> {
 fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Value, String> {
     let services = ecompose::parse_services(content);
     let project = ecompose::parse_project_name(content);
-    let hostname = ecompose::parse_estates(content).first().map(|e| e.hostname.clone()).unwrap_or_default();
+    let hostname = ecompose::parse_estates(content)
+        .first()
+        .map(|e| e.hostname.clone())
+        .unwrap_or_default();
     let registry = registry_address(estate_root);
     let mut svc_values = Vec::new();
     for svc in &services {
@@ -1112,7 +1129,14 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
         entry.insert("name".into(), serde_json::Value::String(svc.name.clone()));
         entry.insert("lxs".into(), serde_json::Value::String(svc.lxs.clone()));
         // core domain (source path:) vs reusable LXS (registry binary).
-        entry.insert("kind".into(), serde_json::Value::String(if svc.lxs.is_empty() { "core".to_string() } else { "lxs".to_string() }));
+        entry.insert(
+            "kind".into(),
+            serde_json::Value::String(if svc.lxs.is_empty() {
+                "core".to_string()
+            } else {
+                "lxs".to_string()
+            }),
+        );
         let mut config_map = serde_json::Map::new();
         for (k, v) in &svc.config {
             config_map.insert(k.clone(), serde_json::Value::String(v.clone()));
@@ -1140,20 +1164,51 @@ fn build_estate_json(estate_root: &Path, content: &str) -> Result<serde_json::Va
                 continue;
             }
         };
-        entry.insert("publisher".into(), serde_json::Value::String(manifest.publisher.clone()));
+        entry.insert(
+            "publisher".into(),
+            serde_json::Value::String(manifest.publisher.clone()),
+        );
         let fields = fields_for(&manifest);
         let mut arr = Vec::new();
         for (key, f) in fields {
             let mut fm = serde_json::Map::new();
             fm.insert("key".into(), serde_json::Value::String(key));
-            fm.insert("type".into(), serde_json::Value::String(if f.r#type.is_empty() { "string".to_string() } else { f.r#type.clone() }));
-            fm.insert("default".into(), serde_json::Value::String(f.default.clone()));
-            fm.insert("description".into(), serde_json::Value::String(f.description.clone()));
+            fm.insert(
+                "type".into(),
+                serde_json::Value::String(if f.r#type.is_empty() {
+                    "string".to_string()
+                } else {
+                    f.r#type.clone()
+                }),
+            );
+            fm.insert(
+                "default".into(),
+                serde_json::Value::String(f.default.clone()),
+            );
+            fm.insert(
+                "description".into(),
+                serde_json::Value::String(f.description.clone()),
+            );
             fm.insert("group".into(), serde_json::Value::String(f.group.clone()));
-            fm.insert("secret".into(), serde_json::Value::Bool(f.secret || f.r#type == "secret"));
-            fm.insert("managed".into(), serde_json::Value::String(f.managed.clone()));
+            fm.insert(
+                "secret".into(),
+                serde_json::Value::Bool(f.secret || f.r#type == "secret"),
+            );
+            fm.insert(
+                "managed".into(),
+                serde_json::Value::String(f.managed.clone()),
+            );
             fm.insert("required".into(), serde_json::Value::Bool(f.required));
-            fm.insert("choices".into(), serde_json::Value::Array(f.choices.iter().cloned().map(serde_json::Value::String).collect()));
+            fm.insert(
+                "choices".into(),
+                serde_json::Value::Array(
+                    f.choices
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
             arr.push(serde_json::Value::Object(fm));
         }
         entry.insert("fields".into(), serde_json::Value::Array(arr));
@@ -1210,7 +1265,9 @@ fn local_dev_url(estate_root: &Path, project: &str, services: &[ecompose::Servic
 
     // 1. Eco dev port registry (real allocated dev ports).
     for svc in &preferred {
-        if let Ok(Some(port)) = crate::registry::lookup_port(&registry_path, &scope, project, &svc.name, "service") {
+        if let Ok(Some(port)) =
+            crate::registry::lookup_port(&registry_path, &scope, project, &svc.name, "service")
+        {
             return format!("http://localhost:{port}");
         }
     }
@@ -1228,10 +1285,16 @@ fn local_dev_url(estate_root: &Path, project: &str, services: &[ecompose::Servic
     //    command mentions the project name), preferring frontend-ish ones.
     let live = live_listening_ports();
     let proj_l = project.to_lowercase();
-    let for_project: Vec<&(String, u16)> = live.iter().filter(|(cmd, _)| cmd.to_lowercase().contains(&proj_l)).collect();
+    let for_project: Vec<&(String, u16)> = live
+        .iter()
+        .filter(|(cmd, _)| cmd.to_lowercase().contains(&proj_l))
+        .collect();
     for svc in &preferred {
         let name_l = svc.name.to_lowercase();
-        if let Some((_, port)) = for_project.iter().find(|(cmd, _)| cmd.to_lowercase().contains(&name_l)) {
+        if let Some((_, port)) = for_project
+            .iter()
+            .find(|(cmd, _)| cmd.to_lowercase().contains(&name_l))
+        {
             return format!("http://localhost:{port}");
         }
     }
@@ -1248,7 +1311,10 @@ fn local_dev_url(estate_root: &Path, project: &str, services: &[ecompose::Servic
 
 /// `lsof -nP -iTCP -sTCP:LISTEN -Fc -Fn` → (command, port) pairs.
 fn live_listening_ports() -> Vec<(String, u16)> {
-    let out = match std::process::Command::new("lsof").args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fc", "-Fn"]).output() {
+    let out = match std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fc", "-Fn"])
+        .output()
+    {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
     };
@@ -1272,28 +1338,37 @@ fn live_listening_ports() -> Vec<(String, u16)> {
 fn dev_session_running() -> bool {
     let mut guard = DEV_SESSION.lock().unwrap();
     match guard.as_mut() {
-        Some(s) => {
-            match s.child.try_wait() {
-                Ok(Some(_status)) => {
-                    guard.take();
-                    false
-                }
-                _ => true,
+        Some(s) => match s.child.try_wait() {
+            Ok(Some(_status)) => {
+                guard.take();
+                false
             }
-        }
+            _ => true,
+        },
         None => false,
     }
 }
 
 fn start_dev_session(dir: &Path) -> Result<(), String> {
     if dev_session_running() {
-        return Err("eco up dev already running — wait for it to finish (or stop it in a terminal)".to_string());
+        return Err(
+            "eco up dev already running — wait for it to finish (or stop it in a terminal)"
+                .to_string(),
+        );
     }
     let project = std::fs::read_to_string(dir.join("ecompose.yml"))
         .map(|c| ecompose::parse_project_name(&c))
         .unwrap_or_default();
-    let log_path = std::env::temp_dir().join(format!("eco-genie-dev-{}.log", if project.is_empty() { "estate" } else { &project }));
-    let file = std::fs::File::create(&log_path).map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
+    let log_path = std::env::temp_dir().join(format!(
+        "eco-genie-dev-{}.log",
+        if project.is_empty() {
+            "estate"
+        } else {
+            &project
+        }
+    ));
+    let file = std::fs::File::create(&log_path)
+        .map_err(|e| format!("cannot write {}: {e}", log_path.display()))?;
     let child = Command::new(std::env::current_exe().map_err(|e| format!("current exe: {e}"))?)
         .args(["up", "dev", "--no-lxs-check"])
         .current_dir(dir)
@@ -1351,7 +1426,10 @@ fn pm2_estate_apps(project: &str) -> Vec<(String, String)> {
     for a in arr {
         if let Some(name) = a["name"].as_str() {
             if name.starts_with(&prefix) {
-                let status = a["pm2_env"]["status"].as_str().unwrap_or("unknown").to_string();
+                let status = a["pm2_env"]["status"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
                 out.push((name.to_string(), status));
             }
         }
@@ -1404,11 +1482,20 @@ fn auth_base_url() -> Option<String> {
     )
 }
 fn profile_base_url() -> Option<String> {
-    detect_dev_url("ECO_GENIE_PROFILE_URL", &["profile-backend", "profile_backend", "profile"])
+    detect_dev_url(
+        "ECO_GENIE_PROFILE_URL",
+        &["profile-backend", "profile_backend", "profile"],
+    )
 }
 
 /// Forward a request to a detected dev LXS and return its raw response.
-fn forward(server: &str, path: &str, method: &str, bearer: Option<&str>, body: Option<&str>) -> Result<(u16, String), String> {
+fn forward(
+    server: &str,
+    path: &str,
+    method: &str,
+    bearer: Option<&str>,
+    body: Option<&str>,
+) -> Result<(u16, String), String> {
     let url = format!("{server}{path}");
     let mut req = ureq::request(method, &url);
     if let Some(t) = bearer {
@@ -1419,7 +1506,9 @@ fn forward(server: &str, path: &str, method: &str, bearer: Option<&str>, body: O
     }
     let resp = match req.send_string(body.unwrap_or("")) {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, r)) => return Ok((code as u16, r.into_string().unwrap_or_default())),
+        Err(ureq::Error::Status(code, r)) => {
+            return Ok((code as u16, r.into_string().unwrap_or_default()))
+        }
         Err(e) => return Err(format!("auth upstream unreachable: {e}")),
     };
     let status = resp.status();
@@ -1435,12 +1524,19 @@ fn dashboard_me(bearer: Option<&str>) -> Result<(u16, String), String> {
     if !(200..300).contains(&status) {
         return Ok((status, text));
     }
-    let user: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("bad auth session: {e}"))?;
+    let user: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("bad auth session: {e}"))?;
     let user_id = user["id"].as_str().unwrap_or("");
     let mut avatar_url = String::new();
     if let Some(profile) = profile_base_url() {
         if !user_id.is_empty() {
-            if let Ok((_, ptext)) = forward(&profile, &format!("/api/users/{user_id}"), "GET", bearer, None) {
+            if let Ok((_, ptext)) = forward(
+                &profile,
+                &format!("/api/users/{user_id}"),
+                "GET",
+                bearer,
+                None,
+            ) {
                 if let Ok(pjson) = serde_json::from_str::<serde_json::Value>(&ptext) {
                     if let Some(a) = pjson["avatarUrl"].as_str() {
                         avatar_url = a.to_string();
@@ -1449,10 +1545,14 @@ fn dashboard_me(bearer: Option<&str>) -> Result<(u16, String), String> {
             }
         }
     }
-    Ok((200, serde_json::json!({ "user": user, "avatarUrl": avatar_url }).to_string()))
+    Ok((
+        200,
+        serde_json::json!({ "user": user, "avatarUrl": avatar_url }).to_string(),
+    ))
 }
 
-fn dev_session_status(dir: &Path) -> serde_json::Value {    let mut running = false;
+fn dev_session_status(dir: &Path) -> serde_json::Value {
+    let mut running = false;
     let mut done = false;
     let mut exited_ok = false;
     let mut log_tail: Vec<String> = Vec::new();
@@ -1506,7 +1606,11 @@ fn dev_session_status(dir: &Path) -> serde_json::Value {    let mut running = fa
     })
 }
 
-fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<String, String>) -> Result<String, String> {
+fn apply_config_to_manifest(
+    content: &str,
+    service: &str,
+    config: &HashMap<String, String>,
+) -> Result<String, String> {
     let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
     let mut in_services = false;
     let mut svc_start: Option<usize> = None;
@@ -1548,7 +1652,11 @@ fn apply_config_to_manifest(content: &str, service: &str, config: &HashMap<Strin
         keys.sort();
         for k in keys {
             let v = config[k].trim();
-            let rendered = if v.contains(':') || v.contains('#') || v.chars().any(|c| !c.is_ascii_graphic() || c == '"' || c == '\'') {
+            let rendered = if v.contains(':')
+                || v.contains('#')
+                || v.chars()
+                    .any(|c| !c.is_ascii_graphic() || c == '"' || c == '\'')
+            {
                 format!("      {k}: {:?}", v)
             } else {
                 format!("      {k}: \"{v}\"")
@@ -1626,12 +1734,19 @@ fn apply_secret(estate_root: &Path, service: &str, key: &str, value: &str) -> Re
     };
     lines.retain(|l| !l.starts_with(&format!("{key}=")));
     lines.push(format!("{key}={value}"));
-    std::fs::write(&env_path, lines.join("\n") + "\n").map_err(|e| format!("write {}: {e}", env_path.display()))
+    std::fs::write(&env_path, lines.join("\n") + "\n")
+        .map_err(|e| format!("write {}: {e}", env_path.display()))
 }
 
 /// Replace top-level scalar keys (project, main, description, hostname under
 /// estates). Leaves everything else untouched.
-fn apply_general(content: &str, project: &str, main: &str, hostname: &str, description: &str) -> Result<String, String> {
+fn apply_general(
+    content: &str,
+    project: &str,
+    main: &str,
+    hostname: &str,
+    description: &str,
+) -> Result<String, String> {
     if project.trim().is_empty() {
         return Err("project name cannot be empty".to_string());
     }
@@ -1688,20 +1803,34 @@ fn apply_general(content: &str, project: &str, main: &str, hostname: &str, descr
         insert_at += 1;
     }
     if !desc_done && !description.trim().is_empty() {
-        out.insert(insert_at, format!("description: \"{}\"", description.trim()));
+        out.insert(
+            insert_at,
+            format!("description: \"{}\"", description.trim()),
+        );
     }
     Ok(out.join("\n") + "\n")
 }
 
 /// Fetch a service's generated prod env from the host agent, masked.
-fn fetch_prod_env(estate_root: &Path, content: &str, service: &str) -> Result<serde_json::Value, String> {
+fn fetch_prod_env(
+    estate_root: &Path,
+    content: &str,
+    service: &str,
+) -> Result<serde_json::Value, String> {
     let project = ecompose::parse_project_name(content);
     let api_url = std::env::var("ECO_API_URL").unwrap_or_default();
     let api_key = std::env::var("ECO_API_KEY").unwrap_or_default();
     if api_url.is_empty() || api_key.is_empty() {
-        return Ok(serde_json::json!({ "available": false, "error": "ECO_API_URL / ECO_API_KEY belum di-set (sumber dari ~/.zshrc)" }));
+        return Ok(
+            serde_json::json!({ "available": false, "error": "ECO_API_URL / ECO_API_KEY belum di-set (sumber dari ~/.zshrc)" }),
+        );
     }
-    let url = format!("{}/v1/estates/{}/services/{}/env", api_url.trim_end_matches('/'), project, service);
+    let url = format!(
+        "{}/v1/estates/{}/services/{}/env",
+        api_url.trim_end_matches('/'),
+        project,
+        service
+    );
     let response = ureq::get(&url)
         .set("Authorization", &format!("Bearer {api_key}"))
         .call()
@@ -1709,7 +1838,9 @@ fn fetch_prod_env(estate_root: &Path, content: &str, service: &str) -> Result<se
     let status = response.status();
     let text = response.into_string().map_err(|e| e.to_string())?;
     if !(200..300).contains(&status) {
-        return Ok(serde_json::json!({ "available": false, "error": format!("agent {status}: {}", text.lines().next().unwrap_or("")) }));
+        return Ok(
+            serde_json::json!({ "available": false, "error": format!("agent {status}: {}", text.lines().next().unwrap_or("")) }),
+        );
     }
     let mut env = Vec::new();
     for line in text.lines() {
@@ -1791,7 +1922,11 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 fn json_error(status: u16, msg: &str) -> (u16, String, &'static str) {
-    (status, format!("{{\"error\":\"{}\"}}", msg.replace('"', "\\\"")), "application/json")
+    (
+        status,
+        format!("{{\"error\":\"{}\"}}", msg.replace('"', "\\\"")),
+        "application/json",
+    )
 }
 
 pub fn run_config(args: &[String]) -> Result<(), String> {
@@ -1814,19 +1949,31 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
 
     let root = estates_root.unwrap_or_else(default_estates_root);
     let cwd = util::current_dir();
-    let cwd_estate = find_ecompose_file(&cwd).ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let cwd_estate = find_ecompose_file(&cwd)
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
-    let server = Server::http(format!("127.0.0.1:{port}")).map_err(|e| format!("cannot bind 127.0.0.1:{port}: {e}"))?;
+    let server = Server::http(format!("127.0.0.1:{port}"))
+        .map_err(|e| format!("cannot bind 127.0.0.1:{port}: {e}"))?;
     println!();
     println!("  eco config");
-    println!("  estates root: {}", util::bold(&root.display().to_string()));
+    println!(
+        "  estates root: {}",
+        util::bold(&root.display().to_string())
+    );
     println!("  {}", util::cyan(&format!("  http://127.0.0.1:{port}")));
-    println!("  {}", util::dim("Ctrl-C untuk berhenti. Perubahan berlaku setelah `eco up`."));
+    println!(
+        "  {}",
+        util::dim("Ctrl-C untuk berhenti. Perubahan berlaku setelah `eco up`.")
+    );
     println!();
 
     let estates = discover_estates(&root);
     if estates.is_empty() {
-        return Err(format!("no estates (ecompose.yml) found under {}", root.display()));
+        return Err(format!(
+            "no estates (ecompose.yml) found under {}",
+            root.display()
+        ));
     }
 
     for request in server.incoming_requests() {
@@ -1846,7 +1993,9 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 let _ = request.respond(
                     Response::from_data(FAVICON_32.to_vec())
                         .with_status_code(200)
-                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap()),
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap(),
+                        ),
                 );
                 continue;
             }
@@ -1854,7 +2003,9 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 let _ = request.respond(
                     Response::from_data(FAVICON_16.to_vec())
                         .with_status_code(200)
-                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap()),
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap(),
+                        ),
                 );
                 continue;
             }
@@ -1862,7 +2013,10 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 let dir = query.get("dir").cloned().unwrap_or_default();
                 // Estate favicon; estates without one get a neutral initial
                 // tile (not the Ecosphere brand).
-                let (bytes, ctype) = match resolve_estate_dir(&root, &dir).ok().and_then(|d| estate_favicon(&d)) {
+                let (bytes, ctype) = match resolve_estate_dir(&root, &dir)
+                    .ok()
+                    .and_then(|d| estate_favicon(&d))
+                {
                     Some((b, c)) => (b, c),
                     None => {
                         let project = resolve_estate_dir(&root, &dir)
@@ -1876,7 +2030,9 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 let _ = request.respond(
                     Response::from_data(bytes)
                         .with_status_code(200)
-                        .with_header(Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap()),
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap(),
+                        ),
                 );
                 continue;
             }
@@ -1940,13 +2096,17 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                     match resolve_estate_dir(&root, &dir).and_then(|d| {
                         let file = d.join("ecompose.yml");
                         let content = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
-                        let req: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&buf)).map_err(|e| format!("bad json: {e}"))?;
+                        let req: serde_json::Value =
+                            serde_json::from_str(&String::from_utf8_lossy(&buf))
+                                .map_err(|e| format!("bad json: {e}"))?;
                         let project = req["project"].as_str().unwrap_or("").to_string();
                         let main = req["main"].as_str().unwrap_or("").to_string();
                         let hostname = req["hostname"].as_str().unwrap_or("").to_string();
                         let description = req["description"].as_str().unwrap_or("").to_string();
-                        let next = apply_general(&content, &project, &main, &hostname, &description)?;
-                        std::fs::write(&file, next).map_err(|e| format!("write {}: {e}", file.display()))
+                        let next =
+                            apply_general(&content, &project, &main, &hostname, &description)?;
+                        std::fs::write(&file, next)
+                            .map_err(|e| format!("write {}: {e}", file.display()))
                     }) {
                         Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
                         Err(e) => json_error(500, &e),
@@ -1956,7 +2116,8 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
             ("GET", "/api/ecompose") => {
                 let dir = query.get("dir").cloned().unwrap_or_default();
                 match resolve_estate_dir(&root, &dir).and_then(|d| {
-                    std::fs::read_to_string(d.join("ecompose.yml")).map_err(|e| format!("read ecompose.yml: {e}"))
+                    std::fs::read_to_string(d.join("ecompose.yml"))
+                        .map_err(|e| format!("read ecompose.yml: {e}"))
                 }) {
                     Ok(text) => (200, text, "text/plain"),
                     Err(e) => json_error(400, &e),
@@ -1970,15 +2131,22 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                     let dir = query.get("dir").cloned().unwrap_or_default();
                     match resolve_estate_dir(&root, &dir).and_then(|d| {
                         let file = d.join("ecompose.yml");
-                        let req: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&buf)).map_err(|e| format!("bad json: {e}"))?;
+                        let req: serde_json::Value =
+                            serde_json::from_str(&String::from_utf8_lossy(&buf))
+                                .map_err(|e| format!("bad json: {e}"))?;
                         let content = req["content"].as_str().ok_or("missing content")?;
                         if ecompose::parse_project_name(content).is_empty() {
-                            return Err("validasi gagal: `project:` tidak ditemukan atau kosong".to_string());
+                            return Err("validasi gagal: `project:` tidak ditemukan atau kosong"
+                                .to_string());
                         }
                         if ecompose::parse_services(content).is_empty() {
-                            return Err("validasi gagal: `services:` kosong — pastikan YAML tetap utuh".to_string());
+                            return Err(
+                                "validasi gagal: `services:` kosong — pastikan YAML tetap utuh"
+                                    .to_string(),
+                            );
                         }
-                        std::fs::write(&file, content).map_err(|e| format!("write {}: {e}", file.display()))
+                        std::fs::write(&file, content)
+                            .map_err(|e| format!("write {}: {e}", file.display()))
                     }) {
                         Ok(_) => (200, "{\"ok\":true}".to_string(), "application/json"),
                         Err(e) => json_error(400, &e),
@@ -2008,19 +2176,26 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                             .map(|c| ecompose::parse_project_name(&c))
                             .unwrap_or_default();
                         match run_pm2_action(&project, &action) {
-                            Ok(acted_on) => (200, serde_json::json!({ "ok": true, "actedOn": acted_on }).to_string(), "application/json"),
+                            Ok(acted_on) => (
+                                200,
+                                serde_json::json!({ "ok": true, "actedOn": acted_on }).to_string(),
+                                "application/json",
+                            ),
                             Err(e) => json_error(400, &e),
                         }
                     }
                     Err(e) => json_error(400, &e),
                 }
             }
-            ("GET", "/api/auth-config") => {
-                (200, serde_json::json!({
+            ("GET", "/api/auth-config") => (
+                200,
+                serde_json::json!({
                     "authAvailable": auth_base_url().is_some(),
                     "profileAvailable": profile_base_url().is_some(),
-                }).to_string(), "application/json")
-            }
+                })
+                .to_string(),
+                "application/json",
+            ),
             ("POST", "/api/auth/login") => {
                 let mut buf = Vec::new();
                 let _ = request.as_reader().read_to_end(&mut buf);
@@ -2046,13 +2221,16 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 let mut buf = Vec::new();
                 let _ = request.as_reader().read_to_end(&mut buf);
                 let body = String::from_utf8_lossy(&buf).to_string();
-                let bearer: Option<String> = serde_json::from_str(&body).ok()
+                let bearer: Option<String> = serde_json::from_str(&body)
+                    .ok()
                     .and_then(|v: serde_json::Value| v["token"].as_str().map(|s| s.to_string()));
                 match auth_base_url() {
-                    Some(auth) => match forward(&auth, "/api/auth/logout", "POST", bearer.as_deref(), None) {
-                        Ok((st, body)) => (st, body, "application/json"),
-                        Err(e) => json_error(502, &e),
-                    },
+                    Some(auth) => {
+                        match forward(&auth, "/api/auth/logout", "POST", bearer.as_deref(), None) {
+                            Ok((st, body)) => (st, body, "application/json"),
+                            Err(e) => json_error(502, &e),
+                        }
+                    }
                     None => json_error(503, "no dev auth running"),
                 }
             }
@@ -2067,7 +2245,8 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
                 let dir = query.get("dir").cloned().unwrap_or_default();
                 let service = query.get("service").cloned().unwrap_or_default();
                 match resolve_estate_dir(&root, &dir).and_then(|d| {
-                    let content = std::fs::read_to_string(d.join("ecompose.yml")).map_err(|e| e.to_string())?;
+                    let content = std::fs::read_to_string(d.join("ecompose.yml"))
+                        .map_err(|e| e.to_string())?;
                     fetch_prod_env(&d, &content, &service)
                 }) {
                     Ok(json) => (200, json.to_string(), "application/json"),
@@ -2081,8 +2260,9 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
             Response::from_string(body)
                 .with_status_code(status)
                 .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes())
-                        .unwrap_or_else(|_| Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap()),
+                    Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap_or_else(
+                        |_| Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap(),
+                    ),
                 ),
         );
     }
@@ -2091,18 +2271,28 @@ pub fn run_config(args: &[String]) -> Result<(), String> {
 
 fn apply_request(estate_root: &Path, file_path: &Path, body: &str) -> Result<(), String> {
     use std::io::Read as _;
-    let req: serde_json::Value = serde_json::from_str(body).map_err(|e| format!("bad json: {e}"))?;
+    let req: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("bad json: {e}"))?;
     let service = req["service"].as_str().ok_or("missing service")?;
     let config: HashMap<String, String> = req["config"]
         .as_object()
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     let secrets: HashMap<String, String> = req["secrets"]
         .as_object()
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let content = std::fs::read_to_string(file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
+    let content = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("read {}: {e}", file_path.display()))?;
     let next = apply_config_to_manifest(&content, service, &config)?;
     std::fs::write(file_path, next).map_err(|e| format!("write {}: {e}", file_path.display()))?;
 
@@ -2120,17 +2310,27 @@ mod tests {
     fn apply_config_writes_and_replaces_the_service_config_block() {
         let content = "project: x\nservices:\n  a:\n    lxs: auth@1.0.0\n    port: 4200\n    access:\n      routes:\n        - path: /\n          level: public\n  b:\n    lxs: other@1.0.0\n";
         let mut cfg = HashMap::new();
-        cfg.insert("EMAIL_VERIFICATION_REQUIRED".to_string(), "false".to_string());
+        cfg.insert(
+            "EMAIL_VERIFICATION_REQUIRED".to_string(),
+            "false".to_string(),
+        );
         cfg.insert("RATE_LIMIT_AUTH_BURST".to_string(), "7".to_string());
         let out = apply_config_to_manifest(content, "a", &cfg).unwrap();
         assert!(out.contains("    config:\n      EMAIL_VERIFICATION_REQUIRED: \"false\"\n      RATE_LIMIT_AUTH_BURST: \"7\"\n"));
         assert!(out.contains("    lxs: auth@1.0.0"));
         assert!(out.contains("    port: 4200"));
-        assert!(out.contains("    access:"), "access block must survive: {out}");
+        assert!(
+            out.contains("    access:"),
+            "access block must survive: {out}"
+        );
         let mut cfg2 = HashMap::new();
         cfg2.insert("RATE_LIMIT_AUTH_BURST".to_string(), "10".to_string());
         let out2 = apply_config_to_manifest(&out, "a", &cfg2).unwrap();
-        assert_eq!(out2.matches("config:").count(), 1, "must not duplicate config blocks: {out2}");
+        assert_eq!(
+            out2.matches("config:").count(),
+            1,
+            "must not duplicate config blocks: {out2}"
+        );
         assert!(out2.contains("RATE_LIMIT_AUTH_BURST: \"10\""));
         assert!(!out2.contains("EMAIL_VERIFICATION_REQUIRED"));
         assert!(out2.contains("    access:"));
@@ -2140,13 +2340,17 @@ mod tests {
     fn apply_config_removes_block_when_config_empty() {
         let content = "project: x\nservices:\n  a:\n    lxs: auth@1.0.0\n    config:\n      X: \"1\"\n    port: 4200\n";
         let out = apply_config_to_manifest(content, "a", &HashMap::new()).unwrap();
-        assert!(!out.contains("config:"), "empty config should drop the block: {out}");
+        assert!(
+            !out.contains("config:"),
+            "empty config should drop the block: {out}"
+        );
         assert!(out.contains("    port: 4200"));
     }
 
     #[test]
     fn apply_config_skips_blank_lines_between_services() {
-        let content = "project: x\nservices:\n  a:\n    lxs: auth@1.0.0\n\n  b:\n    lxs: other@1.0.0\n";
+        let content =
+            "project: x\nservices:\n  a:\n    lxs: auth@1.0.0\n\n  b:\n    lxs: other@1.0.0\n";
         let mut cfg = HashMap::new();
         cfg.insert("K".to_string(), "v".to_string());
         let out = apply_config_to_manifest(content, "b", &cfg).unwrap();
@@ -2161,14 +2365,20 @@ mod tests {
         assert!(out.contains("description: \"A new estate\""));
         assert!(!out.contains("Old desc"));
         assert!(out.contains("    hostname: new.example.com"));
-        assert!(out.contains("services:\n  a:\n    lxs: x@1.0.0"), "services must survive: {out}");
+        assert!(
+            out.contains("services:\n  a:\n    lxs: x@1.0.0"),
+            "services must survive: {out}"
+        );
     }
 
     #[test]
     fn apply_general_inserts_description_when_missing() {
         let content = "project: x\nservices:\n  a:\n    lxs: x@1.0.0\n";
         let out = apply_general(content, "x", "", "", "Fresh description").unwrap();
-        assert!(out.starts_with("project: x\ndescription: \"Fresh description\"\n"), "{out}");
+        assert!(
+            out.starts_with("project: x\ndescription: \"Fresh description\"\n"),
+            "{out}"
+        );
         assert!(out.contains("services:\n  a:\n    lxs: x@1.0.0"));
     }
 }

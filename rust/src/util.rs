@@ -159,10 +159,12 @@ pub fn run_command_env(
     cwd: &Path,
     env_map: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let mut child = build_command(command, args, cwd, env_map).spawn().map_err(|e| {
-        format!("Unable to run {command}: {e}")
-    })?;
-    let status = child.wait().map_err(|e| format!("{command} wait failed: {e}"))?;
+    let mut child = build_command(command, args, cwd, env_map)
+        .spawn()
+        .map_err(|e| format!("Unable to run {command}: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("{command} wait failed: {e}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -202,7 +204,9 @@ pub fn run_capture_env(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Unable to run {command}: {e}"))?;
-    let output = child.wait_with_output().map_err(|e| format!("{command} wait failed: {e}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("{command} wait failed: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Ok(Captured {
@@ -285,7 +289,11 @@ pub fn command_on_path(command: &str) -> bool {
 pub fn which_capture(command: &str) -> Captured {
     match run_capture("which", &[command.to_string()], &current_dir()) {
         Ok(c) => c,
-        Err(_) => Captured { code: 1, stdout: String::new(), stderr: String::new() },
+        Err(_) => Captured {
+            code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
     }
 }
 
@@ -385,7 +393,9 @@ pub fn parse_github_coordinates(remote_url: &str) -> Result<(String, String), St
     // For https://host/owner/repo we stripped scheme+host already.
     let parts: Vec<&str> = normalized.split('/').collect();
     if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
-        return Err(format!("Cannot parse GitHub repo coordinates from remote URL: {remote_url}"));
+        return Err(format!(
+            "Cannot parse GitHub repo coordinates from remote URL: {remote_url}"
+        ));
     }
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
@@ -465,7 +475,10 @@ pub fn has_flag_prefix(args: &[String], prefix: &str) -> bool {
 }
 
 pub fn to_bool(value: &str) -> bool {
-    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 pub fn is_numeric(value: &str) -> bool {

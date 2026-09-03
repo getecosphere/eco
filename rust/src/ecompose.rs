@@ -25,8 +25,11 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
 
 pub fn find_estate_root(start_dir: &Path) -> Result<PathBuf, String> {
     let workspace_root = find_workspace_root(start_dir)?;
-    let resolved_start = std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
-    let relative = resolved_start.strip_prefix(&workspace_root).unwrap_or(&resolved_start);
+    let resolved_start =
+        std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
+    let relative = resolved_start
+        .strip_prefix(&workspace_root)
+        .unwrap_or(&resolved_start);
     if relative.as_os_str().is_empty() {
         return Ok(workspace_root);
     }
@@ -52,14 +55,17 @@ pub fn read_text_file(p: &Path) -> Option<String> {
 /// Resolve a project/ecompose input to the absolute path of its ecompose.yml.
 /// Mirrors lib/ecompose.js resolveEcomposeFile.
 fn is_manifest_filename(name: &str) -> bool {
-    name.ends_with("ecompose.yml") || name.ends_with("ecompose.yaml") || name.ends_with("-ecompose.yml")
+    name.ends_with("ecompose.yml")
+        || name.ends_with("ecompose.yaml")
+        || name.ends_with("-ecompose.yml")
 }
 
 pub fn resolve_ecompose_file(input: &str, start_dir: &Path) -> Result<PathBuf, String> {
     if input.is_empty() {
         return Err("Missing project or ecompose.yml path.".to_string());
     }
-    let absolute_input = std::fs::canonicalize(start_dir.join(input)).unwrap_or_else(|_| start_dir.join(input));
+    let absolute_input =
+        std::fs::canonicalize(start_dir.join(input)).unwrap_or_else(|_| start_dir.join(input));
     // Direct manifest file path (e.g. `eco up /path/to/stuff8-<unique>-ecompose.yml`).
     if is_manifest_filename(&absolute_input.to_string_lossy()) {
         if absolute_input.is_file() {
@@ -68,7 +74,10 @@ pub fn resolve_ecompose_file(input: &str, start_dir: &Path) -> Result<PathBuf, S
         // PaaS layout: a bare unique-named manifest copied into the host's
         // manifest directory (ECO_PROJECTS_ROOT), so `eco up <name>-ecompose.yml`
         // works without the full repo being cloned on the host.
-        let projects_root = util::env_var_or("ECO_PROJECTS_ROOT", &format!("{}/projects", util::home_dir()));
+        let projects_root = util::env_var_or(
+            "ECO_PROJECTS_ROOT",
+            &format!("{}/projects", util::home_dir()),
+        );
         let flat_manifest = Path::new(&projects_root).join(input);
         if flat_manifest.is_file() {
             return Ok(flat_manifest);
@@ -103,7 +112,10 @@ pub fn resolve_ecompose_file(input: &str, start_dir: &Path) -> Result<PathBuf, S
     if absolute_input.is_absolute() {
         return Ok(absolute_input.join("ecompose.yml"));
     }
-    let projects_root = util::env_var_or("ECO_PROJECTS_ROOT", &format!("{}/projects", util::home_dir()));
+    let projects_root = util::env_var_or(
+        "ECO_PROJECTS_ROOT",
+        &format!("{}/projects", util::home_dir()),
+    );
     let host_project = Path::new(&projects_root).join(input).join("ecompose.yml");
     if host_project.is_file() {
         return Ok(host_project);
@@ -425,7 +437,11 @@ pub fn parse_auth(content: &str) -> AuthConfig {
                 if let Some(r) = current_role.take() {
                     cfg.roles.push(r);
                 }
-                current_role = Some(RoleDecl { name, level: String::new(), default: false });
+                current_role = Some(RoleDecl {
+                    name,
+                    level: String::new(),
+                    default: false,
+                });
                 continue;
             }
             if let Some(r) = current_role.as_mut() {
@@ -589,7 +605,9 @@ pub fn parse_services(content: &str) -> Vec<Service> {
                     in_access_routes = false;
                 }
                 // exit the access block when we hit a service-level key
-                if line.trim_start().chars().next().is_none() || (line.starts_with(' ') && !line.starts_with("    ")) {
+                if line.trim_start().chars().next().is_none()
+                    || (line.starts_with(' ') && !line.starts_with("    "))
+                {
                     // keep scanning; handled below
                 }
             }
@@ -652,7 +670,12 @@ pub fn parse_services(content: &str) -> Vec<Service> {
                     continue;
                 }
             }
-            if line.trim_start().chars().next().is_some_and(|ch| !ch.is_whitespace()) {
+            if line
+                .trim_start()
+                .chars()
+                .next()
+                .is_some_and(|ch| !ch.is_whitespace())
+            {
                 // not handled; fine
             }
         }
@@ -694,7 +717,10 @@ pub fn parse_storage(content: &str) -> HashMap<String, HashMap<String, String>> 
         }
         if let Some(provider) = current_provider.as_ref() {
             if let Some((key, value)) = match_indented_key_value(line, 4) {
-                storage.get_mut(provider).unwrap().insert(key, util::strip_quotes(value.trim()));
+                storage
+                    .get_mut(provider)
+                    .unwrap()
+                    .insert(key, util::strip_quotes(value.trim()));
             }
         }
     }
@@ -857,7 +883,10 @@ pub fn parse_deploy(content: &str) -> HashMap<String, HashMap<String, String>> {
         }
         if let Some(section) = current_section.as_ref() {
             if let Some((key, value)) = match_indented_key_value(line, 4) {
-                deploy.get_mut(section).unwrap().insert(key, util::strip_quotes(value.trim()));
+                deploy
+                    .get_mut(section)
+                    .unwrap()
+                    .insert(key, util::strip_quotes(value.trim()));
             }
         }
     }
@@ -924,7 +953,10 @@ fn starts_top_level_key(line: &str) -> bool {
 fn match_indented_key(line: &str, indent: usize) -> Option<String> {
     let prefix = " ".repeat(indent);
     let rest = line.strip_prefix(&prefix)?;
-    if rest.ends_with(':') && !rest.starts_with('-') && rest.trim().len() == rest.trim_end_matches(':').len() + 1 {
+    if rest.ends_with(':')
+        && !rest.starts_with('-')
+        && rest.trim().len() == rest.trim_end_matches(':').len() + 1
+    {
         let key = rest.trim_end_matches(':').trim();
         if !key.is_empty() && !key.contains(' ') {
             return Some(key.to_string());
@@ -1129,9 +1161,20 @@ services:
         let svcs = parse_services(content);
         assert_eq!(svcs.len(), 2);
         let auth = svcs.iter().find(|s| s.name == "auth-backend").unwrap();
-        assert_eq!(auth.config.get("EMAIL_VERIFICATION_REQUIRED").map(|s| s.as_str()), Some("false"));
-        assert_eq!(auth.config.get("RATE_LIMIT_AUTH_BURST").map(|s| s.as_str()), Some("5"));
-        assert_eq!(auth.config.get("MAIL_FROM_NAME").map(|s| s.as_str()), Some("Stuff8"));
+        assert_eq!(
+            auth.config
+                .get("EMAIL_VERIFICATION_REQUIRED")
+                .map(|s| s.as_str()),
+            Some("false")
+        );
+        assert_eq!(
+            auth.config.get("RATE_LIMIT_AUTH_BURST").map(|s| s.as_str()),
+            Some("5")
+        );
+        assert_eq!(
+            auth.config.get("MAIL_FROM_NAME").map(|s| s.as_str()),
+            Some("Stuff8")
+        );
         assert_eq!(auth.config.len(), 3);
         let fe = svcs.iter().find(|s| s.name == "frontend").unwrap();
         assert!(fe.config.is_empty());
@@ -1212,7 +1255,8 @@ mod proof_rust_tests {
 
     #[test]
     fn parses_proof_rust_manifest() {
-        let content = std::fs::read_to_string("/Users/eco/ar-rahman/proofs/proof-rust/ecompose.yml").unwrap();
+        let content =
+            std::fs::read_to_string("/Users/eco/ar-rahman/proofs/proof-rust/ecompose.yml").unwrap();
         let svcs = parse_services(&content);
         let gw = svcs.iter().find(|s| s.name == "gateway").unwrap();
         assert_eq!(gw.path, "../../lxs/gateway/backend");
@@ -1227,7 +1271,10 @@ mod proof_rust_tests {
         assert_eq!(auth_cfg.roles.len(), 2);
         assert_eq!(auth_cfg.roles[1].name, "authenticated");
         assert!(auth_cfg.roles[1].default);
-        assert_eq!(auth_cfg.email_verification_enabled.as_deref(), Some("false"));
+        assert_eq!(
+            auth_cfg.email_verification_enabled.as_deref(),
+            Some("false")
+        );
         let ct = parse_ct_metadata(&content);
         assert_eq!(ct.get("id").map(|s| s.as_str()), Some("1000"));
     }
@@ -1239,23 +1286,43 @@ mod assessment_tests {
 
     #[test]
     fn parses_assessment_manifest() {
-        let content = std::fs::read_to_string("/Users/eco/ar-rahman/estates/assessment/ecompose.yml").unwrap();
+        let content =
+            std::fs::read_to_string("/Users/eco/ar-rahman/estates/assessment/ecompose.yml")
+                .unwrap();
         let svcs = parse_services(&content);
         let gw = svcs.iter().find(|s| s.name == "gateway").unwrap();
         assert_eq!(gw.binary, "gateway");
-        let fe = svcs.iter().find(|s| s.name == "assessment-frontend").unwrap();
-        let admin = fe.access_routes.iter().find(|r| r.path == "/admin*").unwrap();
+        let fe = svcs
+            .iter()
+            .find(|s| s.name == "assessment-frontend")
+            .unwrap();
+        let admin = fe
+            .access_routes
+            .iter()
+            .find(|r| r.path == "/admin*")
+            .unwrap();
         assert_eq!(admin.level, "role:SUPERADMIN");
         assert_eq!(admin.cookie, "assessment_token");
         let auth = svcs.iter().find(|s| s.name == "auth-backend").unwrap();
         assert_eq!(auth.access_routes.len(), 12);
-        let authapi = auth.access_routes.iter().find(|r| r.path == "/auth-api/*").unwrap();
+        let authapi = auth
+            .access_routes
+            .iter()
+            .find(|r| r.path == "/auth-api/*")
+            .unwrap();
         assert_eq!(authapi.strip, "/auth-api");
         assert_eq!(authapi.rewrite, "/api");
         let cfg = parse_auth(&content);
         assert_eq!(cfg.roles.len(), 6);
         assert!(cfg.roles.iter().any(|r| r.name == "SUPERADMIN"));
-        assert_eq!(cfg.roles.iter().find(|r| r.name == "SISWA").unwrap().default, true);
+        assert_eq!(
+            cfg.roles
+                .iter()
+                .find(|r| r.name == "SISWA")
+                .unwrap()
+                .default,
+            true
+        );
         assert_eq!(cfg.email_verification_enabled.as_deref(), Some("false"));
     }
 }

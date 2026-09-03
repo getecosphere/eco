@@ -33,7 +33,10 @@ fn read_text_file(p: &Path) -> Option<String> {
 ///   spring-boot | rust | static (Leptos) | go | nextjs | astro | vite | nuxt | node
 pub fn detect_service_type(dir: &Path) -> Option<(String, Vec<String>)> {
     if dir.join("pom.xml").is_file() {
-        return Some(("spring-boot".to_string(), vec!["java@17".to_string(), "maven".to_string()]));
+        return Some((
+            "spring-boot".to_string(),
+            vec!["java@17".to_string(), "maven".to_string()],
+        ));
     }
     if dir.join("Cargo.toml").is_file() {
         if dir.join("index.html").is_file() {
@@ -55,7 +58,10 @@ pub fn detect_service_type(dir: &Path) -> Option<(String, Vec<String>)> {
         return Some(("python".to_string(), vec!["python@3.11".to_string()]));
     }
     let has_csproj = std::fs::read_dir(dir)
-        .map(|rd| rd.flatten().any(|e| e.path().extension().map(|x| x == "csproj").unwrap_or(false)))
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.path().extension().map(|x| x == "csproj").unwrap_or(false))
+        })
         .unwrap_or(false);
     if has_csproj {
         return Some(("dotnet".to_string(), vec!["dotnet@8".to_string()]));
@@ -117,7 +123,9 @@ fn contains_line(content: &str, key_pattern: &str) -> bool {
 fn contains_line_multiline(content: &str, _pattern: &str) -> bool {
     for line in content.split('\n') {
         let line = line.trim_start();
-        if (line.starts_with("DATABASE_URL=") || line.starts_with("DB_URL=")) && line.contains("postgres") {
+        if (line.starts_with("DATABASE_URL=") || line.starts_with("DB_URL="))
+            && line.contains("postgres")
+        {
             return true;
         }
     }
@@ -136,7 +144,9 @@ pub fn detect_db_runtimes(dir: &Path) -> Vec<String> {
     if contains_line(&contents, "REDIS_URL=") || cargo_toml.contains("redis") {
         runtimes.push("redis@7".to_string());
     }
-    if contains_line_multiline(&contents, "DATABASE_URL|DB_URL") && contents.to_lowercase().contains("postgres") {
+    if contains_line_multiline(&contents, "DATABASE_URL|DB_URL")
+        && contents.to_lowercase().contains("postgres")
+    {
         runtimes.push("postgresql@15".to_string());
     }
     runtimes
@@ -157,7 +167,11 @@ pub fn scan_for_services(scan_dir: &Path, label: &str, rel_path: &str) -> Vec<De
         };
         let mut all_runtimes = runtimes;
         all_runtimes.extend(detect_db_runtimes(scan_dir));
-        return vec![DetectedService { name, path, runtimes: all_runtimes }];
+        return vec![DetectedService {
+            name,
+            path,
+            runtimes: all_runtimes,
+        }];
     }
 
     let entries = util::sorted_dir_entries(scan_dir);
@@ -238,14 +252,23 @@ pub fn detect_first_service(dir: &Path, label: &str) -> Option<DetectedService> 
 }
 
 pub fn render_service_block(service: &DetectedService) -> String {
-    let mut lines = vec![format!("  {}:", service.name), format!("    path: {}", service.path), "    runtimes:".to_string()];
+    let mut lines = vec![
+        format!("  {}:", service.name),
+        format!("    path: {}", service.path),
+        "    runtimes:".to_string(),
+    ];
     for runtime in &service.runtimes {
         lines.push(format!("      - {runtime}"));
     }
     lines.join("\n")
 }
 
-pub fn build_ecompose_content(project_name: &str, ct_id: u64, hostname: &str, services: &[DetectedService]) -> String {
+pub fn build_ecompose_content(
+    project_name: &str,
+    ct_id: u64,
+    hostname: &str,
+    services: &[DetectedService],
+) -> String {
     let mut lines = vec![
         format!("project: {project_name}"),
         String::new(),

@@ -1,5 +1,5 @@
-use crate::detect;
 use crate::checklist;
+use crate::detect;
 use crate::ecompose;
 use crate::repos;
 use crate::util;
@@ -11,7 +11,10 @@ fn path_exists(p: &Path) -> bool {
 }
 
 fn split_lines(content: &str) -> Vec<String> {
-    content.split('\n').map(|s| s.trim_end_matches('\r').to_string()).collect()
+    content
+        .split('\n')
+        .map(|s| s.trim_end_matches('\r').to_string())
+        .collect()
 }
 
 fn is_top_level_key_line(line: &str) -> bool {
@@ -67,7 +70,12 @@ fn domain_already_declared(lines: &[String], repo_name: &str) -> bool {
     false
 }
 
-pub fn insert_domain(content: &str, repo_name: &str, branch: Option<&str>, dev: Option<&str>) -> String {
+pub fn insert_domain(
+    content: &str,
+    repo_name: &str,
+    branch: Option<&str>,
+    dev: Option<&str>,
+) -> String {
     let mut lines = split_lines(content);
     if domain_already_declared(&lines, repo_name) {
         return content.to_string();
@@ -117,7 +125,10 @@ fn service_already_declared(lines: &[String], service_name: &str) -> bool {
     lines.iter().any(|l| l == &target)
 }
 
-pub fn insert_services(content: &str, services: &[detect::DetectedService]) -> (String, Vec<detect::DetectedService>) {
+pub fn insert_services(
+    content: &str,
+    services: &[detect::DetectedService],
+) -> (String, Vec<detect::DetectedService>) {
     let mut lines = split_lines(content);
     let new_services: Vec<detect::DetectedService> = services
         .iter()
@@ -154,7 +165,13 @@ pub fn insert_services(content: &str, services: &[detect::DetectedService]) -> (
 fn read_git_remote(dir: &Path) -> Option<String> {
     let result = util::run_capture(
         "git",
-        &["-C".to_string(), dir.display().to_string(), "remote".to_string(), "get-url".to_string(), "origin".to_string()],
+        &[
+            "-C".to_string(),
+            dir.display().to_string(),
+            "remote".to_string(),
+            "get-url".to_string(),
+            "origin".to_string(),
+        ],
         &util::current_dir(),
     )
     .ok()?;
@@ -199,14 +216,23 @@ struct ResolvedTarget {
     reused_existing: bool,
 }
 
-fn resolve_compose_target(target: &str, estate_root: &Path, workspace_root: &Path) -> Result<ResolvedTarget, String> {
+fn resolve_compose_target(
+    target: &str,
+    estate_root: &Path,
+    workspace_root: &Path,
+) -> Result<ResolvedTarget, String> {
     if let Ok(catalog_repo) = repos::find_repo_by_name(target) {
         if let Some(repo) = catalog_repo {
             let existing = find_existing_clone(&repo, estate_root, workspace_root);
-            let service_dir = existing.clone().unwrap_or_else(|| estate_root.join(&repo.name));
+            let service_dir = existing
+                .clone()
+                .unwrap_or_else(|| estate_root.join(&repo.name));
             let needs_clone = existing.is_none();
             if needs_clone && path_exists(&service_dir) {
-                return Err(format!("Refusing to clone into existing non-git path: {}", service_dir.display()));
+                return Err(format!(
+                    "Refusing to clone into existing non-git path: {}",
+                    service_dir.display()
+                ));
             }
             return Ok(ResolvedTarget {
                 target: target.to_string(),
@@ -307,7 +333,11 @@ fn pick_targets_interactively(manifest_content: &str) -> Result<Vec<String>, Str
 
 fn run_compose_add(args: &[String]) -> Result<(), String> {
     let yes_flag = args.iter().any(|a| a == "--yes" || a == "-y");
-    let positional: Vec<String> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+    let positional: Vec<String> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .cloned()
+        .collect();
     let target = positional.first().cloned();
 
     let cwd = util::current_dir();
@@ -341,15 +371,30 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
 
     let mut resolved_targets = Vec::new();
     for one_target in &targets {
-        resolved_targets.push(resolve_compose_target(one_target, &estate_root, &workspace_root)?);
+        resolved_targets.push(resolve_compose_target(
+            one_target,
+            &estate_root,
+            &workspace_root,
+        )?);
     }
 
-    let reused: Vec<_> = resolved_targets.iter().filter(|r| r.reused_existing).collect();
+    let reused: Vec<_> = resolved_targets
+        .iter()
+        .filter(|r| r.reused_existing)
+        .collect();
     if !reused.is_empty() {
         let mut out = String::new();
         out.push_str("Already cloned elsewhere in the workspace -- reusing in place, not cloning a duplicate:\n");
         for resolved in &reused {
-            out.push_str(&format!("  {} -> {}\n", resolved.catalog_repo.as_ref().map(|c| c.name.clone()).unwrap_or_default(), resolved.service_dir.display()));
+            out.push_str(&format!(
+                "  {} -> {}\n",
+                resolved
+                    .catalog_repo
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default(),
+                resolved.service_dir.display()
+            ));
         }
         out.push('\n');
         print!("{out}");
@@ -406,7 +451,8 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
     let mut all_added_services: Vec<detect::DetectedService> = Vec::new();
 
     for resolved in &resolved_targets {
-        let services = detect::discover_services_at(&resolved.services_label, &resolved.service_dir);
+        let services =
+            detect::discover_services_at(&resolved.services_label, &resolved.service_dir);
         let real_rel_path = resolved
             .service_dir
             .strip_prefix(&estate_root)
@@ -419,7 +465,10 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
                 if service.path == resolved.services_label {
                     service.path = real_rel_path.clone();
                 } else if service.path.starts_with(&resolved.services_label) {
-                    service.path = format!("{real_rel_path}{}", &service.path[resolved.services_label.len()..]);
+                    service.path = format!(
+                        "{real_rel_path}{}",
+                        &service.path[resolved.services_label.len()..]
+                    );
                 }
             }
             let _ = &mut adjusted;
@@ -434,7 +483,10 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
                 } else {
                     service.runtimes.join(", ")
                 };
-                out.push_str(&format!("  {} -- path: {}, runtimes: {}\n", service.name, service.path, runtimes));
+                out.push_str(&format!(
+                    "  {} -- path: {}, runtimes: {}\n",
+                    service.name, service.path, runtimes
+                ));
             }
             print!("{out}");
         } else {
@@ -463,7 +515,8 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut placements: std::collections::HashMap<String, (Option<String>, String)> = std::collections::HashMap::new();
+    let mut placements: std::collections::HashMap<String, (Option<String>, String)> =
+        std::collections::HashMap::new();
     if !domains_to_add.is_empty() {
         if yes_flag {
             for name in &domains_to_add {
@@ -473,7 +526,9 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
             let catalog = repos::read_repo_catalog()?;
             for repo_name in &domains_to_add {
                 let repo = catalog.iter().find(|r| &r.name == repo_name);
-                let default_branch = repo.map(|r| r.branch.clone()).unwrap_or_else(|| "main".to_string());
+                let default_branch = repo
+                    .map(|r| r.branch.clone())
+                    .unwrap_or_else(|| "main".to_string());
                 let branch_input = crate::checklist::prompt_line(&format!(
                     "  {repo_name} branch [{default_branch}]: "
                 ))?;
@@ -484,8 +539,14 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
                 };
                 let selection = checklist::run_checklist(
                     &[
-                        checklist::ChecklistItem { id: "dev".to_string(), label: format!("{repo_name} in local dev (optional)") },
-                        checklist::ChecklistItem { id: "prod".to_string(), label: format!("{repo_name} in prod (mandatory)") },
+                        checklist::ChecklistItem {
+                            id: "dev".to_string(),
+                            label: format!("{repo_name} in local dev (optional)"),
+                        },
+                        checklist::ChecklistItem {
+                            id: "prod".to_string(),
+                            label: format!("{repo_name} in prod (mandatory)"),
+                        },
                     ],
                     &format!("  {repo_name} environments"),
                     "  Controls: ↑/↓ move, space toggle, Enter confirm",
@@ -495,7 +556,11 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
                     &["dev".to_string(), "prod".to_string()],
                     &["prod".to_string()],
                 )?;
-                let dev = if selection.iter().any(|s| s == "dev") { "optional" } else { "disabled" };
+                let dev = if selection.iter().any(|s| s == "dev") {
+                    "optional"
+                } else {
+                    "disabled"
+                };
                 placements.insert(repo_name.clone(), (branch_override, dev.to_string()));
             }
         }
@@ -505,8 +570,14 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
     if !domains_to_add.is_empty() {
         util::println_stdout("Will add to domains:");
         for name in &domains_to_add {
-            let (branch, dev) = placements.get(name).cloned().unwrap_or((None, "optional".to_string()));
-            let branch_note = branch.as_ref().map(|b| format!(" (branch: {b})")).unwrap_or_default();
+            let (branch, dev) = placements
+                .get(name)
+                .cloned()
+                .unwrap_or((None, "optional".to_string()));
+            let branch_note = branch
+                .as_ref()
+                .map(|b| format!(" (branch: {b})"))
+                .unwrap_or_default();
             let dev_note = if dev == "disabled" {
                 " [prod-only]"
             } else if dev == "optional" {
@@ -520,37 +591,63 @@ fn run_compose_add(args: &[String]) -> Result<(), String> {
     if !all_added_services.is_empty() {
         util::println_stdout(&format!(
             "Will add to services: {}",
-            all_added_services.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", ")
+            all_added_services
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
     let confirm_write = yes_flag
-        || checklist::confirm_with_single_key(&format!("\nUpdate {}?", manifest_path.display()), false)?;
+        || checklist::confirm_with_single_key(
+            &format!("\nUpdate {}?", manifest_path.display()),
+            false,
+        )?;
     if !confirm_write {
         return Err("Cancelled.".to_string());
     }
 
     for name in &domains_to_add {
-        let (branch, dev) = placements.get(name).cloned().unwrap_or((None, "optional".to_string()));
+        let (branch, dev) = placements
+            .get(name)
+            .cloned()
+            .unwrap_or((None, "optional".to_string()));
         content = insert_domain(&content, name, branch.as_deref(), Some(&dev));
     }
 
     std::fs::write(&manifest_path, &content)
         .map_err(|e| format!("Cannot write {}: {e}", manifest_path.display()))?;
     util::println_stdout(&format!("Updated {}", manifest_path.display()));
-    util::println_stdout(&format!("Next: run \"eco configure\" from {}", manifest_dir.display()));
+    util::println_stdout(&format!(
+        "Next: run \"eco configure\" from {}",
+        manifest_dir.display()
+    ));
     Ok(())
 }
 
 fn run_compose_refresh(args: &[String]) -> Result<(), String> {
     let yes_flag = args.iter().any(|a| a == "--yes" || a == "-y");
-    let positional: Vec<String> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
-    let target = positional.first().cloned().ok_or("Usage: eco compose refresh <repo-name-or-path> [--yes]")?;
+    let positional: Vec<String> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .cloned()
+        .collect();
+    let target = positional
+        .first()
+        .cloned()
+        .ok_or("Usage: eco compose refresh <repo-name-or-path> [--yes]")?;
 
     let cwd = util::current_dir();
     let manifest_path = ecompose::resolve_ecompose_file(".", &cwd)?;
-    let manifest_dir = manifest_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| cwd.clone());
-    let estate_root = manifest_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| manifest_dir.clone());
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.clone());
+    let estate_root = manifest_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| manifest_dir.clone());
     let workspace_root = workspace::find_workspace_root(&estate_root)?;
     let resolved = resolve_compose_target(&target, &estate_root, &workspace_root)?;
     let services = detect::discover_services_at(&resolved.services_label, &resolved.service_dir);
@@ -573,15 +670,24 @@ fn run_compose_refresh(args: &[String]) -> Result<(), String> {
             }
             // a service block: "  name:" until next "  name:" or end
             index += 1;
-            while index < end && !(lines[index].starts_with("  ") && !lines[index].starts_with("    ")) {
+            while index < end
+                && !(lines[index].starts_with("  ") && !lines[index].starts_with("    "))
+            {
                 index += 1;
             }
             let block = &lines[start_i..index];
             let path_line = block.iter().find(|l| l.trim_start().starts_with("path:"));
             let service_path = path_line
-                .map(|l| l.trim_start().trim_start_matches("path:").trim().to_string())
+                .map(|l| {
+                    l.trim_start()
+                        .trim_start_matches("path:")
+                        .trim()
+                        .to_string()
+                })
                 .unwrap_or_default();
-            if !service_path.starts_with(&resolved.services_label) && service_path != resolved.services_label {
+            if !service_path.starts_with(&resolved.services_label)
+                && service_path != resolved.services_label
+            {
                 retained.extend(block.iter().cloned());
             }
         }
@@ -603,14 +709,22 @@ fn run_compose_refresh(args: &[String]) -> Result<(), String> {
     util::println_stdout(&format!(
         "Will refresh services for {}: {}",
         resolved.services_label,
-        services.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", ")
+        services
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
     let confirmed = yes_flag
-        || checklist::confirm_with_single_key(&format!("\nUpdate {}?", manifest_path.display()), false)?;
+        || checklist::confirm_with_single_key(
+            &format!("\nUpdate {}?", manifest_path.display()),
+            false,
+        )?;
     if !confirmed {
         return Err("Cancelled.".to_string());
     }
-    std::fs::write(&manifest_path, &next).map_err(|e| format!("Cannot write {}: {e}", manifest_path.display()))?;
+    std::fs::write(&manifest_path, &next)
+        .map_err(|e| format!("Cannot write {}: {e}", manifest_path.display()))?;
     util::println_stdout(&format!("Updated {}", manifest_path.display()));
     Ok(())
 }
@@ -635,7 +749,10 @@ fn run_compose_expose(args: &[String]) -> Result<(), String> {
     let next = if duplicate {
         original.clone()
     } else {
-        let rendered = vec![format!("    - hostname: {hostname}"), format!("      service: {service_name}")];
+        let rendered = vec![
+            format!("    - hostname: {hostname}"),
+            format!("      service: {service_name}"),
+        ];
         let additional_index = lines
             .iter()
             .enumerate()
@@ -662,11 +779,15 @@ fn run_compose_expose(args: &[String]) -> Result<(), String> {
     util::println_stdout(&format!(
         "Will expose {service_name} at {hostname} and make it available to declared PUBLIC_<DOMAIN>_URL consumers."
     ));
-    let confirmed = checklist::confirm_with_single_key(&format!("\nUpdate {}?", manifest_path.display()), false)?;
+    let confirmed = checklist::confirm_with_single_key(
+        &format!("\nUpdate {}?", manifest_path.display()),
+        false,
+    )?;
     if !confirmed {
         return Err("Cancelled.".to_string());
     }
-    std::fs::write(&manifest_path, &next).map_err(|e| format!("Cannot write {}: {e}", manifest_path.display()))?;
+    std::fs::write(&manifest_path, &next)
+        .map_err(|e| format!("Cannot write {}: {e}", manifest_path.display()))?;
     util::println_stdout(&format!("Updated {}", manifest_path.display()));
     Ok(())
 }
