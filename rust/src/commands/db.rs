@@ -17,8 +17,9 @@ fn db_help() {
          Usage:\n  \
          eco db add <mongo|postgres>   declare the project's managed core database\n  \
          eco db list                   list this account's managed databases\n\n\
-         Each estate has ONE core database (mongo XOR postgres). Adding a different\n\
-         type switches the estate. Quotas follow your plan (Starter: 1 mongo + 1 postgres)."
+         Each estate has ONE core database (mongo XOR postgres); adding a different\n\
+         type switches the estate. Quotas follow your plan — run `eco plan list` and\n\
+         `eco plan subscribe <plan>` when a plan limit is hit."
     );
 }
 
@@ -44,11 +45,7 @@ fn api_post_json(
     if (200..300).contains(&status) {
         Ok(v)
     } else {
-        Err(v
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or(&text)
-            .to_string())
+        Err(api_error_hint(&v, &text))
     }
 }
 
@@ -69,12 +66,27 @@ fn api_get_json(url: &str, api_key: &str) -> Result<serde_json::Value, String> {
     if (200..300).contains(&status) {
         Ok(v)
     } else {
-        Err(v
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or(&text)
-            .to_string())
+        Err(api_error_hint(&v, &text))
     }
+}
+
+// Turn a 4xx/5xx agent body into an actionable message. When the agent sends a
+// structured plan_limit rejection (code + upgrade_to), append the exact CLI
+// command to subscribe so the user can act immediately.
+fn api_error_hint(v: &serde_json::Value, fallback: &str) -> String {
+    let msg = v.get("error").and_then(|e| e.as_str()).unwrap_or(fallback).to_string();
+    if v.get("code").and_then(|c| c.as_str()) == Some("plan_limit") {
+        if let Some(u) = v.get("upgrade_to") {
+            let id = u.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let price = u.get("price_usd").and_then(|x| x.as_u64()).unwrap_or(0);
+            if !id.is_empty() {
+                return format!(
+                    "{msg}\n→ This needs a bigger plan. Subscribe with: `eco plan subscribe {id}` (simulated ${price}/mo)"
+                );
+            }
+        }
+    }
+    msg
 }
 
 fn find_ecompose() -> Result<(PathBuf, String, String), String> {

@@ -19,6 +19,7 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
         "login" => commands::account::run_account(&prepend("login", rest)),
         "logout" => commands::account::run_account(&["logout".to_string()]),
         "whoami" => commands::account::run_account(&["whoami".to_string()]),
+        "plan" => commands::account::run_account(&prepend("plan", rest)),
         "version" | "--version" | "-v" => {
             println!("eco {}", env!("CARGO_PKG_VERSION"));
             Ok(())
