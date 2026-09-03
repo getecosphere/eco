@@ -14,5 +14,6 @@ pub mod serve;
 pub mod show;
 pub mod stress;
 pub mod sync;
+pub mod telegram;
 pub mod up;
 pub mod wrappers;
