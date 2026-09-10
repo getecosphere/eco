@@ -125,19 +125,21 @@ fn wait_seconds(rest: &[String], flag: &str) -> Option<u64> {
     })
 }
 
-/// Resolve the opencode session label used as a message header so the reader
-/// knows which session a message came from. Order: `--from <label>` >
+/// Resolve the header shown above every message so the reader knows which
+/// session/topic it belongs to. Order: `--header <text>` > `--from <label>` >
 /// `ECO_TELEGRAM_SESSION` > the most recently active opencode session for the
 /// current directory (best effort, via the opencode SQLite DB).
-fn session_label(rest: &[String]) -> Option<String> {
-    if let Some(l) = rest
-        .iter()
-        .position(|a| a == "--from")
-        .and_then(|i| rest.get(i + 1))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(l);
+fn header_label(rest: &[String]) -> Option<String> {
+    for flag in ["--header", "--from"] {
+        if let Some(l) = rest
+            .iter()
+            .position(|a| a == flag)
+            .and_then(|i| rest.get(i + 1))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(l);
+        }
     }
     if let Ok(l) = std::env::var("ECO_TELEGRAM_SESSION") {
         let l = l.trim().to_string();
@@ -180,11 +182,27 @@ fn opencode_session_label() -> Option<String> {
     Some(t)
 }
 
-fn with_header(rest: &[String], text: &str) -> String {
-    match session_label(rest) {
-        Some(label) if !text.is_empty() => format!("[{label}]\n{text}"),
-        Some(label) => format!("[{label}]"),
-        None => text.to_string(),
+fn esc_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Build the message body with a **bold** header line. Returns the text and the
+/// parse mode (HTML when a header is present). The header is mandatory in
+/// spirit: pass `--header "<topic>"` so the reader knows what this is about.
+fn format_message(rest: &[String], body: &str) -> (String, Option<String>) {
+    match header_label(rest) {
+        Some(label) => {
+            let head = format!("<b>[{}]</b>", esc_html(&label));
+            let full = if body.is_empty() {
+                head
+            } else {
+                format!("{head}\n{}", esc_html(body))
+            };
+            (full, Some("HTML".to_string()))
+        }
+        None => (body.to_string(), None),
     }
 }
 
@@ -235,9 +253,9 @@ fn help_text() -> String {
      Keys are recipient bindings (e.g. \"ops\"). Bind once, then messages just work;\n\
      unbound keys fall back to email (no_channel).\n\
 \n\
-     Every message is prefixed with a session header so you can tell which\n\
-     opencode session sent it: [--from <label>] > $ECO_TELEGRAM_SESSION >\n\
-     auto-detected from the opencode session for the current directory.".to_string()
+     MANDATORY: every message is prefixed with a bold header so the reader knows\n\
+     what it is about: [--header \"<topic/session>\"] (preferred) >\n\
+     $ECO_TELEGRAM_SESSION > the active opencode session title (auto).".to_string()
 }
 
 pub fn run_telegram(args: &[String]) -> Result<(), String> {
@@ -270,8 +288,11 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
             if raw_text.is_empty() && file.is_none() {
                 return Err("usage: eco telegram send <key> <message...> [--file <path>]".to_string());
             }
-            let text = with_header(rest, &raw_text);
+            let (text, parse_mode) = format_message(rest, &raw_text);
             let mut body = serde_json::json!({ "key": key.clone(), "text": text });
+            if let Some(pm) = &parse_mode {
+                body["parse_mode"] = serde_json::json!(pm);
+            }
             if let Some(path) = &file {
                 let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
                 use base64::Engine;
@@ -292,6 +313,10 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
                 Some(path) => println!("Sent to '{key}' with attachment {path} (telegram message {message_id})."),
                 None => println!("Message sent to '{key}' (telegram message {message_id})."),
             }
+            match header_label(rest) {
+                Some(l) => println!("  header: [{l}]"),
+                None => println!("  header: (none — pass --header \"<topic>\" so the reader knows what this is about)"),
+            }
             Ok(())
         }
         "ask" => {
@@ -310,17 +335,16 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
             if raw_text.is_empty() {
                 return Err("usage: eco telegram ask <key> <question...>".to_string());
             }
-            let text = with_header(rest, &raw_text);
-            let v = post_json_auth(
-                &api_url,
-                &api_key,
-                "/v1/telegram/ask",
-                &serde_json::json!({
-                    "key": key.clone(),
-                    "text": text,
-                    "timeout_secs": timeout,
-                }),
-            )?;
+            let (text, parse_mode) = format_message(rest, &raw_text);
+            let mut ask_body = serde_json::json!({
+                "key": key.clone(),
+                "text": text,
+                "timeout_secs": timeout,
+            });
+            if let Some(pm) = &parse_mode {
+                ask_body["parse_mode"] = serde_json::json!(pm);
+            }
+            let v = post_json_auth(&api_url, &api_key, "/v1/telegram/ask", &ask_body)?;
             let id = v
                 .get("conversation_id")
                 .and_then(|c| c.as_str())
