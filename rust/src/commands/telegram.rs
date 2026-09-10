@@ -158,6 +158,8 @@ fn help_text() -> String {
     "eco telegram — Telegram ops channel (needs the telegram LXS on the agent host)\n\n\
      Usage:\n\
        eco telegram send <key> <message...>          push a plain message to a bound key\n\
+       eco telegram send <key> <caption...> --file <path>\n\
+                                                     attach a file (PDF, image, zip, …)\n\
        eco telegram ask <key> <question...>          ask a question over Telegram (opens a conversation)\n\
          [--timeout <secs>]  max wait before the question expires (default 180)\n\
          [--wait]            block until the reply arrives (up to the timeout)\n\
@@ -182,22 +184,46 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
 
     match subcommand {
         "send" => {
-            if rest.len() < 2 {
-                return Err("usage: eco telegram send <key> <message...>".to_string());
+            let key = rest
+                .first()
+                .filter(|a| !a.starts_with("--"))
+                .cloned()
+                .ok_or("usage: eco telegram send <key> <message...> [--file <path>]")?;
+            let file = rest
+                .iter()
+                .position(|a| a == "--file")
+                .and_then(|i| rest.get(i + 1))
+                .cloned();
+            let text = rest[1..]
+                .iter()
+                .filter(|a| !a.starts_with("--") && !is_flag_value(rest, a))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() && file.is_none() {
+                return Err("usage: eco telegram send <key> <message...> [--file <path>]".to_string());
             }
-            let key = rest[0].clone();
-            let text = rest[1..].join(" ");
-            let v = post_json_auth(
-                &api_url,
-                &api_key,
-                "/v1/telegram/send",
-                &serde_json::json!({ "key": key.clone(), "text": text }),
-            )?;
+            let mut body = serde_json::json!({ "key": key.clone(), "text": text });
+            if let Some(path) = &file {
+                let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file".to_string());
+                body["file"] = serde_json::json!(b64);
+                body["filename"] = serde_json::json!(name);
+            }
+            let v = post_json_auth(&api_url, &api_key, "/v1/telegram/send", &body)?;
             let message_id = v
                 .get("message_id")
                 .and_then(|m| m.as_i64())
                 .unwrap_or(0);
-            println!("Message sent to '{key}' (telegram message {message_id}).");
+            match &file {
+                Some(path) => println!("Sent to '{key}' with attachment {path} (telegram message {message_id})."),
+                None => println!("Message sent to '{key}' (telegram message {message_id})."),
+            }
             Ok(())
         }
         "ask" => {
