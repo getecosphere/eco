@@ -466,7 +466,13 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
             if link.is_empty() {
                 return Err(format!("no deep link returned: {v}"));
             }
-            println!("Buka link ini di Telegram, lalu tekan Start:\n  {link}");
+            println!("Opening Telegram to link your account…");
+            if !crate::commands::account::open_browser(link) {
+                println!("(no browser detected — open this link manually:)");
+            } else {
+                println!("If it didn't open, use this link:");
+            }
+            println!("  {link}");
             println!("(link berlaku 15 menit, sekali pakai)");
             Ok(())
         }

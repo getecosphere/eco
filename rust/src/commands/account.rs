@@ -232,7 +232,7 @@ fn command_available(name: &str) -> bool {
         .any(|dir| !dir.is_empty() && std::path::Path::new(dir).join(name).is_file())
 }
 
-fn open_browser(url: &str) -> bool {
+pub fn open_browser(url: &str) -> bool {
     let (program, args): (&str, Vec<String>) = if cfg!(target_os = "macos") {
         ("open", vec![url.to_string()])
     } else if cfg!(target_os = "linux") {
