@@ -125,6 +125,69 @@ fn wait_seconds(rest: &[String], flag: &str) -> Option<u64> {
     })
 }
 
+/// Resolve the opencode session label used as a message header so the reader
+/// knows which session a message came from. Order: `--from <label>` >
+/// `ECO_TELEGRAM_SESSION` > the most recently active opencode session for the
+/// current directory (best effort, via the opencode SQLite DB).
+fn session_label(rest: &[String]) -> Option<String> {
+    if let Some(l) = rest
+        .iter()
+        .position(|a| a == "--from")
+        .and_then(|i| rest.get(i + 1))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(l);
+    }
+    if let Ok(l) = std::env::var("ECO_TELEGRAM_SESSION") {
+        let l = l.trim().to_string();
+        if !l.is_empty() {
+            return Some(l);
+        }
+    }
+    if std::env::var("OPENCODE").is_ok() {
+        return opencode_session_label();
+    }
+    None
+}
+
+fn opencode_session_label() -> Option<String> {
+    let db = std::env::var("OPENCODE_DB").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/.local/share/opencode/opencode.db")
+    });
+    if !std::path::Path::new(&db).is_file() {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = cwd.to_string_lossy().replace('\'', "''");
+    let query = format!(
+        "SELECT title FROM session WHERE directory='{cwd}' AND title<>'' ORDER BY time_updated DESC LIMIT 1;"
+    );
+    let out = std::process::Command::new("sqlite3")
+        .arg(&db)
+        .arg(query)
+        .output()
+        .ok()?;
+    let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let mut t = title;
+    if t.chars().count() > 48 {
+        t = t.chars().take(45).collect::<String>() + "…";
+    }
+    Some(t)
+}
+
+fn with_header(rest: &[String], text: &str) -> String {
+    match session_label(rest) {
+        Some(label) if !text.is_empty() => format!("[{label}]\n{text}"),
+        Some(label) => format!("[{label}]"),
+        None => text.to_string(),
+    }
+}
+
 fn poll_conversation(
     api_url: &str,
     api_key: &str,
@@ -170,7 +233,11 @@ fn help_text() -> String {
        eco telegram chats                            list chats the bot has seen\n\
 \n\
      Keys are recipient bindings (e.g. \"ops\"). Bind once, then messages just work;\n\
-     unbound keys fall back to email (no_channel).".to_string()
+     unbound keys fall back to email (no_channel).\n\
+\n\
+     Every message is prefixed with a session header so you can tell which\n\
+     opencode session sent it: [--from <label>] > $ECO_TELEGRAM_SESSION >\n\
+     auto-detected from the opencode session for the current directory.".to_string()
 }
 
 pub fn run_telegram(args: &[String]) -> Result<(), String> {
@@ -194,15 +261,16 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
                 .position(|a| a == "--file")
                 .and_then(|i| rest.get(i + 1))
                 .cloned();
-            let text = rest[1..]
+            let raw_text = rest[1..]
                 .iter()
                 .filter(|a| !a.starts_with("--") && !is_flag_value(rest, a))
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
-            if text.is_empty() && file.is_none() {
+            if raw_text.is_empty() && file.is_none() {
                 return Err("usage: eco telegram send <key> <message...> [--file <path>]".to_string());
             }
+            let text = with_header(rest, &raw_text);
             let mut body = serde_json::json!({ "key": key.clone(), "text": text });
             if let Some(path) = &file {
                 let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -233,15 +301,16 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
             let key = rest[0].clone();
             let want_wait = rest.contains(&"--wait".to_string());
             let timeout = wait_seconds(rest, "--timeout").unwrap_or(180);
-            let text = rest[1..]
+            let raw_text = rest[1..]
                 .iter()
                 .filter(|a| !a.starts_with("--") && !is_flag_value(rest, a))
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
-            if text.is_empty() {
+            if raw_text.is_empty() {
                 return Err("usage: eco telegram ask <key> <question...>".to_string());
             }
+            let text = with_header(rest, &raw_text);
             let v = post_json_auth(
                 &api_url,
                 &api_key,
