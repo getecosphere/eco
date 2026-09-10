@@ -157,7 +157,7 @@ fn print_host(h: &serde_json::Value, compact: bool) {
     };
     if compact {
         println!(
-            "HOST {:<14} cpu {:>5.1}%  load {}/{}/{}  mem {}/{}  up {}{}",
+            "HOST {:<14} cpu {:>5.1}%  load {}/{}/{}  mem {}/{} ({:.0}%)  up {}{}",
             s(h, "name"),
             f(h, "cpu_pct"),
             s(load, "1"),
@@ -165,6 +165,7 @@ fn print_host(h: &serde_json::Value, compact: bool) {
             s(load, "15"),
             hb(mem_used),
             hb(mem_total),
+            f(h, "mem_pct"),
             hdur(u(h, "uptime_secs")),
             disk,
         );
@@ -174,9 +175,10 @@ fn print_host(h: &serde_json::Value, compact: bool) {
         println!("  cpu:    {} cores  {}  ({:.1}%)", u(h, "cores"), s(h, "cpu_model"), f(h, "cpu_pct"));
         println!("  load:   {} / {} / {}", s(load, "1"), s(load, "5"), s(load, "15"));
         println!(
-            "  mem:    {} used / {} total  ({} avail, {} cache)",
+            "  mem:    {} used / {} total ({:.0}%)  ({} avail, {} cache)",
             hb(u(mem, "mem_used")),
             hb(u(mem, "mem_total")),
+            f(h, "mem_pct"),
             hb(u(mem, "mem_available")),
             hb(u(mem, "mem_cache"))
         );
@@ -227,7 +229,7 @@ fn print_ct(c: &serde_json::Value, compact: bool) {
             return;
         }
         println!(
-            "CT{:<4} {:<14} cpu {:>5.1}%  load {}/{}/{}  mem {}/{}  up {}  svc {} (fail {})  ports {}",
+            "CT{:<4} {:<14} cpu {:>5.1}%  load {}/{}/{}  mem {}/{} ({:.0}%)  up {}  svc {} (fail {})  ports {}",
             s(c, "id"),
             s(c, "name"),
             f(c, "cpu_pct"),
@@ -236,6 +238,7 @@ fn print_ct(c: &serde_json::Value, compact: bool) {
             s(load, "15"),
             hb(u(c, "mem_current")),
             if u(c, "mem_max") > 0 { hb(u(c, "mem_max")) } else { format!("{}MB", u(c, "memory_mb")) },
+            f(c, "mem_pct"),
             hdur(u(c, "uptime_secs")),
             u(c, "services_running"),
             u(c, "services_failed"),
@@ -249,7 +252,7 @@ fn print_ct(c: &serde_json::Value, compact: bool) {
         println!("  net:    {}", s(c, "net0"));
         if s(c, "status") == "running" {
             println!("  cpu:    {:.1}%   load {} / {} / {}", f(c, "cpu_pct"), s(load, "1"), s(load, "5"), s(load, "15"));
-            println!("  mem:    {}/{}   procs {}   uptime {}", hb(u(c, "mem_current")), if u(c, "mem_max")>0 {hb(u(c,"mem_max"))} else {format!("{}MB",u(c,"memory_mb"))}, u(c, "procs"), hdur(u(c, "uptime_secs")));
+            println!("  mem:    {}/{} ({:.0}%)   procs {}   uptime {}", hb(u(c, "mem_current")), if u(c, "mem_max")>0 {hb(u(c,"mem_max"))} else {format!("{}MB",u(c,"memory_mb"))}, f(c, "mem_pct"), u(c, "procs"), hdur(u(c, "uptime_secs")));
             println!("  svc:    {} running, {} failed, {} restarts", u(c, "services_running"), u(c, "services_failed"), u(c, "service_restarts"));
             let d = &c["disk_inside"];
             println!("  disk:   {} used / {} ({})", hb(u(d, "used")), hb(u(d, "size")), s(d, "pct"));
