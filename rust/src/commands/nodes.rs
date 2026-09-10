@@ -149,10 +149,11 @@ fn print_host(h: &serde_json::Value, compact: bool) {
         String::new()
     } else {
         format!(
-            "  disk {}/{} ({})",
+            "  disk {}/{} ({}, free {})",
             hb(u(&root, "used")),
             hb(u(&root, "size")),
-            s(&root, "pct")
+            s(&root, "pct"),
+            hb(u(&root, "avail"))
         )
     };
     if compact {
@@ -228,8 +229,20 @@ fn print_ct(c: &serde_json::Value, compact: bool) {
             );
             return;
         }
+        let d = &c["disk_inside"];
+        let ct_disk = if u(d, "size") > 0 {
+            format!(
+                "  disk {}/{} ({}, free {})",
+                hb(u(d, "used")),
+                hb(u(d, "size")),
+                s(d, "pct"),
+                hb(u(d, "avail"))
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "CT{:<4} {:<14} cpu {:>5.1}%  load {}/{}/{}  mem {}/{} ({:.0}%)  up {}  svc {} (fail {})  ports {}",
+            "CT{:<4} {:<14} cpu {:>5.1}%  load {}/{}/{}  mem {}/{} ({:.0}%)  up {}  svc {} (fail {})  ports {}{}",
             s(c, "id"),
             s(c, "name"),
             f(c, "cpu_pct"),
@@ -243,6 +256,7 @@ fn print_ct(c: &serde_json::Value, compact: bool) {
             u(c, "services_running"),
             u(c, "services_failed"),
             u(c, "ports_listening"),
+            ct_disk,
         );
     } else {
         println!("CT{} {}", s(c, "id"), s(c, "name"));
@@ -255,7 +269,7 @@ fn print_ct(c: &serde_json::Value, compact: bool) {
             println!("  mem:    {}/{} ({:.0}%)   procs {}   uptime {}", hb(u(c, "mem_current")), if u(c, "mem_max")>0 {hb(u(c,"mem_max"))} else {format!("{}MB",u(c,"memory_mb"))}, f(c, "mem_pct"), u(c, "procs"), hdur(u(c, "uptime_secs")));
             println!("  svc:    {} running, {} failed, {} restarts", u(c, "services_running"), u(c, "services_failed"), u(c, "service_restarts"));
             let d = &c["disk_inside"];
-            println!("  disk:   {} used / {} ({})", hb(u(d, "used")), hb(u(d, "size")), s(d, "pct"));
+            println!("  disk:   {} used / {} ({}, free {})", hb(u(d, "used")), hb(u(d, "size")), s(d, "pct"), hb(u(d, "avail")));
             let n = &c["net"];
             println!("  net:    rx {}  tx {}", hb(u(n, "rx_bytes")), hb(u(n, "tx_bytes")));
             if let Some(units) = c["services"]["units"].as_array() {
