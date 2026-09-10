@@ -331,8 +331,8 @@ pub fn run_node(args: &[String]) -> Result<(), String> {
         } else {
             (sub.to_string(), None)
         };
-        if !matches!(action.as_str(), "start" | "stop" | "restart") {
-            return Err("usage: eco node <id> [start|stop|restart] | service <name> <action> --yes".into());
+        if !matches!(action.as_str(), "start" | "stop" | "restart" | "destroy") {
+            return Err("usage: eco node <id> [start|stop|restart|destroy] | service <name> <action> --yes".into());
         }
         if !args.iter().any(|a| a == "--yes") {
             return Err(format!(
