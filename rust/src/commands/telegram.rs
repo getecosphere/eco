@@ -249,6 +249,9 @@ fn help_text() -> String {
        eco telegram bind <key> --user <id>           bind a private-chat user (must have messaged the bot)\n\
        eco telegram bind <key> --chat <id>           bind a group chat id\n\
        eco telegram chats                            list chats the bot has seen\n\
+       eco telegram connect                          link your eco account to @geteco_user_bot\n\
+       eco telegram me                               show whether your account is linked\n\
+       eco telegram disconnect                       unlink your account\n\
 \n\
      Keys are recipient bindings (e.g. \"ops\"). Bind once, then messages just work;\n\
      unbound keys fall back to email (no_channel).\n\
@@ -452,6 +455,34 @@ pub fn run_telegram(args: &[String]) -> Result<(), String> {
                         item.get("kind").and_then(|k| k.as_str()).unwrap_or(""));
                 }
             }
+            Ok(())
+        }
+        "connect" => {
+            let auth = read_stored_auth().ok_or(
+                "not logged in — run `eco login` first (the user bot links to your eco account)",
+            )?;
+            let v = post_json_auth(&auth.api_url, &auth.api_key, "/v1/telegram/connect", &serde_json::json!({}))?;
+            let link = v.get("deep_link").and_then(|l| l.as_str()).unwrap_or("");
+            if link.is_empty() {
+                return Err(format!("no deep link returned: {v}"));
+            }
+            println!("Buka link ini di Telegram, lalu tekan Start:\n  {link}");
+            println!("(link berlaku 15 menit, sekali pakai)");
+            Ok(())
+        }
+        "disconnect" | "unlink" => {
+            let auth = read_stored_auth().ok_or("not logged in — run `eco login`")?;
+            let v = post_json_auth(&auth.api_url, &auth.api_key, "/v1/telegram/unlink", &serde_json::json!({}))?;
+            let removed = v.get("unlinked").and_then(|b| b.as_bool()).unwrap_or(false);
+            println!("{}", if removed { "Telegram diputus dari akun." } else { "Tidak ada Telegram yang terhubung." });
+            Ok(())
+        }
+        "me" => {
+            let auth = read_stored_auth().ok_or("not logged in — run `eco login`")?;
+            let v = get_json_auth(&auth.api_url, &auth.api_key, "/v1/telegram/me")?;
+            let linked = v.get("linked").and_then(|b| b.as_bool()).unwrap_or(false);
+            println!("akun: {}", v.get("email").and_then(|e| e.as_str()).unwrap_or(""));
+            println!("telegram: {}", if linked { "terhubung" } else { "belum terhubung (eco telegram connect)" });
             Ok(())
         }
         _ => Err(help_text()),
