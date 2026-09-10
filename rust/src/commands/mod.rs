@@ -8,6 +8,7 @@ pub mod help;
 pub mod install;
 pub mod log;
 pub mod lxs;
+pub mod nodes;
 pub mod registry_cmd;
 pub mod rust_cmd;
 pub mod serve;

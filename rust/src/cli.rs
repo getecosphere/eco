@@ -45,6 +45,10 @@ pub fn run_cli(argv: &[String]) -> Result<(), String> {
         "db" => commands::db::run_db(rest),
         "storage" => commands::db::run_storage(rest),
         "telegram" => commands::telegram::run_telegram(rest),
+        "nodes" => commands::nodes::run_nodes(rest),
+        "node" => commands::nodes::run_node(rest),
+        "estates" => commands::nodes::run_estates(rest),
+        "estate" => commands::nodes::run_estate(rest),
         "config" => commands::config_dash::run_config(rest),
         "log" => commands::log::run_log(rest),
         // internal: registry CLI mirror used by bundled bash scripts
