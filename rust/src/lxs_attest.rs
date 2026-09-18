@@ -199,6 +199,94 @@ pub fn line_hash(text: &str) -> String {
     crate::registry::hex_encode(&sha2::Sha256::digest(text.as_bytes()))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// External witness: RFC 3161 timestamp over the transparency checkpoint
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// DER length octets.
+fn der_len(len: usize) -> Vec<u8> {
+    if len < 0x80 {
+        vec![len as u8]
+    } else if len <= 0xff {
+        vec![0x81, len as u8]
+    } else {
+        vec![0x82, (len >> 8) as u8, (len & 0xff) as u8]
+    }
+}
+
+/// DER tag-length-value.
+fn der_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    out.extend(der_len(content.len()));
+    out.extend_from_slice(content);
+    out
+}
+
+/// A minimal RFC 3161 `TimeStampReq` over a SHA-512 digest, requesting the TSA
+/// certificate (`certReq`). Hand-encoded DER so the client needs no ASN.1
+/// dependency.
+pub fn build_tsq(digest: &[u8], nonce: u64) -> Vec<u8> {
+    // AlgorithmIdentifier: id-sha512 (2.16.840.1.101.3.4.2.3) + NULL.
+    let oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03];
+    let mut alg = Vec::new();
+    alg.extend_from_slice(&oid);
+    alg.extend_from_slice(&[0x05, 0x00]);
+    let alg_seq = der_tlv(0x30, &alg);
+    let mut imprint = alg_seq;
+    imprint.extend(der_tlv(0x04, digest));
+    let msg_imprint = der_tlv(0x30, &imprint);
+
+    let version = der_tlv(0x02, &[0x01]);
+    let mut nb = nonce.to_be_bytes().to_vec();
+    while nb.len() > 1 && nb[0] == 0 {
+        nb.remove(0);
+    }
+    if nb[0] & 0x80 != 0 {
+        nb.insert(0, 0);
+    }
+    let nonce_tlv = der_tlv(0x02, &nb);
+    let cert_req = der_tlv(0x01, &[0xff]);
+
+    let mut body = version;
+    body.extend(msg_imprint);
+    body.extend(nonce_tlv);
+    body.extend(cert_req);
+    der_tlv(0x30, &body)
+}
+
+/// Anchor the current transparency head with a public TSA and return the
+/// RFC 3161 timestamp token (DER). The token is issued by a third party, so a
+/// registry that later rewrites the log produces a different head whose token
+/// would not match — history becomes externally detectable, not just
+/// self-consistent.
+pub fn timestamp_checkpoint(head_hex: &str, tsa_url: &str) -> Result<Vec<u8>, String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let digest = sha2::Sha512::digest(head_hex.as_bytes());
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let tsq = build_tsq(&digest, nonce);
+    let resp = ureq::post(tsa_url)
+        .set("Content-Type", "application/timestamp-query")
+        .send_bytes(&tsq)
+        .map_err(|e| format!("TSA {tsa_url} request failed: {e}"))?;
+    let mut token = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut token)
+        .map_err(|e| format!("read TSA response: {e}"))?;
+    if token.len() < 32 {
+        return Err(format!("TSA {tsa_url} returned a short response"));
+    }
+    Ok(token)
+}
+
+/// Default public TSA. Overridable with `ECO_TSA_URL`.
+pub fn default_tsa_url() -> String {
+    std::env::var("ECO_TSA_URL").unwrap_or_else(|_| "http://timestamp.digicert.com".to_string())
+}
+
 #[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;

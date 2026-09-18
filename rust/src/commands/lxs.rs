@@ -1315,14 +1315,31 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
                         format!("{}\n", crate::lxs_attest::b64(&pubkey)),
                     );
                     let digest = manifest_identity_sha256(&manifest);
-                    let _ = crate::lxs_attest::append_transparency(
+                    if let Ok(head) = crate::lxs_attest::append_transparency(
                         &registry,
                         &name,
                         &version,
                         &manifest.publisher,
                         &digest,
                         &manifest.attestation,
-                    );
+                    ) {
+                        // External witness: anchor the transparency checkpoint
+                        // with a public RFC 3161 TSA so a later rewrite of the
+                        // log is detectable by third parties, not just by the
+                        // publisher.
+                        let tsa = crate::lxs_attest::default_tsa_url();
+                        match crate::lxs_attest::timestamp_checkpoint(&head, &tsa) {
+                            Ok(token) => {
+                                let dir = registry.join("transparency");
+                                let _ = std::fs::create_dir_all(&dir);
+                                let _ = std::fs::write(dir.join(format!("{head}.tsr")), &token);
+                                println!("[eco lxs] transparency checkpoint {head} anchored by TSA {tsa}");
+                            }
+                            Err(e) => eprintln!(
+                                "[eco lxs] warning: could not anchor transparency checkpoint: {e}"
+                            ),
+                        }
+                    }
                     println!("[eco lxs] signed {name}@{version} (attestation v1, publisher {publisher})");
                 }
             }
@@ -1340,6 +1357,9 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
     }
     if registry.join("transparency.log").is_file() {
         add_args.push("transparency.log".to_string());
+    }
+    if registry.join("transparency").is_dir() {
+        add_args.push("transparency".to_string());
     }
     let git_args = [
         add_args,
