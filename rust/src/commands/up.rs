@@ -5154,6 +5154,36 @@ fn install_lxs_services_local(
         if name.is_empty() {
             return Err(format!("LXS {} has no name in its manifest", service.lxs));
         }
+        // Contract-vs-grant enforcement: the estate must grant exactly the
+        // secrets the contract declares, and every required secret must be
+        // granted. This is the declared→enforced step for composition.
+        crate::commands::lxs::validate_grants_against_contract(
+            &service.name,
+            &service.grants_secrets,
+            &manifest,
+        )?;
+        // Publisher attestation: a present-but-invalid signature is fatal; an
+        // unsigned release is allowed but flagged (integrity only).
+        match crate::commands::lxs::verify_manifest_attestation(&manifest, None) {
+            crate::commands::lxs::Attestation::Invalid => {
+                return Err(format!(
+                    "{name}@{version} has an invalid publisher attestation — refusing to install"
+                ));
+            }
+            crate::commands::lxs::Attestation::Unsigned => {
+                eprintln!(
+                    "[eco lxs] warning: {name}@{version} is unsigned (unverified); integrity checked against the manifest hash only"
+                );
+            }
+            _ => {}
+        }
+        // Content lock: when eco.lock pins this LXS, the resolved version and
+        // artifact hashes must match it.
+        if let Some(lock) = crate::commands::lxs::read_eco_lock(estate_root) {
+            if let Some(entry) = lock.lxs.get(&name) {
+                crate::commands::lxs::enforce_lock_entry(entry, &manifest, &local_arch)?;
+            }
+        }
         let service_dir = estate_root.join(&service.name);
         let bin_dir = service_dir.join("bin");
         std::fs::create_dir_all(&bin_dir)

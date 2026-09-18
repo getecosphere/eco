@@ -4,6 +4,7 @@ pub mod detect;
 pub mod ecompose;
 pub mod embedded;
 pub mod github;
+pub mod lxs_attest;
 pub mod registry;
 pub mod repos;
 pub mod util;

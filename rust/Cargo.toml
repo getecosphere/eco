@@ -39,6 +39,9 @@ ureq = { version = "2", default-features = false, features = ["json", "gzip", "n
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 ureq = { version = "2", features = ["json", "tls"] }
+# Publisher attestations (Ed25519). Declared only for non-Windows targets
+# because ring does not cross-compile to x86_64-pc-windows-gnu via zigbuild.
+ring = "0.17"
 
 [profile.release]
 lto = true

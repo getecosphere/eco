@@ -339,6 +339,14 @@ pub struct LxsManifest {
     pub docs: Vec<String>,
     #[serde(default)]
     pub compose: LxsCompose,
+    /// Base64 Ed25519 signature over the canonical attestation bytes
+    /// (`name`, `version`, `publisher`, and each arch's artifact sha256).
+    /// Empty means the release is unsigned.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attestation: String,
+    /// Base64 Ed25519 public key of the publisher that produced `attestation`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signing_key: String,
 }
 
 pub(crate) fn registry_root() -> Result<PathBuf, String> {
@@ -1285,12 +1293,56 @@ fn run_lxs_publish(args: &[String]) -> Result<(), String> {
         manifest.release.push(version.clone());
     }
 
+    // Publisher attestation: sign the canonical release identity so consumers
+    // can verify *who* produced the release, not just that the bytes match a
+    // hash that sits next to them. Best-effort: an unsigned build still
+    // publishes, it is simply marked unverified.
+    if let Ok(key) = crate::lxs_attest::load_or_create_signing_key() {
+        match crate::lxs_attest::sign(&key, &manifest_identity_bytes(&manifest)) {
+            Ok(sig) => {
+                manifest.attestation = crate::lxs_attest::b64(&sig);
+                if let Ok(pubkey) = crate::lxs_attest::public_key(&key) {
+                    manifest.signing_key = crate::lxs_attest::b64(&pubkey);
+                    let publisher = if manifest.publisher.is_empty() {
+                        name.clone()
+                    } else {
+                        manifest.publisher.clone()
+                    };
+                    let keys_dir = registry.join("keys");
+                    let _ = std::fs::create_dir_all(&keys_dir);
+                    let _ = std::fs::write(
+                        keys_dir.join(format!("{publisher}.pub")),
+                        format!("{}\n", crate::lxs_attest::b64(&pubkey)),
+                    );
+                    let digest = manifest_identity_sha256(&manifest);
+                    let _ = crate::lxs_attest::append_transparency(
+                        &registry,
+                        &name,
+                        &version,
+                        &manifest.publisher,
+                        &digest,
+                        &manifest.attestation,
+                    );
+                    println!("[eco lxs] signed {name}@{version} (attestation v1, publisher {publisher})");
+                }
+            }
+            Err(e) => eprintln!("[eco lxs] warning: could not sign release: {e}"),
+        }
+    }
+
     let manifest_yaml = serde_yaml::to_string(&manifest).map_err(|e| e.to_string())?;
     std::fs::write(version_dir.join("lxs.yml"), manifest_yaml).map_err(|e| e.to_string())?;
 
     let tag = format!("{name}-{version}");
+    let mut add_args = vec!["add".to_string(), format!("{name}/{version}")];
+    if registry.join("keys").is_dir() {
+        add_args.push("keys".to_string());
+    }
+    if registry.join("transparency.log").is_file() {
+        add_args.push("transparency.log".to_string());
+    }
     let git_args = [
-        vec!["add".to_string(), format!("{name}/{version}")],
+        add_args,
         vec![
             "-c".to_string(),
             "user.name=Eko SW".to_string(),
@@ -1771,6 +1823,323 @@ pub fn fetch_lxs_to_cache(
     }
     Ok((manifest, version, dest))
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// eco.lock — content lock for composed LXS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ECO_LOCK_FILE: &str = "eco.lock";
+
+/// A single pinned LXS in `eco.lock`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LockedLxs {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub registry: String,
+    #[serde(default)]
+    pub artifacts: HashMap<String, LxsArtifact>,
+    /// sha256 over the canonical release identity (name, version, publisher,
+    /// per-arch artifact hashes) — the exact bytes a publisher signs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attestation: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signing_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+}
+
+/// `eco.lock` — the resolved, pinned dependency set for an estate.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EcoLock {
+    pub version: u32,
+    #[serde(default)]
+    pub lxs: HashMap<String, LockedLxs>,
+}
+
+pub fn eco_lock_path(estate_root: &Path) -> PathBuf {
+    estate_root.join(ECO_LOCK_FILE)
+}
+
+pub fn read_eco_lock(estate_root: &Path) -> Option<EcoLock> {
+    let text = std::fs::read_to_string(eco_lock_path(estate_root)).ok()?;
+    serde_yaml::from_str(&text).ok()
+}
+
+/// Deterministic digest of an LXS contract: env schema, db, network, and
+/// resources. Bound into the publisher attestation so a registry cannot
+/// rewrite grants or egress rules without invalidating the signature.
+pub fn contract_sha256(m: &LxsManifest) -> String {
+    use sha2::Digest;
+    let c = &m.contract;
+    let mut s = String::new();
+    s.push_str(&format!("v={}\napi={}\ndb={}\n", c.version, c.api, c.db));
+    let mut inbound = c.network.inbound.clone();
+    let mut outbound = c.network.outbound.clone();
+    inbound.sort();
+    outbound.sort();
+    s.push_str(&format!("inbound={}\n", inbound.join(",")));
+    s.push_str(&format!("outbound={}\n", outbound.join(",")));
+    s.push_str(&format!(
+        "resources memory={} disk={} startup={}\n",
+        c.resources.memory, c.resources.disk, c.resources.startup_seconds
+    ));
+    let mut keys: Vec<&String> = c.env.fields.keys().collect();
+    keys.sort();
+    for k in keys {
+        let f = &c.env.fields[k];
+        s.push_str(&format!(
+            "field {k} required={} type={} managed={} secret={} default={}\n",
+            f.required, f.r#type, f.managed, f.secret, f.default
+        ));
+    }
+    let mut required = c.env.required.clone();
+    let mut optional = c.env.optional.clone();
+    required.sort();
+    optional.sort();
+    s.push_str(&format!(
+        "required={}\noptional={}\n",
+        required.join(","),
+        optional.join(",")
+    ));
+    crate::registry::hex_encode(&sha2::Sha256::digest(s.as_bytes()))
+}
+
+/// Canonical bytes a publisher signs / a lock pins. Deterministic: the
+/// per-arch artifact list is sorted, so the digest does not depend on
+/// HashMap iteration order.
+pub fn manifest_identity_bytes(m: &LxsManifest) -> Vec<u8> {
+    let artifacts: Vec<(String, String)> = m
+        .artifacts
+        .iter()
+        .map(|(arch, a)| (arch.clone(), a.sha256.clone()))
+        .collect();
+    crate::lxs_attest::canonical_bytes(
+        &m.name,
+        &m.version,
+        &m.publisher,
+        &artifacts,
+        &contract_sha256(m),
+    )
+}
+
+pub fn manifest_identity_sha256(m: &LxsManifest) -> String {
+    use sha2::Digest;
+    crate::registry::hex_encode(&sha2::Sha256::digest(manifest_identity_bytes(m)))
+}
+
+/// Outcome of checking a release's publisher attestation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attestation {
+    /// No signature on the release.
+    Unsigned,
+    /// Signature present but does not verify (tampered or malformed).
+    Invalid,
+    /// Signature verifies but the publisher key is not trusted locally.
+    SignedUntrusted,
+    /// Signature verifies against a trusted publisher key.
+    Verified,
+}
+
+impl Attestation {
+    pub fn status(&self) -> &'static str {
+        match self {
+            Attestation::Unsigned => "unverified",
+            Attestation::Invalid => "invalid",
+            Attestation::SignedUntrusted => "signed-untrusted",
+            Attestation::Verified => "verified",
+        }
+    }
+}
+
+/// Verify a manifest's attestation. `registry_root` is consulted for a
+/// publisher key at `<root>/keys/<publisher>.pub`.
+pub fn verify_manifest_attestation(m: &LxsManifest, registry_root: Option<&Path>) -> Attestation {
+    if m.attestation.is_empty() || m.signing_key.is_empty() {
+        return Attestation::Unsigned;
+    }
+    let (Ok(sig), Ok(key)) = (
+        crate::lxs_attest::unb64(&m.attestation),
+        crate::lxs_attest::unb64(&m.signing_key),
+    ) else {
+        return Attestation::Invalid;
+    };
+    let msg = manifest_identity_bytes(m);
+    if !crate::lxs_attest::verify(&key, &msg, &sig) {
+        return Attestation::Invalid;
+    }
+    match crate::lxs_attest::trusted_pubkey(&m.publisher, registry_root) {
+        Some(trusted) if trusted == key => Attestation::Verified,
+        _ => Attestation::SignedUntrusted,
+    }
+}
+
+/// Build a lock entry from a resolved manifest.
+pub fn locked_from_manifest(m: &LxsManifest, registry: &str) -> LockedLxs {
+    LockedLxs {
+        name: m.name.clone(),
+        version: m.version.clone(),
+        registry: registry.to_string(),
+        artifacts: m.artifacts.clone(),
+        manifest_sha256: manifest_identity_sha256(m),
+        attestation: m.attestation.clone(),
+        signing_key: m.signing_key.clone(),
+        status: verify_manifest_attestation(m, None).status().to_string(),
+    }
+}
+
+/// Enforce the lock for one composed service. Errors when the resolved version
+/// differs from the locked version, or when an artifact hash differs — the
+/// estate must then consciously re-lock.
+pub fn enforce_lock_entry(
+    entry: &LockedLxs,
+    manifest: &LxsManifest,
+    arch: &str,
+) -> Result<(), String> {
+    if entry.version != manifest.version {
+        return Err(format!(
+            "{} is locked to {} but resolution produced {} — run `eco lxs lock` to update (or `eco lxs update {}`).",
+            entry.name, entry.version, manifest.version, entry.name
+        ));
+    }
+    if !entry.manifest_sha256.is_empty()
+        && entry.manifest_sha256 != manifest_identity_sha256(manifest)
+    {
+        return Err(format!(
+            "{}@{} manifest changed since it was locked (artifact hashes differ); refusing to run. Review the change and re-run `eco lxs lock`.",
+            entry.name, entry.version
+        ));
+    }
+    if let (Some(locked), Some(actual)) = (entry.artifacts.get(arch), manifest.artifacts.get(arch)) {
+        if !locked.sha256.is_empty() && locked.sha256 != actual.sha256 {
+            return Err(format!(
+                "{}@{} {arch} artifact hash differs from eco.lock; refusing to run.",
+                entry.name, entry.version
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate that an estate's declared secret grants satisfy an LXS contract:
+/// every required secret field must be granted, and every granted secret must
+/// be a field the contract declares. v1 contracts (no `fields`) are skipped.
+pub fn validate_grants_against_contract(
+    service: &str,
+    granted: &[String],
+    manifest: &LxsManifest,
+) -> Result<(), String> {
+    let fields = &manifest.contract.env.fields;
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let is_secret = |f: &LxsField| f.secret || f.r#type == "secret";
+    let mut required_secret: Vec<String> = fields
+        .iter()
+        .filter(|(_, f)| f.required && is_secret(f))
+        .map(|(k, _)| k.clone())
+        .collect();
+    required_secret.sort();
+    let missing: Vec<String> = required_secret
+        .iter()
+        .filter(|k| !granted.iter().any(|g| g == *k))
+        .cloned()
+        .collect();
+    let undeclared: Vec<String> = granted
+        .iter()
+        .filter(|g| !fields.contains_key(g.as_str()))
+        .cloned()
+        .collect();
+    let mut errs = Vec::new();
+    if !missing.is_empty() {
+        errs.push(format!(
+            "missing required secret grant(s): {}",
+            missing.join(", ")
+        ));
+    }
+    if !undeclared.is_empty() {
+        errs.push(format!(
+            "undeclared secret grant(s) not in the {} contract: {}",
+            manifest.name,
+            undeclared.join(", ")
+        ));
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "service '{service}' ({}@{}): {}",
+            manifest.name,
+            manifest.version,
+            errs.join("; ")
+        ))
+    }
+}
+
+/// `eco lxs lock` — resolve every composed `lxs:` service and write `eco.lock`
+/// next to `ecompose.yml`, pinning versions, artifact hashes, and publisher
+/// attestation status.
+fn run_lxs_lock(args: &[String]) -> Result<(), String> {
+    let mut address: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--address" => {
+                address = Some(args.get(i + 1).cloned().unwrap_or_default());
+                i += 2;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown eco lxs lock option: {other}"))
+            }
+            other => return Err(format!("unexpected argument: {other}")),
+        }
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let ecompose_path = find_estate_ecompose(&cwd)?;
+    let estate_root = ecompose_path
+        .parent()
+        .ok_or("ecompose.yml has no parent directory")?
+        .to_path_buf();
+    let content = std::fs::read_to_string(&ecompose_path).map_err(|e| e.to_string())?;
+    let state = read_estate_state(&estate_root);
+    let effective = address
+        .clone()
+        .or_else(|| state.as_ref().map(|s| s.registry.clone()).filter(|r| !r.is_empty()));
+
+    let composed = composed_lxs(&content);
+    if composed.is_empty() {
+        return Err("no composed `lxs:` services found in ecompose.yml".to_string());
+    }
+    let mut lock = EcoLock {
+        version: 1,
+        lxs: HashMap::new(),
+    };
+    for (service, lxs_name, pinned_ref) in &composed {
+        let (manifest, version) = fetch_lxs_manifest(pinned_ref, effective.as_deref())?;
+        let attest = verify_manifest_attestation(&manifest, None);
+        println!(
+            "[eco lxs] lock {service}: {lxs_name}@{version} ({})",
+            attest.status()
+        );
+        lock.lxs.insert(
+            lxs_name.clone(),
+            locked_from_manifest(&manifest, effective.as_deref().unwrap_or("")),
+        );
+    }
+    let yaml = serde_yaml::to_string(&lock).map_err(|e| e.to_string())?;
+    let header = "# eco.lock — resolved LXS versions + artifact hashes. Generated by `eco lxs lock`; commit it.\n";
+    std::fs::write(eco_lock_path(&estate_root), format!("{header}{yaml}"))
+        .map_err(|e| format!("write eco.lock: {e}"))?;
+    println!(
+        "[eco lxs] wrote {} ({} LXS)",
+        eco_lock_path(&estate_root).display(),
+        lock.lxs.len()
+    );
+    Ok(())
+}
+
 fn collect_lxs_github(owner: &str, repo: &str, token: &str) -> Result<Vec<LxsManifest>, String> {
     let mut out = Vec::new();
     let root_url = github_api_contents_url(owner, repo, "");
@@ -1938,6 +2307,7 @@ fn run_lxs_verify(args: &[String]) -> Result<(), String> {
     let mut address: Option<String> = None;
     let mut reference = String::new();
     let mut arch = "linux/amd64".to_string();
+    let mut require_signed = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1948,6 +2318,10 @@ fn run_lxs_verify(args: &[String]) -> Result<(), String> {
             "--arch" => {
                 arch = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
+            }
+            "--require-signed" => {
+                require_signed = true;
+                i += 1;
             }
             other if other.starts_with('-') => {
                 return Err(format!("Unknown eco lxs verify option: {other}"))
@@ -1960,17 +2334,57 @@ fn run_lxs_verify(args: &[String]) -> Result<(), String> {
     }
     if reference.is_empty() {
         return Err(
-            "usage: eco lxs verify <name>@<version> [--arch linux/amd64] [--address <registry>]"
+            "usage: eco lxs verify <name>@<version> [--arch linux/amd64] [--address <registry>] [--require-signed]"
                 .to_string(),
         );
     }
+    // fetch_lxs_to_cache re-hashes the cached (or freshly downloaded) binary
+    // against manifest.artifacts[arch].sha256, so this call is the integrity
+    // check: a mismatch errors here.
     let (manifest, version, dest) = fetch_lxs_to_cache(&reference, &arch, address.as_deref())?;
+    let registry_root = registry_root().ok();
+    let attest = verify_manifest_attestation(&manifest, registry_root.as_deref());
     println!(
-        "[eco lxs] {reference} verified (v{version}, {} artifacts) -> {}",
+        "[eco lxs] {reference} integrity OK (v{version}, {} artifact(s) declared; {arch} -> {})",
         manifest.artifacts.len(),
         dest.display()
     );
-    Ok(())
+    match attest {
+        Attestation::Verified => {
+            println!(
+                "[eco lxs] attestation VERIFIED — signed by trusted publisher '{}'",
+                manifest.publisher
+            );
+            Ok(())
+        }
+        Attestation::SignedUntrusted => {
+            println!(
+                "[eco lxs] attestation signed by '{}' but the key is not trusted locally; pin it at ~/.eco/trusted-keys/{}.pub",
+                manifest.publisher, manifest.publisher
+            );
+            if require_signed {
+                return Err(format!("{reference}: publisher key is not trusted"));
+            }
+            Ok(())
+        }
+        Attestation::Invalid => Err(format!(
+            "{reference}: attestation is present but does not verify — possible tampering"
+        )),
+        Attestation::Unsigned => {
+            println!(
+                "[eco lxs] attestation: UNSIGNED (status '{}') — integrity only, publisher unknown",
+                if manifest.status.is_empty() {
+                    "unverified"
+                } else {
+                    &manifest.status
+                }
+            );
+            if require_signed {
+                return Err(format!("{reference}: release is not signed"));
+            }
+            Ok(())
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3327,8 +3741,23 @@ fn run_lxs_add(args: &[String]) -> Result<(), String> {
         None => name.clone(),
     };
     let (manifest, version, dest) = fetch_lxs_to_cache(&effective_ref, &arch, effective_address)?;
+    let attest = verify_manifest_attestation(&manifest, None);
+    match attest {
+        Attestation::Invalid => {
+            return Err(format!(
+                "{name}@{version} has an invalid publisher attestation — refusing to add"
+            ));
+        }
+        Attestation::Unsigned => {
+            eprintln!(
+                "[eco lxs] warning: {name}@{version} is unsigned (unverified); integrity checked against the manifest hash only"
+            );
+        }
+        _ => {}
+    }
     println!(
-        "[eco lxs] Added {name}@{version} ({arch}) -> {} [verified]",
+        "[eco lxs] Added {name}@{version} ({arch}, {}) -> {}",
+        attest.status(),
         dest.display()
     );
 
@@ -3429,6 +3858,7 @@ pub fn run_lxs(args: &[String]) -> Result<(), String> {
         "list" | "ls" => run_lxs_list(&args[1..]),
         "pull" => run_lxs_pull(&args[1..]),
         "verify" => run_lxs_verify(&args[1..]),
+        "lock" => run_lxs_lock(&args[1..]),
         "add" => run_lxs_add(&args[1..]),
         "setup" => run_lxs_setup(&args[1..]),
         "update" => run_lxs_update(&args[1..]),
@@ -3438,7 +3868,7 @@ pub fn run_lxs(args: &[String]) -> Result<(), String> {
         "init-registry" => run_lxs_init_registry(&args[1..]),
         "new" | "init" => run_lxs_new(&args[1..]),
         "help" | "-h" | "--help" => {
-            println!("eco lxs\n\nLXS (Linux Service) — versioned executable capabilities.\n\nUsage:\n  eco lxs new <name>                       scaffold a domain repo from a template\n  eco lxs build [path] [--arch linux/amd64,linux/arm64,darwin/arm64,darwin/amd64,windows/amd64]\n  eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]  (auto patch bump)\n  eco lxs add <name>[@<version>] [--address <registry>]   compose an LXS binary\n  eco lxs add .                            register the current folder as a source LXS\n  eco lxs update [name] [--address <registry>]   bump composed LXS to the latest\n  eco lxs outdated [--address <registry>]   show composed LXS vs latest (+ changelog)\n  eco lxs remove <name>                 remove a composed LXS service from ecompose.yml\n  eco lxs estates                          list estates on this machine\n  eco lxs init-registry [folder]           create a registry repo (git init + contract)\n  eco lxs search [query]\n  eco lxs list\n  eco lxs pull <name>@<version> [--arch linux/amd64]\n  eco lxs verify <name>@<version>\n");
+            println!("eco lxs\n\nLXS (Linux Service) — versioned executable capabilities.\n\nUsage:\n  eco lxs new <name>                       scaffold a domain repo from a template\n  eco lxs build [path] [--arch linux/amd64,linux/arm64,darwin/arm64,darwin/amd64,windows/amd64]\n  eco lxs publish <name>[@<version>] [--source <dir>] [--minor|--major]  (auto patch bump)\n  eco lxs add <name>[@<version>] [--address <registry>]   compose an LXS binary\n  eco lxs add .                            register the current folder as a source LXS\n  eco lxs update [name] [--address <registry>]   bump composed LXS to the latest\n  eco lxs outdated [--address <registry>]   show composed LXS vs latest (+ changelog)\n  eco lxs remove <name>                 remove a composed LXS service from ecompose.yml\n  eco lxs estates                          list estates on this machine\n  eco lxs init-registry [folder]           create a registry repo (git init + contract)\n  eco lxs search [query]\n  eco lxs list\n  eco lxs pull <name>@<version> [--arch linux/amd64]\n  eco lxs verify <name>@<version>\n  eco lxs lock [--address <registry>]          pin composed LXS into eco.lock\n");
             Ok(())
         }
         other => Err(format!(
@@ -3804,5 +4234,81 @@ mod tests {
         assert!(out.contains("grants: { secrets: [JWT_SECRET] }"));
         assert!(out.contains("strip: /auth-api"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn secret_contract() -> LxsManifest {
+        let mut fields = HashMap::new();
+        let mut jwt = field("secret", "", true, "shared-jwt");
+        jwt.required = true;
+        fields.insert("JWT_SECRET".to_string(), jwt);
+        fields.insert("MONGODB_URI".to_string(), field("uri", "", false, "mongo-db"));
+        fields.insert("SERVER_PORT".to_string(), field("int", "", false, "port"));
+        fields.insert("BREVO_API_KEY".to_string(), field("secret", "", false, ""));
+        LxsManifest {
+            name: "auth".to_string(),
+            version: "3.9.0".to_string(),
+            contract: LxsContract {
+                env: LxsEnv {
+                    fields,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grants_cover_required_secret_and_reject_undeclared() {
+        let m = secret_contract();
+        // JWT_SECRET is required+secret; MONGODB_URI is declared but not a secret.
+        assert!(validate_grants_against_contract(
+            "auth-backend",
+            &["JWT_SECRET".to_string(), "MONGODB_URI".to_string()],
+            &m
+        )
+        .is_ok());
+        // Missing the required secret is rejected.
+        let err = validate_grants_against_contract("auth-backend", &[], &m).unwrap_err();
+        assert!(err.contains("JWT_SECRET"), "{err}");
+        // Granting a key the contract never declares is rejected.
+        let err = validate_grants_against_contract(
+            "auth-backend",
+            &["JWT_SECRET".to_string(), "NOT_IN_CONTRACT".to_string()],
+            &m,
+        )
+        .unwrap_err();
+        assert!(err.contains("NOT_IN_CONTRACT"), "{err}");
+        // An optional secret need not be granted.
+        assert!(validate_grants_against_contract("auth-backend", &["JWT_SECRET".to_string()], &m).is_ok());
+    }
+
+    #[test]
+    fn lock_rejects_version_and_hash_drift() {
+        let mut m = secret_contract();
+        m.artifacts.insert(
+            "linux/amd64".to_string(),
+            LxsArtifact {
+                path: "linux-amd64/auth".to_string(),
+                sha256: "a".repeat(64),
+                size: 1,
+            },
+        );
+        let entry = locked_from_manifest(&m, "local");
+        assert!(enforce_lock_entry(&entry, &m, "linux/amd64").is_ok());
+
+        // Different resolved version than the lock.
+        let mut bumped = m.clone();
+        bumped.version = "3.10.0".to_string();
+        assert!(enforce_lock_entry(&entry, &bumped, "linux/amd64").is_err());
+
+        // Same version, different artifact digest (silent re-publish).
+        let mut drifted = m.clone();
+        drifted
+            .artifacts
+            .get_mut("linux/amd64")
+            .unwrap()
+            .sha256 = "b".repeat(64);
+        assert!(enforce_lock_entry(&entry, &drifted, "linux/amd64").is_err());
     }
 }

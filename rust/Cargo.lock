@@ -262,6 +262,7 @@ dependencies = [
  "libc",
  "pbkdf2",
  "rand",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
